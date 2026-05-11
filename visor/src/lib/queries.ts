@@ -1762,6 +1762,359 @@ export async function fetchZonas(): Promise<Zona[]> {
   return (data ?? []) as Zona[];
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// MÓDULO 6 — POSTVENTA
+// ═══════════════════════════════════════════════════════════════════════
+
+export type EstadoGarantia = 'abierta' | 'en_diagnostico' | 'en_reparacion' | 'resuelta' | 'rechazada' | 'cerrada';
+export type ResponsableGarantia = 'empresa' | 'cliente' | 'tercero';
+export const TIPOS_MANTENIMIENTO = ['lavado','perfilado','cambio_cadenilla','cambio_control','cambio_tubo','nivelacion','ajuste_soporte','cambio_peso_inferior','otro'] as const;
+export type TipoMantenimiento = typeof TIPOS_MANTENIMIENTO[number];
+export type ResultadoMantenimiento = 'completo' | 'parcial' | 'no_aplicable' | 'pendiente_repuesto' | 'reagendado';
+export type EstadoSatisfaccion = 'feliz' | 'confundido' | 'molesto' | 'sin_respuesta' | 'pendiente_ajuste';
+export type EstadoReview = 'no_apto' | 'apto' | 'solicitada' | 'recibida' | 'rechazada_cliente' | 'ignorada';
+export const MOTIVOS_RECLAMO = ['cliente_molesto','garantia_mal_manejada','dano_costoso','publicacion_negativa','mala_resena','incumplimiento','otro'] as const;
+export type MotivoReclamo = typeof MOTIVOS_RECLAMO[number];
+export type SeveridadReclamo = 'baja' | 'media' | 'alta' | 'critica';
+export type EstadoReclamo = 'abierto' | 'en_contencion' | 'escalado' | 'resuelto' | 'cerrado_negativo';
+
+export interface CausaGarantia {
+  codigo: string;
+  nombre: string;
+  responsable_default: ResponsableGarantia;
+  notas: string | null;
+}
+
+export interface Garantia {
+  id: number;
+  cotizacion_id: number | null;
+  instalacion_id: number | null;
+  persona_id: number | null;
+  sistema_safra_codigo: string | null;
+  fecha_apertura: string;
+  causa_codigo: string;
+  responsable: ResponsableGarantia | null;
+  costo: number;
+  solucion: string | null;
+  estado: EstadoGarantia;
+  fecha_cierre: string | null;
+  evidencia_urls: string[] | null;
+  notas: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface Mantenimiento {
+  id: number;
+  cotizacion_id: number | null;
+  persona_id: number | null;
+  tipo: TipoMantenimiento;
+  fecha_programada: string | null;
+  fecha_real: string | null;
+  instalador: string | null;
+  costo: number;
+  resultado: ResultadoMantenimiento | null;
+  notas: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface SatisfaccionPostventa {
+  id: number;
+  instalacion_id: number | null;
+  cotizacion_id: number | null;
+  persona_id: number | null;
+  estado_cliente: EstadoSatisfaccion;
+  fecha_check: string;
+  fuente: string | null;
+  notas: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface GoogleReview {
+  id: number;
+  persona_id: number | null;
+  cotizacion_id: number | null;
+  apto_para_resena: boolean;
+  solicitud_enviada_at: string | null;
+  resena_recibida_at: string | null;
+  estrellas: number | null;
+  comentario: string | null;
+  url_resena: string | null;
+  estado: EstadoReview;
+  notas: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface ReclamoSensible {
+  id: number;
+  persona_id: number | null;
+  cotizacion_id: number | null;
+  garantia_id: number | null;
+  motivo: MotivoReclamo;
+  severidad: SeveridadReclamo;
+  estado: EstadoReclamo;
+  escalado_a: string | null;
+  fecha_apertura: string;
+  fecha_resolucion: string | null;
+  acciones_tomadas: string | null;
+  resultado: string | null;
+  notas: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface Reputacion {
+  reviews_total: number;
+  estrellas_promedio: number | null;
+  cinco_estrellas: number;
+  tres_o_menos: number;
+  solicitadas_pendientes: number;
+  aptos_sin_solicitar: number;
+  clientes_felices: number;
+  clientes_molestos: number;
+  reclamos_activos: number;
+  reclamos_alta_severidad: number;
+}
+
+// ── Catálogo de causas (existente desde 003) ────────────────────────
+
+export async function fetchCausasGarantia(): Promise<CausaGarantia[]> {
+  const { data, error } = await supabase.from('causas_garantia').select('*').order('codigo');
+  if (error) throw error;
+  return (data ?? []) as CausaGarantia[];
+}
+
+// ── Garantías (6.1) ──────────────────────────────────────────────────
+
+export async function fetchGarantiasPorPersona(personaId: number): Promise<Garantia[]> {
+  const { data, error } = await supabase
+    .from('garantias')
+    .select('*')
+    .eq('persona_id', personaId)
+    .eq('shadow', false)
+    .is('deleted_at', null)
+    .order('fecha_apertura', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as Garantia[];
+}
+
+export interface CrearGarantiaInput {
+  cotizacion_id?: number | null;
+  instalacion_id?: number | null;
+  persona_id: number;
+  sistema_safra_codigo?: string | null;
+  fecha_apertura?: string;
+  causa_codigo: string;
+  responsable?: ResponsableGarantia | null;
+  costo?: number;
+  solucion?: string | null;
+  estado?: EstadoGarantia;
+  notas?: string | null;
+}
+
+export async function crearGarantia(input: CrearGarantiaInput): Promise<Garantia> {
+  const { data, error } = await supabase
+    .from('garantias')
+    .insert({
+      cotizacion_id: input.cotizacion_id ?? null,
+      instalacion_id: input.instalacion_id ?? null,
+      persona_id: input.persona_id,
+      sistema_safra_codigo: input.sistema_safra_codigo ?? null,
+      fecha_apertura: input.fecha_apertura ?? new Date().toISOString().slice(0, 10),
+      causa_codigo: input.causa_codigo,
+      responsable: input.responsable ?? null,
+      costo: input.costo ?? 0,
+      solucion: input.solucion ?? null,
+      estado: input.estado ?? 'abierta',
+      notas: input.notas ?? null,
+      actualizado_por: 1,
+    })
+    .select('*').single();
+  if (error) throw error;
+  return data as Garantia;
+}
+
+export async function actualizarGarantia(id: number, patch: Partial<Garantia>): Promise<void> {
+  const { error } = await supabase.from('garantias').update({ ...patch, actualizado_por: 1 }).eq('id', id);
+  if (error) throw error;
+}
+
+export async function eliminarGarantia(id: number): Promise<void> {
+  const { error } = await supabase.from('garantias').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+  if (error) throw error;
+}
+
+// ── Mantenimientos (6.2) ─────────────────────────────────────────────
+
+export async function fetchMantenimientosPorPersona(personaId: number): Promise<Mantenimiento[]> {
+  const { data, error } = await supabase
+    .from('mantenimientos').select('*')
+    .eq('persona_id', personaId).eq('shadow', false).is('deleted_at', null)
+    .order('fecha_programada', { ascending: false, nullsFirst: false });
+  if (error) throw error;
+  return (data ?? []) as Mantenimiento[];
+}
+
+export interface CrearMantenimientoInput {
+  cotizacion_id?: number | null;
+  persona_id: number;
+  tipo: TipoMantenimiento;
+  fecha_programada?: string | null;
+  fecha_real?: string | null;
+  instalador?: string | null;
+  costo?: number;
+  resultado?: ResultadoMantenimiento | null;
+  notas?: string | null;
+}
+
+export async function crearMantenimiento(input: CrearMantenimientoInput): Promise<Mantenimiento> {
+  const { data, error } = await supabase
+    .from('mantenimientos')
+    .insert({ ...input, costo: input.costo ?? 0, actualizado_por: 1 })
+    .select('*').single();
+  if (error) throw error;
+  return data as Mantenimiento;
+}
+
+export async function actualizarMantenimiento(id: number, patch: Partial<Mantenimiento>): Promise<void> {
+  const { error } = await supabase.from('mantenimientos').update({ ...patch, actualizado_por: 1 }).eq('id', id);
+  if (error) throw error;
+}
+
+export async function eliminarMantenimiento(id: number): Promise<void> {
+  const { error } = await supabase.from('mantenimientos').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+  if (error) throw error;
+}
+
+// ── Satisfacción (6.3) ───────────────────────────────────────────────
+
+export async function fetchSatisfaccionPorPersona(personaId: number): Promise<SatisfaccionPostventa[]> {
+  const { data, error } = await supabase
+    .from('satisfaccion_postventa').select('*')
+    .eq('persona_id', personaId).eq('shadow', false).is('deleted_at', null)
+    .order('fecha_check', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as SatisfaccionPostventa[];
+}
+
+export interface CrearSatisfaccionInput {
+  instalacion_id?: number | null;
+  cotizacion_id?: number | null;
+  persona_id: number;
+  estado_cliente: EstadoSatisfaccion;
+  fecha_check?: string;
+  fuente?: string | null;
+  notas?: string | null;
+}
+
+export async function crearSatisfaccion(input: CrearSatisfaccionInput): Promise<SatisfaccionPostventa> {
+  const { data, error } = await supabase
+    .from('satisfaccion_postventa')
+    .insert({ ...input, actualizado_por: 1 })
+    .select('*').single();
+  if (error) throw error;
+  return data as SatisfaccionPostventa;
+}
+
+// ── Google Reviews (6.4) ─────────────────────────────────────────────
+
+export async function fetchReviewsPorPersona(personaId: number): Promise<GoogleReview[]> {
+  const { data, error } = await supabase
+    .from('google_reviews').select('*')
+    .eq('persona_id', personaId).eq('shadow', false).is('deleted_at', null)
+    .order('updated_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as GoogleReview[];
+}
+
+export async function upsertReview(personaId: number, cotizacionId: number | null, patch: Partial<GoogleReview>): Promise<GoogleReview> {
+  let existingId: number | null = null;
+  if (cotizacionId) {
+    const { data } = await supabase.from('google_reviews')
+      .select('id').eq('persona_id', personaId).eq('cotizacion_id', cotizacionId).is('deleted_at', null).maybeSingle();
+    existingId = data?.id ?? null;
+  }
+  if (existingId) {
+    const { data, error } = await supabase
+      .from('google_reviews')
+      .update({ ...patch, actualizado_por: 1 })
+      .eq('id', existingId).select('*').single();
+    if (error) throw error;
+    return data as GoogleReview;
+  }
+  const { data, error } = await supabase
+    .from('google_reviews')
+    .insert({ persona_id: personaId, cotizacion_id: cotizacionId, ...patch, actualizado_por: 1 })
+    .select('*').single();
+  if (error) throw error;
+  return data as GoogleReview;
+}
+
+// ── Reclamos sensibles (6.5) ─────────────────────────────────────────
+
+export async function fetchReclamosPorPersona(personaId: number): Promise<ReclamoSensible[]> {
+  const { data, error } = await supabase
+    .from('reclamos_sensibles').select('*')
+    .eq('persona_id', personaId).eq('shadow', false).is('deleted_at', null)
+    .order('severidad', { ascending: false })  // critica > alta > media > baja alfabéticamente
+    .order('fecha_apertura', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as ReclamoSensible[];
+}
+
+export interface CrearReclamoInput {
+  persona_id: number;
+  cotizacion_id?: number | null;
+  garantia_id?: number | null;
+  motivo: MotivoReclamo;
+  severidad?: SeveridadReclamo;
+  escalado_a?: string | null;
+  acciones_tomadas?: string | null;
+  notas?: string | null;
+}
+
+export async function crearReclamo(input: CrearReclamoInput): Promise<ReclamoSensible> {
+  const { data, error } = await supabase
+    .from('reclamos_sensibles')
+    .insert({ ...input, severidad: input.severidad ?? 'media', actualizado_por: 1 })
+    .select('*').single();
+  if (error) throw error;
+  return data as ReclamoSensible;
+}
+
+export async function actualizarReclamo(id: number, patch: Partial<ReclamoSensible>): Promise<void> {
+  const extra: any = { actualizado_por: 1 };
+  if (patch.estado === 'resuelto' && !patch.fecha_resolucion) extra.fecha_resolucion = new Date().toISOString().slice(0, 10);
+  const { error } = await supabase.from('reclamos_sensibles').update({ ...patch, ...extra }).eq('id', id);
+  if (error) throw error;
+}
+
+// ── Reputación global ────────────────────────────────────────────────
+
+export async function fetchReputacion(): Promise<Reputacion | null> {
+  const { data, error } = await supabase.from('vw_reputacion').select('*').maybeSingle();
+  if (error) throw error;
+  return data as Reputacion | null;
+}
+
 // ─── Eventos (detalle + linaje) ──────────────────────────────────────
 
 export async function fetchEventoDetalle(eventoId: number): Promise<any | null> {
