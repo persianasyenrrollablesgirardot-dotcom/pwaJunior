@@ -24,42 +24,52 @@ export function Referidos() {
   const [referidor, setReferidor] = useState<ReferidoConMetricas | null>(null);
   const [propios, setPropios] = useState<ReferidoConMetricas | null>(null);
   const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (ctx.personaActivaId == null) return;
-    setCargando(true);
+    setCargando(true); setError(null);
     (async () => {
       // Cliente activo + a quién refirió + quién lo refirió
-      const { data: persona } = await supabase.from('personas')
+      const { data: persona, error: e1 } = await supabase.from('personas')
         .select('id, nombre, referido_por_persona_id')
         .eq('id', ctx.personaActivaId).single();
+      if (e1 || !persona) throw new Error(`No pude leer persona activa: ${e1?.message ?? 'desconocido'}`);
 
-      const { data: refList } = await supabase.from('personas')
+      const { data: refList, error: e2 } = await supabase.from('personas')
         .select('id, nombre')
         .eq('referido_por_persona_id', ctx.personaActivaId)
         .is('deleted_at', null);
+      if (e2) throw new Error(`No pude leer lista de referidos: ${e2.message}`);
 
       // Métricas del cliente activo
       const propias = await metricsPersona(ctx.personaActivaId!);
-      setPropios({ persona_id: persona!.id, nombre: persona!.nombre, ...propias });
+      setPropios({ persona_id: persona.id, nombre: persona.nombre, ...propias });
 
-      // Métricas de cada referido
+      // Métricas de cada referido (paralelo)
       const conMetricas = await Promise.all((refList ?? []).map(async (r: any) => ({
         persona_id: r.id, nombre: r.nombre, ...(await metricsPersona(r.id)),
       })));
       setReferidos(conMetricas);
 
       // Referidor (quién refirió al cliente activo)
-      if (persona?.referido_por_persona_id) {
+      if (persona.referido_por_persona_id) {
         const { data: refr } = await supabase.from('personas').select('id, nombre').eq('id', persona.referido_por_persona_id).single();
         if (refr) setReferidor({ persona_id: refr.id, nombre: refr.nombre, ...(await metricsPersona(refr.id)) });
       } else { setReferidor(null); }
-
-      setCargando(false);
-    })().catch(() => setCargando(false));
+    })()
+      .catch(e => { console.error('[M2-Referidos]', e); setError(e.message ?? String(e)); })
+      .finally(() => setCargando(false));
   }, [ctx.personaActivaId]);
 
   if (cargando) return <div style={{ padding: 30, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>Cargando red de referidos…</div>;
+  if (error) return (
+    <div style={{ padding: 24 }}>
+      <div style={{ padding: 12, background: '#ffe5e5', color: 'var(--red)', borderRadius: 6, fontSize: 12 }}>
+        Error cargando referidos: {error}
+      </div>
+    </div>
+  );
 
   const totalRedGanado = (propios?.monto_ganado ?? 0) + referidos.reduce((a, r) => a + r.monto_ganado, 0);
 

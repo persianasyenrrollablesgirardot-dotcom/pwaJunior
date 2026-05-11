@@ -102,13 +102,16 @@ function ModalCrear({ cotizacionId, tipos, onClose, onDone, onError }: {
   onClose: () => void; onDone: () => Promise<void>; onError: (msg: string) => void;
 }) {
   const ctx = useContextoActivo();
-  const [tipo, setTipo] = useState(tipos[0]?.codigo ?? '');
+  const [tipo, setTipo] = useState('');
   const [texto, setTexto] = useState('');
   const [respuesta, setRespuesta] = useState('');
   const [resultado, setResultado] = useState<'resuelto' | 'persiste' | 'cliente_se_fue' | 'pendiente'>('pendiente');
 
   async function guardar() {
-    if (!tipo) return;
+    if (!tipo) {
+      onError('Seleccioná un tipo de objeción primero.');
+      return;
+    }
     try {
       await crearObjecion({
         cotizacion_id: cotizacionId,
@@ -127,8 +130,14 @@ function ModalCrear({ cotizacionId, tipos, onClose, onDone, onError }: {
     <div onClick={onClose} style={overlay}>
       <div onClick={e => e.stopPropagation()} style={{ ...modalBox, maxWidth: 540 }}>
         <h3 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 700 }}>Registrar objeción</h3>
+        {tipos.length === 0 && (
+          <div style={{ padding: 10, background: '#ffe5e5', color: 'var(--red)', borderRadius: 6, fontSize: 12, marginBottom: 12 }}>
+            ⚠ No hay tipos de objeción cargados en la BD. Hablá con Claude para arreglarlo antes de continuar.
+          </div>
+        )}
         <Field label="Tipo">
           <select value={tipo} onChange={e => setTipo(e.target.value)} style={inp}>
+            <option value="">— Seleccioná un tipo —</option>
             {tipos.map(t => <option key={t.codigo} value={t.codigo}>{t.etiqueta}</option>)}
           </select>
         </Field>

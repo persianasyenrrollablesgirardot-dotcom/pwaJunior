@@ -146,6 +146,9 @@ function CardCotizacion({ cot, onClick }: { cot: Cotizacion; onClick: () => void
         </div>
       )}
       <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--text-muted)' }}>
+        {Number(cot.subtotal) === 0 && Number(cot.total) === 0 && (
+          <span style={{ background: 'var(--bg-page)', color: 'var(--text-muted)', padding: '1px 6px', borderRadius: 4, fontSize: 10, fontWeight: 600 }}>SIN PRODUCTOS</span>
+        )}
         <span><strong>Total:</strong> {fmtCop(Number(cot.total))}</span>
         {cot.abono_monto != null && Number(cot.abono_monto) > 0 && (
           <span><strong>Abono:</strong> {fmtCop(Number(cot.abono_monto))}</span>
@@ -206,8 +209,12 @@ function ModalCotizacion({ cotizacion, onClose, onChange, onDone, onError }: {
   }
 
   async function agregarItem() {
+    if (sistemas.length === 0) {
+      onError('No hay sistemas Safra cargados en la BD. Verificá la conexión a Supabase.');
+      return;
+    }
     setEditandoItem({
-      cantidad: 1, precio_unitario: 0, ambiente: '', sistema_safra_codigo: sistemas[0]?.codigo,
+      cantidad: 1, precio_unitario: 0, ambiente: '', sistema_safra_codigo: sistemas[0].codigo,
       ancho_m: undefined, alto_m: undefined, color: '', quien_midio: 'tecnico',
       orden: items.length,
     });

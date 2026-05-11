@@ -196,7 +196,23 @@ async function seed(c) {
     VALUES ($1, 'TEST-REFB-001', CURRENT_DATE, 'ganada', 1800000, 1800000, 1800000, 0)
   `, [B]);
 
-  return { A, B, C: C_ID, D, E, proyectoA, chatA };
+  step('Insertando 2da cotización (TEST-COT-002) para A para testear Comparador…');
+  const cot2 = await c.query(`
+    INSERT INTO cotizaciones
+      (persona_id, proyecto_id, numero_cotizacion, fecha, estado, subtotal, total, saldo)
+    VALUES ($1, $2, 'TEST-COT-002', CURRENT_DATE, 'negociando', 2500000, 2500000, 2500000)
+    RETURNING id
+  `, [A, proyectoA]);
+  const cot2Id = Number(cot2.rows[0].id);
+  await c.query(`
+    INSERT INTO cotizacion_items
+      (cotizacion_id, sistema_safra_codigo, ambiente, ancho_m, alto_m, cantidad, precio_unitario, monto_total, quien_midio, orden)
+    VALUES
+      ($1, 'blackout',       'Sala',     2.50, 1.80, 1, 1500000, 1500000, 'tecnico', 0),
+      ($1, 'screen_solar',   'Comedor',  1.80, 1.50, 1, 1000000, 1000000, 'tecnico', 1)
+  `, [cot2Id]);
+
+  return { A, B, C: C_ID, D, E, proyectoA, chatA, cot2Id };
 }
 
 // ─── 3. CHROME / PUPPETEER ───────────────────────────────────────────────
@@ -216,6 +232,9 @@ async function openVisor(browser) {
   const page = await browser.newPage();
   await page.bringToFront();
   await page.goto('http://localhost:5173', { waitUntil: 'networkidle2', timeout: 30_000 });
+  // Limpiar sessionStorage para empezar con contexto activo vacío
+  await page.evaluate(() => { try { sessionStorage.clear(); } catch {} });
+  await page.reload({ waitUntil: 'networkidle2' });
   await sleep(800);
   return page;
 }
@@ -251,19 +270,22 @@ async function abrirModalItem(page) {
   await sleep(300);
 }
 
-// Click elemento por texto exacto o parcial
+// Click elemento por texto. Usa evaluate (más confiable contra overlays/React).
 async function clickByText(page, selector, text, { exact = false, idx = 0 } = {}) {
-  const handle = await page.evaluateHandle((sel, txt, ex, i) => {
+  await page.bringToFront();
+  const clicked = await page.evaluate((sel, txt, ex, i) => {
     const els = [...document.querySelectorAll(sel)];
     const matches = els.filter(e => {
       const t = (e.textContent || '').trim();
       return ex ? t === txt : t.includes(txt);
     });
-    return matches[i] ?? null;
+    const target = matches[i];
+    if (!target) return false;
+    target.scrollIntoView({ block: 'center' });
+    target.click();
+    return true;
   }, selector, text, exact, idx);
-  const el = handle.asElement();
-  if (!el) { handle.dispose?.(); throw new Error(`no encuentro "${selector}" con texto "${text}"`); }
-  await el.click();
+  if (!clicked) throw new Error(`no encuentro "${selector}" con texto "${text}"`);
   await sleep(300);
 }
 
@@ -292,7 +314,6 @@ async function setInputValue(page, sel, value) {
 // modal con mayor z-index (el más reciente).
 async function fillFieldByLabel(page, labelText, value) {
   const result = await page.evaluate((lt, v) => {
-    // Identificar el contenedor "más arriba" (modal con z-index más alto)
     const allEls = [...document.querySelectorAll('[style*="z-index"]')];
     let topContainer = document.body;
     let maxZ = -1;
@@ -304,7 +325,6 @@ async function fillFieldByLabel(page, labelText, value) {
         topContainer = el;
       }
     }
-    // Buscar la label dentro del top container, o caer al document
     const search = (root) => {
       const labels = [...root.querySelectorAll('label')];
       return labels.find(l => (l.textContent || '').toLowerCase().includes(lt.toLowerCase()));
@@ -314,27 +334,59 @@ async function fillFieldByLabel(page, labelText, value) {
     if (!lab) return { ok: false, reason: 'no-label', maxZ };
     const input = lab.querySelector('input, textarea, select');
     if (!input) return { ok: false, reason: 'no-input' };
-    const proto = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype
-                : input.tagName === 'SELECT'   ? HTMLSelectElement.prototype
-                : HTMLInputElement.prototype;
+
+    if (input.tagName === 'SELECT') {
+      const options = [...input.options];
+      const idx = options.findIndex(o => o.value === v);
+      if (idx < 0) {
+        return { ok: false, reason: 'option-not-found', want: v, available: options.map(o => o.value) };
+      }
+      input.selectedIndex = idx;
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(input, v);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true };
+    }
+
+    const proto = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto, 'value').set.call(input, v);
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
     return { ok: true };
   }, labelText, value);
-  if (!result.ok) throw new Error(`fillFieldByLabel("${labelText}") falló — ${result.reason ?? 'unknown'}`);
+  if (!result.ok) {
+    const extra = result.reason === 'option-not-found'
+      ? ` (want="${result.want}", available=[${(result.available ?? []).join(',')}])`
+      : '';
+    throw new Error(`fillFieldByLabel("${labelText}", "${value}") falló — ${result.reason ?? 'unknown'}${extra}`);
+  }
 }
 
 // ─── 4. DRIVERS DE PANTALLAS ─────────────────────────────────────────────
 
 async function navegarModulo(page, txt) {
-  await clickByText(page, 'button', txt);
-  await sleep(600);
+  await page.bringToFront();
+  const clicked = await page.evaluate((t) => {
+    const btn = [...document.querySelectorAll('button')].find(b => (b.textContent || '').trim() === t);
+    if (!btn) return false;
+    btn.scrollIntoView({ block: 'center' });
+    btn.click();
+    return true;
+  }, txt);
+  if (!clicked) throw new Error(`navegarModulo: no encuentro botón sidebar "${txt}"`);
+  await sleep(800);
 }
 
 async function navegarSubTab(page, txt) {
-  await clickByText(page, 'button', txt);
-  await sleep(400);
+  await page.bringToFront();
+  const clicked = await page.evaluate((t) => {
+    const btn = [...document.querySelectorAll('button')].find(b => (b.textContent || '').includes(t));
+    if (!btn) return false;
+    btn.click();
+    return true;
+  }, txt);
+  if (!clicked) throw new Error(`navegarSubTab: no encuentro botón "${txt}"`);
+  await sleep(500);
 }
 
 async function ui_clientesSeleccionar(page, terminoBusqueda, nombrePersona) {
@@ -375,9 +427,12 @@ async function ui_m2Cotizaciones(page) {
   // El sub-tab default debería ser 2.1; si no, lo clickeamos
   try { await navegarSubTab(page, 'Cotizaciones'); } catch {}
 
-  // Click "+ Nueva cotización"
+  // Click "+ Nueva cotización" → esperar modal cotización
   await clickByText(page, 'button', '+ Nueva cotización');
-  await sleep(1200);
+  await waitForCondition(page,
+    () => [...document.querySelectorAll('h2')].some(h => /Cotización/.test(h.textContent || '')),
+    8000, 'modal cotización visible');
+  await sleep(500);
   await shot(page, '04_modal_cotizacion_abierto');
 
   // Setear número y descuento + IVA
@@ -440,14 +495,40 @@ async function ui_m2Cotizaciones(page) {
   await shot(page, '08_despues_guardar_cotizacion');
 }
 
+async function ui_m2Comparador(page) {
+  step('UI → M2 → 2.2 Comparador → validar 2 cotizaciones lado a lado…');
+  await navegarSubTab(page, 'Comparador');
+  await sleep(1200);
+  const body = await page.evaluate(() => document.body.innerText);
+  // El "empty state" dice "Necesitás al menos 2"; si aparece, ya falló
+  record('Comparador NO muestra "Necesitás al menos 2"', !body.includes('Necesitás al menos 2'));
+  // Auto-selecciona las 2 más recientes; deben aparecer ambos numeros en pantalla
+  record('Comparador muestra TEST-COT-001', body.includes('TEST-COT-001'));
+  record('Comparador muestra TEST-COT-002', body.includes('TEST-COT-002'));
+  // Verificar que las 2 columnas se rendericen (subtotal de cada cot)
+  const columnasCount = await page.evaluate(() => {
+    return [...document.querySelectorAll('h2')].some(h => /Comparador de cotizaciones/.test(h.textContent || ''))
+      ? document.querySelectorAll('[style*="grid-template-columns"]').length
+      : 0;
+  });
+  record('Comparador renderizó el grid', columnasCount > 0);
+  await shot(page, '08b_comparador');
+}
+
 async function ui_m2Objeciones(page) {
   step('UI → M2 → 2.3 Objeciones → registrar 1 objeción…');
   await navegarSubTab(page, 'Objeciones');
-  await sleep(800);
+  await sleep(1200);  // recargar fetches cotizaciones + objeciones + tipos
   await shot(page, '09_objeciones_inicial');
 
   await clickByText(page, 'button', '+ Registrar objeción');
-  await sleep(800);
+  // Esperar a que las options del select Tipo carguen (la opción "precio" debe existir)
+  await waitForCondition(page,
+    () => {
+      const sels = [...document.querySelectorAll('select')];
+      return sels.some(s => [...s.options].some(o => o.value === 'precio'));
+    }, 5000, 'select Tipo con opciones cargadas');
+  await sleep(200);
   await fillFieldByLabel(page, 'Tipo', 'precio');
   await fillFieldByLabel(page, 'Frase exacta del cliente', 'está muy caro comparado con otro proveedor');
   await fillFieldByLabel(page, '¿Qué se respondió', 'Le ofrecí 10% de descuento si paga al contado');
@@ -580,12 +661,15 @@ async function verificarSQL(c, personaA) {
       Number(items[1].monto_total) === 840000, `BD ${items[1].monto_total}`);
   }
 
-  // Objeción
+  // Objeción (en CUALQUIERA de las cotizaciones de la persona A — la UI elige
+  // la card más arriba que puede no ser TEST-COT-001 según el orden de fecha)
   const { rows: objs } = await c.query(
-    `SELECT * FROM cotizacion_objeciones WHERE cotizacion_id = $1 AND deleted_at IS NULL`,
-    [cot.id],
+    `SELECT o.* FROM cotizacion_objeciones o
+     JOIN cotizaciones c ON c.id = o.cotizacion_id
+     WHERE c.persona_id = $1 AND o.deleted_at IS NULL`,
+    [personaA],
   );
-  record(`Objeción registrada (tipo=precio)`,
+  record(`Objeción registrada (tipo=precio) en alguna cotización de la persona`,
     objs.length === 1 && objs[0].tipo_objecion_codigo === 'precio',
     `${objs.length} objeciones, tipo="${objs[0]?.tipo_objecion_codigo}"`,
   );
@@ -596,8 +680,8 @@ async function verificarSQL(c, personaA) {
   );
   record(`vw_comerciales_resumen incluye persona A`, resumen.length === 1);
   if (resumen.length) {
-    record(`Resumen: cotizaciones_total = 1`,
-      Number(resumen[0].cotizaciones_total) === 1,
+    record(`Resumen: cotizaciones_total = 2 (seed TEST-COT-002 + UI TEST-COT-001)`,
+      Number(resumen[0].cotizaciones_total) === 2,
       `BD ${resumen[0].cotizaciones_total}`,
     );
     record(`Resumen: saldo_pendiente_total > 0`,
@@ -642,6 +726,7 @@ async function main() {
     page = await openVisor(browser);
     await ui_clientesSeleccionar(page, '5551001', `${TEST_TAG} Alfa Bermúdez`);
     await ui_m2Cotizaciones(page);
+    await ui_m2Comparador(page);
     await ui_m2Objeciones(page);
     await ui_m2Seguimiento(page);
     await ui_m2Referidos(page);

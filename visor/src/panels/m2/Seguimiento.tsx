@@ -79,7 +79,8 @@ export function Seguimiento() {
 }
 
 function FilaSeg({ cot, ahora }: { cot: Cotizacion; ahora: Date }) {
-  const diasParado = Math.floor((ahora.getTime() - new Date(cot.updated_at).getTime()) / (24 * 60 * 60 * 1000));
+  const updatedTs = cot.updated_at ? new Date(cot.updated_at).getTime() : ahora.getTime();
+  const diasParado = Math.floor((ahora.getTime() - updatedTs) / (24 * 60 * 60 * 1000));
   const alerta = diasParado > 7 && (cot.estado === 'propuesta' || cot.estado === 'negociando');
   return (
     <div style={{ background: 'var(--bg-panel)', border: `1px solid ${alerta ? 'var(--orange)' : 'var(--border-soft)'}`, borderRadius: 8, padding: 12, marginBottom: 8 }}>
@@ -90,7 +91,7 @@ function FilaSeg({ cot, ahora }: { cot: Cotizacion; ahora: Date }) {
       <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <span>Total {fmtCop(Number(cot.total))}</span>
         {Number(cot.saldo) > 0 && <span style={{ color: 'var(--orange)' }}>Saldo {fmtCop(Number(cot.saldo))}</span>}
-        <span>Última actualización: {fmtFecha(cot.updated_at.slice(0, 10))} ({diasParado}d atrás)</span>
+        <span>Última actualización: {fmtFecha(cot.updated_at?.slice(0, 10) ?? null)} ({diasParado}d atrás)</span>
         {alerta && <span style={{ color: 'var(--orange)', fontWeight: 600 }}>⚠ parado &gt;7d</span>}
       </div>
       {cot.proxima_accion && (
