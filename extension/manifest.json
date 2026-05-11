@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Visor PG · Captura WhatsApp",
+  "version": "5.0.0",
+  "description": "Visor PG — captura WhatsApp local. Sin sync automático: el Visor decide qué chat procesar (procesa = sube + IA en un click).",
+  "permissions": [
+    "storage",
+    "alarms",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://web.whatsapp.com/*",
+    "https://webtp.whatsapp.net/*",
+    "https://mmg.whatsapp.net/*",
+    "https://olububjdvboiqgmihsmk.supabase.co/*",
+    "https://api.openai.com/*",
+    "https://api.deepseek.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["patch.v2.js", "parser_protobuf.v2.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["content.v2.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.v2.js"
+  },
+  "externally_connectable": {
+    "matches": [
+      "http://localhost/*",
+      "http://localhost:5173/*",
+      "http://localhost:5610/*",
+      "http://127.0.0.1/*"
+    ]
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Visor PG · Captura WhatsApp"
+  }
+}

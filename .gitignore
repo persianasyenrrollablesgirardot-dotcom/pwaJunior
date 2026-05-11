@@ -1,0 +1,47 @@
+# Credenciales
+.env
+.env.local
+.env.*.local
+
+# Documentación con credenciales o info sensible
+docs/PROCEDIMIENTO_RESTAURACION.md
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Build
+visor/dist/
+visor/.vite/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Migraciones temporales (000_ es read-only / inventario)
+supabase/migrations/000_*.sql
+
+# Chrome user data del puppeteer
+_pup_userdata/
+
+# Screenshots residuales sueltos en la raíz (de runs previos)
+/captura-*.png
+/centro-control-*.png
+/debug-*.png
+/m1-*.png
+/test-*.png
+/transcripciones-*.png
+
+# TS build cache
+*.tsbuildinfo
+
+# Scripts temporales de verificación
+_verify_*.sql

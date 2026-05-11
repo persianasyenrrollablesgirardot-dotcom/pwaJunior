@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": [
+    "workers/**/*.ts",
+    "identidad/**/*.ts",
+    "adapters/**/*.ts",
+    "agentes/**/*.ts",
+    "extractor/**/*.ts",
+    "supervision/**/*.ts",
+    "integraciones/**/*.ts"
+  ],
+  "exclude": ["visor", "node_modules"]
+}

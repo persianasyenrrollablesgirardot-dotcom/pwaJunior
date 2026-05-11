@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "WhatsApp Captura Safra",
+  "version": "2.1.0",
+  "description": "Captura en tiempo real de conversaciones de WhatsApp Web con transcripción de audio y sincronización a Supabase.",
+  "permissions": [
+    "storage",
+    "alarms",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://web.whatsapp.com/*",
+    "https://webtp.whatsapp.net/*",
+    "https://olububjdvboiqgmihsmk.supabase.co/*",
+    "https://api.openai.com/*",
+    "https://api.deepseek.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["patch.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://webtp.whatsapp.net/*"],
+      "js": ["patch.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://webtp.whatsapp.net/*"],
+      "js": ["pdf_iframe.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "WhatsApp Captura Safra"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "visor_pg",
+  "version": "0.1.0",
+  "description": "Visor PG — consola viva multi-canal multi-ámbito",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "migrate": "node apply_migration.mjs",
+    "worker:pipeline": "tsx workers/worker_pipeline.ts",
+    "worker:pipeline:once": "tsx workers/worker_pipeline.ts --once",
+    "visor:dev": "cd visor && npm run dev"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5",
+    "openai": "^6.37.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "puppeteer-core": "^24.43.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
