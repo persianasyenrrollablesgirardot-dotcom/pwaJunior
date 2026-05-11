@@ -1241,6 +1241,216 @@ export async function fetchRentabilidadPorPersona(personaId: number): Promise<Re
   return data as ResumenRentabilidad | null;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// MÓDULO 4 — TÉCNICOS
+// ═══════════════════════════════════════════════════════════════════════
+
+export const ETAPAS_MEDIDA = ['cliente', 'empresa', 'corregida', 'produccion', 'instalada'] as const;
+export type EtapaMedida = typeof ETAPAS_MEDIDA[number];
+
+export interface Medida {
+  id: number;
+  cotizacion_item_id: number | null;
+  persona_id: number | null;
+  etapa: EtapaMedida;
+  ancho_m: number | null;
+  alto_m: number | null;
+  area_m2: number | null;
+  quien_midio: string | null;
+  fecha: string;
+  evidencia_url: string | null;
+  notas: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface MedidaEtapas {
+  item_id: number;
+  cotizacion_id: number;
+  persona_id: number;
+  sistema_safra_codigo: string | null;
+  ambiente: string | null;
+  ancho_cotizado: number | null;
+  alto_cotizado: number | null;
+  ancho_cliente: number | null;
+  alto_cliente: number | null;
+  ancho_empresa: number | null;
+  alto_empresa: number | null;
+  ancho_corregida: number | null;
+  alto_corregida: number | null;
+  ancho_produccion: number | null;
+  alto_produccion: number | null;
+  ancho_instalada: number | null;
+  alto_instalada: number | null;
+}
+
+export interface Advertencia {
+  id: number;
+  codigo: string;
+  sistema_codigo: string | null;
+  titulo: string;
+  texto: string;
+  severidad: 'info' | 'warning' | 'critico';
+  contexto: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface ReglaCompatibilidad {
+  id: number;
+  codigo: string;
+  sistema_codigo: string | null;
+  componente: string;
+  valores_ok: string[] | null;
+  valores_ko: string[] | null;
+  regla: string | null;
+  severidad: 'info' | 'warning' | 'critico';
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface RiesgoMedida {
+  medida_id: number;
+  cotizacion_item_id: number;
+  persona_id: number;
+  cotizacion_id: number;
+  numero_cotizacion: string | null;
+  sistema_safra_codigo: string | null;
+  ambiente: string | null;
+  etapa: EtapaMedida;
+  ancho_m: number | null;
+  alto_m: number | null;
+  area_m2: number | null;
+  quien_midio: string | null;
+  fecha: string;
+  tipo_riesgo: string | null;
+  severidad: 'info' | 'warning' | 'critico' | null;
+}
+
+// ── Medidas (4.1) ────────────────────────────────────────────────────
+
+export async function fetchMedidasPorItem(itemId: number): Promise<Medida[]> {
+  const { data, error } = await supabase
+    .from('medidas')
+    .select('*')
+    .eq('cotizacion_item_id', itemId)
+    .eq('shadow', false)
+    .is('deleted_at', null)
+    .order('etapa', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as Medida[];
+}
+
+export async function fetchMedidasEtapasPorPersona(personaId: number): Promise<MedidaEtapas[]> {
+  const { data, error } = await supabase
+    .from('vw_medidas_etapas')
+    .select('*')
+    .eq('persona_id', personaId)
+    .order('item_id', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as MedidaEtapas[];
+}
+
+export interface CrearMedidaInput {
+  cotizacion_item_id: number;
+  persona_id: number;
+  etapa: EtapaMedida;
+  ancho_m?: number | null;
+  alto_m?: number | null;
+  quien_midio?: string | null;
+  fecha?: string;
+  evidencia_url?: string | null;
+  notas?: string | null;
+}
+
+export async function crearMedida(input: CrearMedidaInput): Promise<Medida> {
+  const { data, error } = await supabase
+    .from('medidas')
+    .insert({
+      cotizacion_item_id: input.cotizacion_item_id,
+      persona_id: input.persona_id,
+      etapa: input.etapa,
+      ancho_m: input.ancho_m ?? null,
+      alto_m: input.alto_m ?? null,
+      quien_midio: input.quien_midio ?? null,
+      fecha: input.fecha ?? new Date().toISOString().slice(0, 10),
+      evidencia_url: input.evidencia_url ?? null,
+      notas: input.notas ?? null,
+      actualizado_por: 1,
+    })
+    .select('*').single();
+  if (error) throw error;
+  return data as Medida;
+}
+
+export async function actualizarMedida(id: number, patch: Partial<Medida>): Promise<void> {
+  const { error } = await supabase
+    .from('medidas')
+    .update({ ...patch, actualizado_por: 1 })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+export async function eliminarMedida(id: number): Promise<void> {
+  const { error } = await supabase
+    .from('medidas')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+// ── Riesgos (4.2) — vista ────────────────────────────────────────────
+
+export async function fetchRiesgosPorPersona(personaId: number): Promise<RiesgoMedida[]> {
+  const { data, error } = await supabase
+    .from('vw_riesgos_medidas')
+    .select('*')
+    .eq('persona_id', personaId)
+    .not('tipo_riesgo', 'is', null)
+    .order('severidad', { ascending: true });   // critico < info por alfabético — invertimos en UI
+  if (error) throw error;
+  return (data ?? []) as RiesgoMedida[];
+}
+
+// ── Advertencias (4.4) ───────────────────────────────────────────────
+
+export async function fetchAdvertenciasPorSistemas(sistemas: string[]): Promise<Advertencia[]> {
+  if (sistemas.length === 0) {
+    // Solo las globales (sin sistema)
+    const { data, error } = await supabase
+      .from('advertencias_safra')
+      .select('*')
+      .is('sistema_codigo', null)
+      .is('deleted_at', null)
+      .order('severidad', { ascending: true });
+    if (error) throw error;
+    return (data ?? []) as Advertencia[];
+  }
+  const { data, error } = await supabase
+    .from('advertencias_safra')
+    .select('*')
+    .or(`sistema_codigo.in.(${sistemas.map(s => `"${s}"`).join(',')}),sistema_codigo.is.null`)
+    .is('deleted_at', null)
+    .order('severidad', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as Advertencia[];
+}
+
+// ── Compatibilidad (4.5) ─────────────────────────────────────────────
+
+export async function fetchReglasCompatibilidad(sistemaCodigo?: string): Promise<ReglaCompatibilidad[]> {
+  let q = supabase.from('reglas_compatibilidad').select('*').is('deleted_at', null);
+  if (sistemaCodigo) q = q.eq('sistema_codigo', sistemaCodigo);
+  const { data, error } = await q.order('componente', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as ReglaCompatibilidad[];
+}
+
 // ─── Eventos (detalle + linaje) ──────────────────────────────────────
 
 export async function fetchEventoDetalle(eventoId: number): Promise<any | null> {
