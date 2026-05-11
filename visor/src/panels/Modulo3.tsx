@@ -16,18 +16,18 @@ import { useContextoActivo } from '../lib/contexto_activo';
 import { useNavegacion } from '../lib/navegacion';
 import { Facturacion } from './m3/Facturacion';
 import { Abonos } from './m3/Abonos';
-import { Cartera } from './m3/Cartera';
 import { Variaciones } from './m3/Variaciones';
 import { Rentabilidad } from './m3/Rentabilidad';
 
-type Sub = 'facturacion' | 'abonos' | 'cartera' | 'variaciones' | 'rentabilidad';
+// 3.3 Cartera movida a "Vistas globales" — era la única no per-cliente
+
+type Sub = 'facturacion' | 'abonos' | 'variaciones' | 'rentabilidad';
 
 const TABS: { id: Sub; label: string; requiereContexto: boolean }[] = [
   { id: 'facturacion',  label: '3.1 Facturación',   requiereContexto: true  },
   { id: 'abonos',       label: '3.2 Abonos',        requiereContexto: true  },
-  { id: 'cartera',      label: '3.3 Cartera',       requiereContexto: false },   // global
-  { id: 'variaciones',  label: '3.4 Variaciones',   requiereContexto: true  },
-  { id: 'rentabilidad', label: '3.5 Rentabilidad',  requiereContexto: true  },
+  { id: 'variaciones',  label: '3.3 Variaciones',   requiereContexto: true  },
+  { id: 'rentabilidad', label: '3.4 Rentabilidad',  requiereContexto: true  },
 ];
 
 export function Modulo3() {
@@ -82,7 +82,6 @@ export function Modulo3() {
           <>
             {sub === 'facturacion'  && <Facturacion />}
             {sub === 'abonos'       && <Abonos />}
-            {sub === 'cartera'      && <Cartera />}
             {sub === 'variaciones'  && <Variaciones />}
             {sub === 'rentabilidad' && <Rentabilidad />}
           </>

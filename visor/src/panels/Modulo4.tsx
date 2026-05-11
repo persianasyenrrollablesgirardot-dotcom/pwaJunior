@@ -15,18 +15,17 @@ import { Medidas } from './m4/Medidas';
 import { RiesgoMedidas } from './m4/RiesgoMedidas';
 import { ProductoSistema } from './m4/ProductoSistema';
 import { Advertencias } from './m4/Advertencias';
-import { Compatibilidad } from './m4/Compatibilidad';
-import { BibliotecaTecnica } from './m4/BibliotecaTecnica';
 
-type Sub = 'medidas' | 'riesgo' | 'producto' | 'advertencias' | 'compatibilidad' | 'biblioteca';
+// 4.5 Compatibilidad y 4.6 Biblioteca técnica movidas a "Vistas globales"
+// (eran catálogos y links externos, no info de cliente).
+
+type Sub = 'medidas' | 'riesgo' | 'producto' | 'advertencias';
 
 const TABS: { id: Sub; label: string; requiereContexto: boolean }[] = [
-  { id: 'medidas',        label: '4.1 Medidas',        requiereContexto: true  },
-  { id: 'riesgo',         label: '4.2 Riesgo medidas', requiereContexto: true  },
-  { id: 'producto',       label: '4.3 Producto/Sistema', requiereContexto: true  },
-  { id: 'advertencias',   label: '4.4 Advertencias',   requiereContexto: true  },
-  { id: 'compatibilidad', label: '4.5 Compatibilidad', requiereContexto: false },   // catálogo global
-  { id: 'biblioteca',     label: '4.6 Biblioteca técnica', requiereContexto: false },   // link externo
+  { id: 'medidas',        label: '4.1 Medidas',          requiereContexto: true },
+  { id: 'riesgo',         label: '4.2 Riesgo medidas',   requiereContexto: true },
+  { id: 'producto',       label: '4.3 Producto/Sistema', requiereContexto: true },
+  { id: 'advertencias',   label: '4.4 Advertencias',     requiereContexto: true },
 ];
 
 export function Modulo4() {
@@ -83,8 +82,6 @@ export function Modulo4() {
             {sub === 'riesgo'         && <RiesgoMedidas />}
             {sub === 'producto'       && <ProductoSistema />}
             {sub === 'advertencias'   && <Advertencias />}
-            {sub === 'compatibilidad' && <Compatibilidad />}
-            {sub === 'biblioteca'     && <BibliotecaTecnica />}
           </>
         )}
       </div>

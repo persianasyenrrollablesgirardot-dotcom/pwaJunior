@@ -11,16 +11,16 @@ import { useContextoActivo } from '../lib/contexto_activo';
 import { useNavegacion } from '../lib/navegacion';
 import { ArchivoDocumental } from './m7/ArchivoDocumental';
 import { EvidenciaEventos } from './m7/EvidenciaEventos';
-import { TranscripcionesAudioGlobal } from './m7/TranscripcionesAudioGlobal';
 import { CapturaEnVivo } from './m7/CapturaEnVivo';
 
-type Sub = 'archivo' | 'eventos' | 'transcripciones' | 'captura';
+// 7.3 Transcripción audio (cross-cliente) movida a "Vistas globales".
+
+type Sub = 'archivo' | 'eventos' | 'captura';
 
 const TABS: { id: Sub; label: string; requiereContexto: boolean }[] = [
-  { id: 'archivo',         label: '7.1 Archivo documental',  requiereContexto: true  },
-  { id: 'eventos',         label: '7.2 Evidencia por evento', requiereContexto: true  },
-  { id: 'transcripciones', label: '7.3 Transcripción audio',  requiereContexto: false },   // global
-  { id: 'captura',         label: '7.4 Captura en vivo',      requiereContexto: true  },
+  { id: 'archivo',  label: '7.1 Archivo documental',  requiereContexto: true },
+  { id: 'eventos',  label: '7.2 Evidencia por evento', requiereContexto: true },
+  { id: 'captura',  label: '7.3 Captura en vivo',     requiereContexto: true },
 ];
 
 export function Modulo7() {
@@ -70,10 +70,9 @@ export function Modulo7() {
           </div>
         ) : (
           <>
-            {sub === 'archivo'         && <ArchivoDocumental />}
-            {sub === 'eventos'         && <EvidenciaEventos />}
-            {sub === 'transcripciones' && <TranscripcionesAudioGlobal />}
-            {sub === 'captura'         && <CapturaEnVivo />}
+            {sub === 'archivo' && <ArchivoDocumental />}
+            {sub === 'eventos' && <EvidenciaEventos />}
+            {sub === 'captura' && <CapturaEnVivo />}
           </>
         )}
       </div>

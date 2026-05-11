@@ -2,6 +2,7 @@ export type ModuloId =
   | 'centro_control'
   | 'captura'
   | 'clientes'
+  | 'vistas_globales'
   | 'm1' | 'm2' | 'm3' | 'm4' | 'm5'
   | 'm6' | 'm7' | 'm8' | 'm9' | 'm10'
   | 'junior';
@@ -33,13 +34,21 @@ export function Sidebar({ modulos, activo, onChange }: SidebarProps) {
           const esCentro = m.id === 'centro_control';
           const esCaptura = m.id === 'captura';
           const esClientes = m.id === 'clientes';
+          const esVistasGlobales = m.id === 'vistas_globales';
           const esJunior = m.id === 'junior';
+          const esTopLevel = esCentro || esCaptura || esClientes || esVistasGlobales || esJunior;
           const esSeparator = m.id === 'm1';
+          const esSeparatorVistas = m.id === 'vistas_globales';
           return (
             <div key={m.id}>
+              {esSeparatorVistas && (
+                <div style={{ padding: '12px 16px 4px', fontSize: 10, color: '#8e8e93', textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: 600 }}>
+                  Vistas del negocio
+                </div>
+              )}
               {esSeparator && (
                 <div style={{ padding: '12px 16px 4px', fontSize: 10, color: '#8e8e93', textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: 600 }}>
-                  Módulos del Visor
+                  Módulos por cliente
                 </div>
               )}
               {esJunior && (
@@ -56,9 +65,9 @@ export function Sidebar({ modulos, activo, onChange }: SidebarProps) {
                   padding: '8px 16px',
                   fontSize: 13,
                   background: esActivo ? 'var(--bg-sidebar-active)' : 'transparent',
-                  color: esActivo ? 'white' : (esCentro || esCaptura || esClientes || esJunior ? '#5ac8fa' : '#d1d1d6'),
+                  color: esActivo ? 'white' : (esTopLevel ? '#5ac8fa' : '#d1d1d6'),
                   border: 'none',
-                  fontWeight: esActivo ? 600 : (esCentro || esCaptura || esClientes || esJunior ? 500 : 400),
+                  fontWeight: esActivo ? 600 : (esTopLevel ? 500 : 400),
                   transition: 'background 0.1s',
                 }}
                 onMouseEnter={(e) => { if (!esActivo) e.currentTarget.style.background = 'var(--bg-sidebar-hover)'; }}

@@ -13,22 +13,18 @@ import { useContextoActivo } from '../lib/contexto_activo';
 import { useNavegacion } from '../lib/navegacion';
 import { Produccion } from './m5/Produccion';
 import { Instalaciones } from './m5/Instalaciones';
-import { AgendaOperativa } from './m5/AgendaOperativa';
-import { RutasZonas } from './m5/RutasZonas';
 import { Tareas } from './m5/Tareas';
 import { ChecklistInstalacion } from './m5/ChecklistInstalacion';
-import { Difusiones } from './m5/Difusiones';
 
-type Sub = 'produccion' | 'instalaciones' | 'agenda' | 'rutas' | 'tareas' | 'checklist' | 'difusiones';
+// 5.3 Agenda, 5.4 Rutas y 5.7 Difusiones movidas a "Vistas globales".
+
+type Sub = 'produccion' | 'instalaciones' | 'tareas' | 'checklist';
 
 const TABS: { id: Sub; label: string; requiereContexto: boolean }[] = [
-  { id: 'produccion',    label: '5.1 Producción',     requiereContexto: true  },
-  { id: 'instalaciones', label: '5.2 Instalaciones',  requiereContexto: true  },
-  { id: 'agenda',        label: '5.3 Agenda',         requiereContexto: false },   // global
-  { id: 'rutas',         label: '5.4 Rutas y zonas',  requiereContexto: false },   // global
-  { id: 'tareas',        label: '5.5 Tareas',         requiereContexto: true  },
-  { id: 'checklist',     label: '5.6 Checklist',      requiereContexto: true  },
-  { id: 'difusiones',    label: '5.7 Difusiones',     requiereContexto: false },   // global
+  { id: 'produccion',    label: '5.1 Producción',     requiereContexto: true },
+  { id: 'instalaciones', label: '5.2 Instalaciones',  requiereContexto: true },
+  { id: 'tareas',        label: '5.3 Tareas',         requiereContexto: true },
+  { id: 'checklist',     label: '5.4 Checklist',      requiereContexto: true },
 ];
 
 export function Modulo5() {
@@ -83,11 +79,8 @@ export function Modulo5() {
           <>
             {sub === 'produccion'    && <Produccion />}
             {sub === 'instalaciones' && <Instalaciones />}
-            {sub === 'agenda'        && <AgendaOperativa />}
-            {sub === 'rutas'         && <RutasZonas />}
             {sub === 'tareas'        && <Tareas />}
             {sub === 'checklist'     && <ChecklistInstalacion />}
-            {sub === 'difusiones'    && <Difusiones />}
           </>
         )}
       </div>

@@ -12,6 +12,7 @@ import { ModuloPlaceholder } from './panels/ModuloPlaceholder';
 import { CentroControl } from './panels/CentroControl';
 import { Captura } from './panels/Captura';
 import { Clientes } from './panels/Clientes';
+import { VistasGlobales } from './panels/VistasGlobales';
 import { sincronizarKeysExtension } from './lib/extension';
 import { ContextoActivoProvider } from './lib/contexto_activo';
 import { NavegacionProvider } from './lib/navegacion';
@@ -20,6 +21,7 @@ const MODULOS: { id: ModuloId; nombre: string }[] = [
   { id: 'centro_control', nombre: 'Centro de Control' },
   { id: 'captura', nombre: 'Captura' },
   { id: 'clientes', nombre: 'Clientes' },
+  { id: 'vistas_globales', nombre: '🌐 Vistas globales' },
   { id: 'm1', nombre: '1 · Núcleo' },
   { id: 'm2', nombre: '2 · Comerciales' },
   { id: 'm3', nombre: '3 · Financieros' },
@@ -56,6 +58,7 @@ export default function App() {
             {modulo === 'centro_control' && <CentroControl />}
             {modulo === 'captura' && <Captura />}
             {modulo === 'clientes' && <Clientes />}
+            {modulo === 'vistas_globales' && <VistasGlobales />}
             {modulo === 'm1' && <Modulo1 />}
             {modulo === 'm2' && <Modulo2 />}
             {modulo === 'm3' && <Modulo3 />}
@@ -63,7 +66,7 @@ export default function App() {
             {modulo === 'm5' && <Modulo5 />}
             {modulo === 'm6' && <Modulo6 />}
             {modulo === 'm7' && <Modulo7 />}
-            {modulo !== 'centro_control' && modulo !== 'captura' && modulo !== 'clientes' && modulo !== 'm1' && modulo !== 'm2' && modulo !== 'm3' && modulo !== 'm4' && modulo !== 'm5' && modulo !== 'm6' && modulo !== 'm7' && (
+            {modulo !== 'centro_control' && modulo !== 'captura' && modulo !== 'clientes' && modulo !== 'vistas_globales' && modulo !== 'm1' && modulo !== 'm2' && modulo !== 'm3' && modulo !== 'm4' && modulo !== 'm5' && modulo !== 'm6' && modulo !== 'm7' && (
               <ModuloPlaceholder
                 titulo={MODULOS.find(m => m.id === modulo)?.nombre ?? '?'}
                 subtitulo="Pendiente — se construye después del MÓDULO 7"

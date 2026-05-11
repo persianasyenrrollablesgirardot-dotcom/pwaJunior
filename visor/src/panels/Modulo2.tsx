@@ -17,9 +17,10 @@ import { Comparador } from './m2/Comparador';
 import { Objeciones } from './m2/Objeciones';
 import { Seguimiento } from './m2/Seguimiento';
 import { Referidos } from './m2/Referidos';
-import { Recompra } from './m2/Recompra';
 
-type Sub = 'cotizaciones' | 'comparador' | 'objeciones' | 'seguimiento' | 'referidos' | 'recompra';
+// 2.6 Recompra movida a "Vistas globales" — era la única no per-cliente
+
+type Sub = 'cotizaciones' | 'comparador' | 'objeciones' | 'seguimiento' | 'referidos';
 
 const TABS: { id: Sub; label: string; requiereContexto: boolean }[] = [
   { id: 'cotizaciones', label: '2.1 Cotizaciones',  requiereContexto: true  },
@@ -27,7 +28,6 @@ const TABS: { id: Sub; label: string; requiereContexto: boolean }[] = [
   { id: 'objeciones',   label: '2.3 Objeciones',    requiereContexto: true  },
   { id: 'seguimiento',  label: '2.4 Seguimiento',   requiereContexto: true  },
   { id: 'referidos',    label: '2.5 Referidos',     requiereContexto: true  },
-  { id: 'recompra',     label: '2.6 Recompra',      requiereContexto: false },   // global, no requiere ctx
 ];
 
 export function Modulo2() {
@@ -87,7 +87,6 @@ export function Modulo2() {
             {sub === 'objeciones'    && <Objeciones />}
             {sub === 'seguimiento'   && <Seguimiento />}
             {sub === 'referidos'     && <Referidos />}
-            {sub === 'recompra'      && <Recompra />}
           </>
         )}
       </div>
