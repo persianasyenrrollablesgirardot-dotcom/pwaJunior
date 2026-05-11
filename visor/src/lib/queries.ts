@@ -2115,6 +2115,150 @@ export async function fetchReputacion(): Promise<Reputacion | null> {
   return data as Reputacion | null;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// MÓDULO 7 — EVIDENCIAS
+// ═══════════════════════════════════════════════════════════════════════
+
+export const TIPOS_EVIDENCIA = ['foto','video','audio','comprobante','factura','cotizacion_pdf','pdf','imagen_medida','documento','otro'] as const;
+export type TipoEvidencia = typeof TIPOS_EVIDENCIA[number];
+
+export interface Evidencia {
+  id: number;
+  persona_id: number | null;
+  cotizacion_id: number | null;
+  instalacion_id: number | null;
+  factura_id: number | null;
+  abono_id: number | null;
+  garantia_id: number | null;
+  evento_pg_id: number | null;
+  tipo: TipoEvidencia;
+  url: string;
+  mime: string | null;
+  bytes: number | null;
+  descripcion: string | null;
+  capturado_por: string | null;
+  texto_extraido: string | null;
+  fecha: string;
+  agente_origen: string | null;
+  shadow: boolean;
+  notas: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface EvidenciaUnificada {
+  uid: string;
+  fuente: 'evidencia_manual' | 'mensaje_wa' | 'abono_comprobante' | 'instalacion_foto' | 'garantia_evidencia';
+  source_id: number;
+  persona_id: number | null;
+  tipo: TipoEvidencia | 'otro';
+  url: string | null;
+  mime: string | null;
+  descripcion: string | null;
+  quien: string | null;
+  texto_extraido: string | null;
+  ts: string;
+  cotizacion_id: number | null;
+  instalacion_id: number | null;
+  factura_id: number | null;
+  abono_id: number | null;
+  garantia_id: number | null;
+  evento_pg_id: number | null;
+}
+
+export async function fetchEvidenciasPorPersona(personaId: number): Promise<EvidenciaUnificada[]> {
+  const { data, error } = await supabase
+    .from('vw_evidencias_unificadas')
+    .select('*')
+    .eq('persona_id', personaId)
+    .order('ts', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as EvidenciaUnificada[];
+}
+
+export async function fetchEvidenciasGlobal(): Promise<EvidenciaUnificada[]> {
+  const { data, error } = await supabase
+    .from('vw_evidencias_unificadas')
+    .select('*')
+    .order('ts', { ascending: false })
+    .limit(500);
+  if (error) throw error;
+  return (data ?? []) as EvidenciaUnificada[];
+}
+
+export async function fetchTranscripcionesAudioGlobal(): Promise<{
+  id: number; chat_id: number; texto: string; ts_canal: string;
+  media_url: string | null; persona_nombre: string | null;
+}[]> {
+  const { data, error } = await supabase
+    .from('mensajes')
+    .select('id, chat_id, texto, ts_canal, media_url, chats!inner(proyectos(personas(nombre)))')
+    .eq('tipo', 'audio')
+    .not('texto', 'is', null)
+    .is('deleted_at', null)
+    .order('ts_canal', { ascending: false })
+    .limit(300);
+  if (error) throw error;
+  return (data ?? []).map((r: any) => ({
+    id: r.id, chat_id: r.chat_id, texto: r.texto, ts_canal: r.ts_canal,
+    media_url: r.media_url,
+    persona_nombre: r.chats?.proyectos?.personas?.nombre ?? null,
+  }));
+}
+
+export interface CrearEvidenciaInput {
+  persona_id: number;
+  cotizacion_id?: number | null;
+  instalacion_id?: number | null;
+  factura_id?: number | null;
+  abono_id?: number | null;
+  garantia_id?: number | null;
+  evento_pg_id?: number | null;
+  tipo: TipoEvidencia;
+  url: string;
+  mime?: string | null;
+  bytes?: number | null;
+  descripcion?: string | null;
+  capturado_por?: string | null;
+  texto_extraido?: string | null;
+  fecha?: string;
+  notas?: string | null;
+}
+
+export async function crearEvidencia(input: CrearEvidenciaInput): Promise<Evidencia> {
+  const { data, error } = await supabase
+    .from('evidencias')
+    .insert({ ...input, actualizado_por: 1 })
+    .select('*').single();
+  if (error) throw error;
+  return data as Evidencia;
+}
+
+export async function actualizarEvidencia(id: number, patch: Partial<Evidencia>): Promise<void> {
+  const { error } = await supabase.from('evidencias').update({ ...patch, actualizado_por: 1 }).eq('id', id);
+  if (error) throw error;
+}
+
+export async function eliminarEvidencia(id: number): Promise<void> {
+  const { error } = await supabase.from('evidencias').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+  if (error) throw error;
+}
+
+// Para eventos con evidencia
+export async function fetchEventosConEvidenciaPorPersona(personaId: number): Promise<any[]> {
+  // Usa el chat_id del proyecto del cliente activo. Buscamos eventos de chats
+  // pertenecientes a proyectos del cliente, con evidencia_ids no vacío.
+  const { data, error } = await supabase
+    .from('evento_pg')
+    .select('id, tipo, ts_canal, payload, evidencia_ids, chat_id, chats(proyectos(persona_id))')
+    .not('evidencia_ids', 'is', null)
+    .order('ts_canal', { ascending: false })
+    .limit(200);
+  if (error) throw error;
+  return (data ?? []).filter((e: any) => e.chats?.proyectos?.persona_id === personaId);
+}
+
 // ─── Eventos (detalle + linaje) ──────────────────────────────────────
 
 export async function fetchEventoDetalle(eventoId: number): Promise<any | null> {
