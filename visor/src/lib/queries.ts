@@ -1451,6 +1451,317 @@ export async function fetchReglasCompatibilidad(sistemaCodigo?: string): Promise
   return (data ?? []) as ReglaCompatibilidad[];
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// MÓDULO 5 — OPERATIVOS
+// ═══════════════════════════════════════════════════════════════════════
+
+export const ESTADOS_PRODUCCION = [
+  'pendiente_abono', 'pedido_proveedor', 'en_produccion',
+  'listo_para_instalar', 'retenido', 'entregado', 'instalado',
+] as const;
+export type EstadoProduccion = typeof ESTADOS_PRODUCCION[number];
+
+export const TIPOS_TAREA = [
+  'llamar', 'enviar_cotizacion', 'confirmar_pago', 'pedir_ficha',
+  'agendar_instalacion', 'reclamar_proveedor', 'pedir_resena', 'otro',
+] as const;
+export type TipoTarea = typeof TIPOS_TAREA[number];
+
+export type ResultadoInstalacion = 'completa' | 'parcial' | 'fallida' | 'reagendada';
+export type FaseChecklist = 'antes' | 'durante' | 'despues';
+
+export interface ProduccionOrden {
+  id: number;
+  cotizacion_id: number | null;
+  persona_id: number | null;
+  estado: EstadoProduccion;
+  fecha_inicio: string | null;
+  fecha_estimada_lista: string | null;
+  fecha_entrega: string | null;
+  vendor: string | null;
+  motivo_retencion: string | null;
+  notas: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface Instalacion {
+  id: number;
+  cotizacion_id: number | null;
+  proyecto_id: number | null;
+  persona_id: number | null;
+  zona_codigo: string | null;
+  fecha_programada: string;
+  hora_programada: string | null;
+  fecha_real: string | null;
+  hora_real: string | null;
+  instalador: string | null;
+  resultado: ResultadoInstalacion | null;
+  fotos_urls: string[] | null;
+  pendientes: string | null;
+  incidencias: string | null;
+  recibido_por_cliente: boolean;
+  firma_cliente_url: string | null;
+  saldo_cobrado: number | null;
+  resena_pedida: boolean;
+  notas: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface Tarea {
+  id: number;
+  persona_id: number | null;
+  cotizacion_id: number | null;
+  proyecto_id: number | null;
+  titulo: string;
+  descripcion: string | null;
+  tipo: TipoTarea;
+  fecha_vence: string | null;
+  hora_vence: string | null;
+  completada: boolean;
+  completada_at: string | null;
+  asignado_a: string | null;
+  origen: 'manual' | 'chat' | 'agente' | 'sistema';
+  origen_chat_id: number | null;
+  prioridad: number;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface ChecklistItem {
+  id: number;
+  instalacion_id: number;
+  template_codigo: string | null;
+  fase: FaseChecklist;
+  descripcion: string;
+  orden: number;
+  completado: boolean;
+  completado_at: string | null;
+  foto_url: string | null;
+  notas: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface AgendaItem {
+  tipo: 'instalacion' | 'tarea';
+  source_id: number;
+  persona_id: number | null;
+  persona_nombre: string | null;
+  cotizacion_id: number | null;
+  numero_cotizacion: string | null;
+  zona_codigo: string | null;
+  fecha: string | null;
+  hora: string | null;
+  titulo: string;
+  estado: string | null;
+  prioridad: number;
+}
+
+// ── Producción (5.1) ─────────────────────────────────────────────────
+
+export async function fetchProduccionPorPersona(personaId: number): Promise<ProduccionOrden[]> {
+  const { data, error } = await supabase
+    .from('produccion_orden')
+    .select('*')
+    .eq('persona_id', personaId)
+    .eq('shadow', false)
+    .is('deleted_at', null)
+    .order('updated_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as ProduccionOrden[];
+}
+
+export async function upsertProduccion(input: Partial<ProduccionOrden> & { cotizacion_id: number; persona_id: number }): Promise<ProduccionOrden> {
+  // Si ya existe orden para la cotización, update; si no, insert
+  const { data: existing } = await supabase
+    .from('produccion_orden')
+    .select('id').eq('cotizacion_id', input.cotizacion_id).is('deleted_at', null).maybeSingle();
+  if (existing) {
+    const { data, error } = await supabase
+      .from('produccion_orden')
+      .update({ ...input, actualizado_por: 1 })
+      .eq('id', existing.id)
+      .select('*').single();
+    if (error) throw error;
+    return data as ProduccionOrden;
+  }
+  const { data, error } = await supabase
+    .from('produccion_orden')
+    .insert({ ...input, actualizado_por: 1 })
+    .select('*').single();
+  if (error) throw error;
+  return data as ProduccionOrden;
+}
+
+export async function cambiarEstadoProduccion(id: number, estado: EstadoProduccion, motivo?: string): Promise<void> {
+  const patch: any = { estado, actualizado_por: 1 };
+  if (estado === 'retenido' && motivo) patch.motivo_retencion = motivo;
+  if (estado === 'entregado' && !patch.fecha_entrega) patch.fecha_entrega = new Date().toISOString().slice(0, 10);
+  const { error } = await supabase.from('produccion_orden').update(patch).eq('id', id);
+  if (error) throw error;
+}
+
+// ── Instalaciones (5.2) ──────────────────────────────────────────────
+
+export async function fetchInstalacionesPorPersona(personaId: number): Promise<Instalacion[]> {
+  const { data, error } = await supabase
+    .from('instalaciones')
+    .select('*')
+    .eq('persona_id', personaId)
+    .eq('shadow', false)
+    .is('deleted_at', null)
+    .order('fecha_programada', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as Instalacion[];
+}
+
+export interface CrearInstalacionInput {
+  cotizacion_id?: number | null;
+  proyecto_id?: number | null;
+  persona_id: number;
+  zona_codigo?: string | null;
+  fecha_programada: string;
+  hora_programada?: string | null;
+  instalador?: string | null;
+  notas?: string | null;
+}
+
+export async function crearInstalacion(input: CrearInstalacionInput): Promise<Instalacion> {
+  const { data, error } = await supabase
+    .from('instalaciones')
+    .insert({ ...input, actualizado_por: 1 })
+    .select('*').single();
+  if (error) throw error;
+  return data as Instalacion;
+}
+
+export async function actualizarInstalacion(id: number, patch: Partial<Instalacion>): Promise<void> {
+  const { error } = await supabase.from('instalaciones').update({ ...patch, actualizado_por: 1 }).eq('id', id);
+  if (error) throw error;
+}
+
+export async function eliminarInstalacion(id: number): Promise<void> {
+  const { error } = await supabase.from('instalaciones').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+  if (error) throw error;
+}
+
+// ── Tareas (5.5) ─────────────────────────────────────────────────────
+
+export async function fetchTareasPorPersona(personaId: number, incluirCompletadas = false): Promise<Tarea[]> {
+  let q = supabase.from('tareas').select('*').eq('persona_id', personaId).eq('shadow', false).is('deleted_at', null);
+  if (!incluirCompletadas) q = q.eq('completada', false);
+  const { data, error } = await q.order('fecha_vence', { ascending: true, nullsFirst: false });
+  if (error) throw error;
+  return (data ?? []) as Tarea[];
+}
+
+export async function fetchTareasGlobal(incluirCompletadas = false): Promise<Tarea[]> {
+  let q = supabase.from('tareas').select('*').eq('shadow', false).is('deleted_at', null);
+  if (!incluirCompletadas) q = q.eq('completada', false);
+  const { data, error } = await q.order('fecha_vence', { ascending: true, nullsFirst: false }).limit(200);
+  if (error) throw error;
+  return (data ?? []) as Tarea[];
+}
+
+export interface CrearTareaInput {
+  persona_id?: number | null;
+  cotizacion_id?: number | null;
+  proyecto_id?: number | null;
+  titulo: string;
+  descripcion?: string | null;
+  tipo?: TipoTarea;
+  fecha_vence?: string | null;
+  hora_vence?: string | null;
+  asignado_a?: string | null;
+  origen?: 'manual' | 'chat' | 'agente' | 'sistema';
+  origen_chat_id?: number | null;
+  prioridad?: number;
+}
+
+export async function crearTarea(input: CrearTareaInput): Promise<Tarea> {
+  const { data, error } = await supabase
+    .from('tareas')
+    .insert({ ...input, tipo: input.tipo ?? 'otro', origen: input.origen ?? 'manual', actualizado_por: 1 })
+    .select('*').single();
+  if (error) throw error;
+  return data as Tarea;
+}
+
+export async function actualizarTarea(id: number, patch: Partial<Tarea>): Promise<void> {
+  const extra: any = { actualizado_por: 1 };
+  if (patch.completada === true && !patch.completada_at) extra.completada_at = new Date().toISOString();
+  const { error } = await supabase.from('tareas').update({ ...patch, ...extra }).eq('id', id);
+  if (error) throw error;
+}
+
+export async function eliminarTarea(id: number): Promise<void> {
+  const { error } = await supabase.from('tareas').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+  if (error) throw error;
+}
+
+// ── Checklist (5.6) ──────────────────────────────────────────────────
+
+export async function fetchChecklistDeInstalacion(instalacionId: number): Promise<ChecklistItem[]> {
+  const { data, error } = await supabase
+    .from('checklist_instalacion_items')
+    .select('*')
+    .eq('instalacion_id', instalacionId)
+    .is('deleted_at', null)
+    .order('fase', { ascending: true })
+    .order('orden', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as ChecklistItem[];
+}
+
+export async function marcarChecklistItem(id: number, completado: boolean, foto_url?: string | null, notas?: string | null): Promise<void> {
+  const patch: any = { completado };
+  if (completado) patch.completado_at = new Date().toISOString();
+  else patch.completado_at = null;
+  if (foto_url !== undefined) patch.foto_url = foto_url;
+  if (notas !== undefined) patch.notas = notas;
+  const { error } = await supabase.from('checklist_instalacion_items').update(patch).eq('id', id);
+  if (error) throw error;
+}
+
+// ── Agenda operativa (5.3) ───────────────────────────────────────────
+
+export async function fetchAgendaPorRango(desde?: string, hasta?: string): Promise<AgendaItem[]> {
+  let q = supabase.from('vw_agenda_operativa').select('*');
+  if (desde) q = q.gte('fecha', desde);
+  if (hasta) q = q.lte('fecha', hasta);
+  const { data, error } = await q.order('fecha', { ascending: true, nullsFirst: false }).order('hora', { ascending: true, nullsFirst: false });
+  if (error) throw error;
+  return (data ?? []) as AgendaItem[];
+}
+
+// ── Zonas (5.4) ──────────────────────────────────────────────────────
+
+export interface Zona {
+  codigo: string;
+  nombre: string;
+  costo_traslado_incluido: boolean;
+  notas: string | null;
+  orden: number;
+}
+
+export async function fetchZonas(): Promise<Zona[]> {
+  const { data, error } = await supabase.from('zonas_instalacion').select('*').order('orden');
+  if (error) throw error;
+  return (data ?? []) as Zona[];
+}
+
 // ─── Eventos (detalle + linaje) ──────────────────────────────────────
 
 export async function fetchEventoDetalle(eventoId: number): Promise<any | null> {
