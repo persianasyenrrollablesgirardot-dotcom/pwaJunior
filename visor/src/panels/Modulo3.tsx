@@ -6,10 +6,10 @@
  *                          recalcula cotizaciones.abono_monto y saldo.
  *   3.3 Cartera          — vista GLOBAL (no requiere ctx) de personas con
  *                          deuda > 0, ordenadas por monto.
- *   3.4 Variaciones      — pendiente F3.4 (descuentos / cambios de producto /
- *                          retrabajos entre cotización y factura).
- *   3.5 Rentabilidad     — pendiente F3.5 (necesita tabla de costos: tela,
- *                          herrajes, motor, viáticos, visitas extra, retrabajos).
+ *   3.4 Variaciones      — log de diferencias económicas entre cotización y
+ *                          factura (descuentos, cambios, retrabajos).
+ *   3.5 Rentabilidad     — margen real (venta + variaciones − costos del
+ *                          proyecto: producto, motor, viáticos, mano obra...).
  */
 import { useState } from 'react';
 import { useContextoActivo } from '../lib/contexto_activo';
@@ -17,7 +17,8 @@ import { useNavegacion } from '../lib/navegacion';
 import { Facturacion } from './m3/Facturacion';
 import { Abonos } from './m3/Abonos';
 import { Cartera } from './m3/Cartera';
-import { Placeholder3x } from './m3/Placeholder3x';
+import { Variaciones } from './m3/Variaciones';
+import { Rentabilidad } from './m3/Rentabilidad';
 
 type Sub = 'facturacion' | 'abonos' | 'cartera' | 'variaciones' | 'rentabilidad';
 
@@ -25,8 +26,8 @@ const TABS: { id: Sub; label: string; requiereContexto: boolean }[] = [
   { id: 'facturacion',  label: '3.1 Facturación',   requiereContexto: true  },
   { id: 'abonos',       label: '3.2 Abonos',        requiereContexto: true  },
   { id: 'cartera',      label: '3.3 Cartera',       requiereContexto: false },   // global
-  { id: 'variaciones',  label: '3.4 Variaciones',   requiereContexto: false },   // placeholder
-  { id: 'rentabilidad', label: '3.5 Rentabilidad',  requiereContexto: false },   // placeholder
+  { id: 'variaciones',  label: '3.4 Variaciones',   requiereContexto: true  },
+  { id: 'rentabilidad', label: '3.5 Rentabilidad',  requiereContexto: true  },
 ];
 
 export function Modulo3() {
@@ -42,7 +43,7 @@ export function Modulo3() {
       <div style={{ padding: '16px 24px 0' }}>
         <h1 style={{ margin: '0 0 2px', fontSize: 18, fontWeight: 700 }}>MÓDULO 3 · Financieros</h1>
         <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 12 }}>
-          Facturación, abonos, cartera. Variaciones y rentabilidad llegan después.
+          Facturación, abonos, cartera, variaciones económicas y rentabilidad real del cliente activo.
         </p>
       </div>
 
@@ -82,8 +83,8 @@ export function Modulo3() {
             {sub === 'facturacion'  && <Facturacion />}
             {sub === 'abonos'       && <Abonos />}
             {sub === 'cartera'      && <Cartera />}
-            {sub === 'variaciones'  && <Placeholder3x titulo="3.4 Variaciones económicas" subtitulo="Log de descuentos, cambios de producto, motor agregado, retrabajos, etc., entre cotización y factura." pendienteId="F3.4" requisitos={['Tabla facturas con datos', 'Tabla abonos con datos', 'Cotizaciones ganadas con items concretos']} />}
-            {sub === 'rentabilidad' && <Placeholder3x titulo="3.5 Rentabilidad real" subtitulo="Margen real: venta − costos (tela, herrajes, motores, viáticos, visitas extra, retrabajos)." pendienteId="F3.5" requisitos={['Tabla de costos por sistema Safra', 'Registro de visitas técnicas extra', 'Tiempo operativo por proyecto', 'Costos de garantías ejecutadas']} />}
+            {sub === 'variaciones'  && <Variaciones />}
+            {sub === 'rentabilidad' && <Rentabilidad />}
           </>
         )}
       </div>

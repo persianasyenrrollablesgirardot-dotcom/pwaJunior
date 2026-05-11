@@ -1045,6 +1045,202 @@ export async function fetchCartera(): Promise<ResumenCartera[]> {
   return (data ?? []) as ResumenCartera[];
 }
 
+// ── Variaciones económicas (3.4) ─────────────────────────────────────
+
+export const TIPOS_VARIACION = [
+  'descuento', 'cambio_producto', 'cambio_medida', 'motor_agregado',
+  'ventana_eliminada', 'instalacion_negociada', 'cambio_garantia',
+  'cambio_cliente', 'otro',
+] as const;
+export type TipoVariacion = typeof TIPOS_VARIACION[number];
+
+export interface Variacion {
+  id: number;
+  cotizacion_id: number | null;
+  factura_id: number | null;
+  persona_id: number | null;
+  tipo: TipoVariacion;
+  monto_delta: number;
+  motivo: string | null;
+  fecha: string;
+  responsable: 'empresa' | 'cliente' | 'tercero' | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  notas: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export async function fetchVariacionesPorPersona(personaId: number): Promise<Variacion[]> {
+  const { data, error } = await supabase
+    .from('cotizacion_variaciones')
+    .select('*')
+    .eq('persona_id', personaId)
+    .eq('shadow', false)
+    .is('deleted_at', null)
+    .order('fecha', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as Variacion[];
+}
+
+export interface CrearVariacionInput {
+  cotizacion_id?: number | null;
+  factura_id?: number | null;
+  persona_id: number;
+  tipo: TipoVariacion;
+  monto_delta: number;
+  motivo?: string | null;
+  fecha?: string;
+  responsable?: 'empresa' | 'cliente' | 'tercero' | null;
+  notas?: string | null;
+}
+
+export async function crearVariacion(input: CrearVariacionInput): Promise<Variacion> {
+  const { data, error } = await supabase
+    .from('cotizacion_variaciones')
+    .insert({
+      cotizacion_id: input.cotizacion_id ?? null,
+      factura_id: input.factura_id ?? null,
+      persona_id: input.persona_id,
+      tipo: input.tipo,
+      monto_delta: input.monto_delta,
+      motivo: input.motivo ?? null,
+      fecha: input.fecha ?? new Date().toISOString().slice(0, 10),
+      responsable: input.responsable ?? null,
+      notas: input.notas ?? null,
+      actualizado_por: 1,
+    })
+    .select('*').single();
+  if (error) throw error;
+  return data as Variacion;
+}
+
+export async function actualizarVariacion(id: number, patch: Partial<Variacion>): Promise<void> {
+  const { error } = await supabase
+    .from('cotizacion_variaciones')
+    .update({ ...patch, actualizado_por: 1 })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+export async function eliminarVariacion(id: number): Promise<void> {
+  const { error } = await supabase
+    .from('cotizacion_variaciones')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+// ── Costos / Rentabilidad (3.5) ──────────────────────────────────────
+
+export const TIPOS_COSTO = [
+  'producto', 'motor', 'viatico', 'visita_extra', 'retrabajo',
+  'garantia_ejecutada', 'mano_obra', 'otro',
+] as const;
+export type TipoCosto = typeof TIPOS_COSTO[number];
+
+export interface Costo {
+  id: number;
+  cotizacion_id: number | null;
+  proyecto_id: number | null;
+  persona_id: number | null;
+  tipo: TipoCosto;
+  descripcion: string | null;
+  monto: number;
+  fecha: string;
+  vendor: string | null;
+  comprobante_url: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  notas: string | null;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export async function fetchCostosPorPersona(personaId: number): Promise<Costo[]> {
+  const { data, error } = await supabase
+    .from('costos_proyecto')
+    .select('*')
+    .eq('persona_id', personaId)
+    .eq('shadow', false)
+    .is('deleted_at', null)
+    .order('fecha', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as Costo[];
+}
+
+export interface CrearCostoInput {
+  cotizacion_id?: number | null;
+  proyecto_id?: number | null;
+  persona_id: number;
+  tipo: TipoCosto;
+  descripcion?: string | null;
+  monto: number;
+  fecha?: string;
+  vendor?: string | null;
+  comprobante_url?: string | null;
+  notas?: string | null;
+}
+
+export async function crearCosto(input: CrearCostoInput): Promise<Costo> {
+  const { data, error } = await supabase
+    .from('costos_proyecto')
+    .insert({
+      cotizacion_id: input.cotizacion_id ?? null,
+      proyecto_id: input.proyecto_id ?? null,
+      persona_id: input.persona_id,
+      tipo: input.tipo,
+      descripcion: input.descripcion ?? null,
+      monto: input.monto,
+      fecha: input.fecha ?? new Date().toISOString().slice(0, 10),
+      vendor: input.vendor ?? null,
+      comprobante_url: input.comprobante_url ?? null,
+      notas: input.notas ?? null,
+      actualizado_por: 1,
+    })
+    .select('*').single();
+  if (error) throw error;
+  return data as Costo;
+}
+
+export async function actualizarCosto(id: number, patch: Partial<Costo>): Promise<void> {
+  const { error } = await supabase
+    .from('costos_proyecto')
+    .update({ ...patch, actualizado_por: 1 })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+export async function eliminarCosto(id: number): Promise<void> {
+  const { error } = await supabase
+    .from('costos_proyecto')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+export interface ResumenRentabilidad {
+  persona_id: number;
+  persona_nombre: string;
+  cotizaciones_ganadas: number;
+  venta_total: number;
+  costo_total: number;
+  variaciones_neto: number;
+  margen: number;
+}
+
+export async function fetchRentabilidadPorPersona(personaId: number): Promise<ResumenRentabilidad | null> {
+  const { data, error } = await supabase
+    .from('vw_rentabilidad')
+    .select('*')
+    .eq('persona_id', personaId)
+    .maybeSingle();
+  if (error) throw error;
+  return data as ResumenRentabilidad | null;
+}
+
 // ─── Eventos (detalle + linaje) ──────────────────────────────────────
 
 export async function fetchEventoDetalle(eventoId: number): Promise<any | null> {

@@ -88,6 +88,8 @@ const TAG = '[TEST-M3]';
 
 async function cleanupPrev(c) {
   // Borrar en orden inverso a FKs
+  await c.query(`DELETE FROM costos_proyecto WHERE persona_id IN (SELECT id FROM personas WHERE nombre LIKE $1)`, [`${TAG}%`]);
+  await c.query(`DELETE FROM cotizacion_variaciones WHERE persona_id IN (SELECT id FROM personas WHERE nombre LIKE $1)`, [`${TAG}%`]);
   await c.query(`DELETE FROM abonos WHERE persona_id IN (SELECT id FROM personas WHERE nombre LIKE $1)`, [`${TAG}%`]);
   await c.query(`DELETE FROM facturas WHERE persona_id IN (SELECT id FROM personas WHERE nombre LIKE $1)`, [`${TAG}%`]);
   await c.query(`DELETE FROM cotizaciones WHERE persona_id IN (SELECT id FROM personas WHERE nombre LIKE $1) OR proyecto_id IN (SELECT id FROM proyectos WHERE nombre LIKE $1)`, [`${TAG}%`]);
@@ -358,21 +360,63 @@ async function ui_cartera(page) {
   await shot(page, '10_cartera');
 }
 
-async function ui_placeholders(page) {
-  step('UI → M3 → 3.4 Variaciones (placeholder)…');
+async function ui_variaciones(page) {
+  step('UI → M3 → 3.4 Variaciones → registrar variación tipo descuento…');
   await clickByText(page, 'button', '3.4 Variaciones');
-  await sleep(700);
-  const b1 = (await page.evaluate(() => document.body.innerText)).toLowerCase();
-  record('Placeholder 3.4 muestra "F3.4"', b1.includes('f3.4'));
-  record('Placeholder 3.4 dice "Pendiente"', b1.includes('pendiente'));
-  await shot(page, '11_placeholder_variaciones');
+  await sleep(900);
+  await shot(page, '11_variaciones_inicial');
 
-  step('UI → M3 → 3.5 Rentabilidad (placeholder)…');
+  await clickByText(page, 'button', '+ Registrar variación');
+  await waitFor(page, () => [...document.querySelectorAll('h2')].some(h => /Registrar variación/.test(h.textContent || '')), 5000, 'modal variación');
+  await sleep(300);
+
+  await fillField(page, 'Tipo', 'descuento');
+  await fillField(page, 'Monto Δ', '-150000');  // descuento de $150K
+  await fillField(page, 'Responsable', 'empresa');
+  await fillField(page, 'Motivo', 'Test E2E descuento por pago contado');
+  await shot(page, '12_variacion_form');
+
+  await clickByText(page, 'button', '✓ Guardar');
+  await sleep(1500);
+  await shot(page, '13_variacion_guardada');
+
+  const body = await page.evaluate(() => document.body.innerText);
+  record('Variaciones muestra "Descuento" en card', body.includes('Descuento'));
+  record('Variaciones muestra "-$ 150.000" o "150.000"', body.includes('150.000'));
+}
+
+async function ui_rentabilidad(page) {
+  step('UI → M3 → 3.5 Rentabilidad → registrar costo + verificar margen…');
   await clickByText(page, 'button', '3.5 Rentabilidad');
-  await sleep(700);
-  const b2 = (await page.evaluate(() => document.body.innerText)).toLowerCase();
-  record('Placeholder 3.5 muestra "F3.5"', b2.includes('f3.5'));
-  await shot(page, '12_placeholder_rentabilidad');
+  await sleep(1200);
+  await shot(page, '14_rentabilidad_inicial');
+
+  // Capturar pantalla con KPI venta_total = $2M antes del costo
+  const antes = await page.evaluate(() => document.body.innerText);
+  record('Rentabilidad muestra "Venta ganada"', antes.toLowerCase().includes('venta ganada'));
+  record('Rentabilidad muestra "$ 2.000.000" de venta (cotización ganada seed)', antes.includes('2.000.000'));
+
+  await clickByText(page, 'button', '+ Registrar costo');
+  await waitFor(page, () => [...document.querySelectorAll('h2')].some(h => /Registrar costo/.test(h.textContent || '')), 5000, 'modal costo');
+  await sleep(300);
+
+  await fillField(page, 'Tipo', 'producto');
+  await fillField(page, 'Monto', '600000');
+  await fillField(page, 'Vendor', 'Tejidos Safra SAS');
+  await fillField(page, 'Descripción', 'Tela blackout test E2E F3.8');
+  await shot(page, '15_costo_form');
+
+  await clickByText(page, 'button', '✓ Guardar');
+  await sleep(1500);
+  await shot(page, '16_costo_guardado');
+
+  const despues = await page.evaluate(() => document.body.innerText);
+  // Margen esperado: 2.000.000 + (-150.000 variación) − 600.000 = 1.250.000
+  record('Rentabilidad recalcula margen con costo agregado',
+    despues.includes('1.250.000') || despues.includes('1,250,000'),
+    'no se vio "1.250.000" en pantalla',
+  );
+  record('Rentabilidad muestra costo "Producto"', despues.includes('Producto'));
 }
 
 // ─── VERIFICACIÓN SQL ────────────────────────────────────────────────────
@@ -429,6 +473,44 @@ async function verificarSQL(c, { A, cotAId }) {
   record('vw_cartera: Andrés deuda_total = 1.500.000 (tras abono)',
     andres && Number(andres.deuda_total) === 1500000,
     `BD ${andres?.deuda_total}`);
+
+  // 3.4 Variaciones persistidas
+  const { rows: vars } = await c.query(
+    `SELECT * FROM cotizacion_variaciones WHERE persona_id = $1 AND deleted_at IS NULL`,
+    [A],
+  );
+  record('Variación registrada para Andrés', vars.length === 1, `BD ${vars.length}`);
+  if (vars.length) {
+    record('Variación: tipo = "descuento"', vars[0].tipo === 'descuento');
+    record('Variación: monto_delta = -150.000', Number(vars[0].monto_delta) === -150000, `BD ${vars[0].monto_delta}`);
+    record('Variación: responsable = "empresa"', vars[0].responsable === 'empresa');
+  }
+
+  // 3.5 Costos persistidos
+  const { rows: costos } = await c.query(
+    `SELECT * FROM costos_proyecto WHERE persona_id = $1 AND deleted_at IS NULL`,
+    [A],
+  );
+  record('Costo registrado para Andrés', costos.length === 1, `BD ${costos.length}`);
+  if (costos.length) {
+    record('Costo: tipo = "producto"', costos[0].tipo === 'producto');
+    record('Costo: monto = 600.000', Number(costos[0].monto) === 600000, `BD ${costos[0].monto}`);
+    record('Costo: vendor = "Tejidos Safra SAS"', costos[0].vendor === 'Tejidos Safra SAS');
+  }
+
+  // vw_rentabilidad: venta=2M, variaciones=-150K, costo=600K, margen=1.250M
+  const { rows: rent } = await c.query(`SELECT * FROM vw_rentabilidad WHERE persona_id = $1`, [A]);
+  record('vw_rentabilidad incluye a Andrés', rent.length === 1);
+  if (rent.length) {
+    record('Rentabilidad: venta_total = 2.000.000',
+      Number(rent[0].venta_total) === 2000000, `BD ${rent[0].venta_total}`);
+    record('Rentabilidad: variaciones_neto = -150.000',
+      Number(rent[0].variaciones_neto) === -150000, `BD ${rent[0].variaciones_neto}`);
+    record('Rentabilidad: costo_total = 600.000',
+      Number(rent[0].costo_total) === 600000, `BD ${rent[0].costo_total}`);
+    record('Rentabilidad: margen = 1.250.000 (2M − 150K − 600K)',
+      Number(rent[0].margen) === 1250000, `BD ${rent[0].margen}`);
+  }
 }
 
 // ─── MAIN ────────────────────────────────────────────────────────────────
@@ -455,7 +537,8 @@ async function main() {
   await ui_facturacion(page);
   await ui_abonos(page);
   await ui_cartera(page);
-  await ui_placeholders(page);
+  await ui_variaciones(page);
+  await ui_rentabilidad(page);
 
   sec(3, 'VERIFICACIÓN SQL');
   await verificarSQL(pgClient, seeded);
