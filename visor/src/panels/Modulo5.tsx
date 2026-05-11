@@ -17,8 +17,9 @@ import { AgendaOperativa } from './m5/AgendaOperativa';
 import { RutasZonas } from './m5/RutasZonas';
 import { Tareas } from './m5/Tareas';
 import { ChecklistInstalacion } from './m5/ChecklistInstalacion';
+import { Difusiones } from './m5/Difusiones';
 
-type Sub = 'produccion' | 'instalaciones' | 'agenda' | 'rutas' | 'tareas' | 'checklist';
+type Sub = 'produccion' | 'instalaciones' | 'agenda' | 'rutas' | 'tareas' | 'checklist' | 'difusiones';
 
 const TABS: { id: Sub; label: string; requiereContexto: boolean }[] = [
   { id: 'produccion',    label: '5.1 Producción',     requiereContexto: true  },
@@ -27,6 +28,7 @@ const TABS: { id: Sub; label: string; requiereContexto: boolean }[] = [
   { id: 'rutas',         label: '5.4 Rutas y zonas',  requiereContexto: false },   // global
   { id: 'tareas',        label: '5.5 Tareas',         requiereContexto: true  },
   { id: 'checklist',     label: '5.6 Checklist',      requiereContexto: true  },
+  { id: 'difusiones',    label: '5.7 Difusiones',     requiereContexto: false },   // global
 ];
 
 export function Modulo5() {
@@ -85,6 +87,7 @@ export function Modulo5() {
             {sub === 'rutas'         && <RutasZonas />}
             {sub === 'tareas'        && <Tareas />}
             {sub === 'checklist'     && <ChecklistInstalacion />}
+            {sub === 'difusiones'    && <Difusiones />}
           </>
         )}
       </div>

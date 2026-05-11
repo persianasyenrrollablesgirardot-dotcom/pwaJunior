@@ -2246,6 +2246,104 @@ export async function eliminarEvidencia(id: number): Promise<void> {
 }
 
 // Para eventos con evidencia
+// ═══════════════════════════════════════════════════════════════════════
+// MÓDULO TRANSVERSAL — CONJUNTOS RESIDENCIALES (Gestor_Prospectos sync)
+// ═══════════════════════════════════════════════════════════════════════
+
+export interface Conjunto {
+  id: number;
+  nombre: string;
+  sector: string;
+  direccion: string | null;
+  estado_prospeccion: 'pendiente' | 'visitado' | 'cliente' | 'descartado';
+  prioridad: number;
+  administracion_contacto: string | null;
+  porteria_telefono: string | null;
+  zona_codigo: string | null;
+  ciudad: string | null;
+  last_visit: string | null;
+}
+
+export interface ConjuntoResumen extends Conjunto {
+  inmuebles_vinculados: number;
+  personas_clientes: number;
+  cotizaciones_ganadas: number;
+  ingreso_total_conjunto: number;
+}
+
+export async function fetchConjuntos(filtroNombre?: string, sector?: string): Promise<Conjunto[]> {
+  let q = supabase.from('conjuntos').select('*').is('deleted_at', null);
+  if (sector) q = q.eq('sector', sector);
+  if (filtroNombre) q = q.ilike('nombre', `%${filtroNombre}%`);
+  const { data, error } = await q.order('prioridad', { ascending: false }).order('nombre').limit(200);
+  if (error) throw error;
+  return (data ?? []) as Conjunto[];
+}
+
+export async function fetchConjuntosResumen(): Promise<ConjuntoResumen[]> {
+  const { data, error } = await supabase.from('vw_conjuntos_resumen')
+    .select('*')
+    .order('personas_clientes', { ascending: false })
+    .order('prioridad', { ascending: false })
+    .limit(100);
+  if (error) throw error;
+  return (data ?? []) as ConjuntoResumen[];
+}
+
+export async function fetchSectores(): Promise<string[]> {
+  const { data, error } = await supabase.from('conjuntos').select('sector').is('deleted_at', null);
+  if (error) return [];
+  return [...new Set((data ?? []).map((r: any) => r.sector))].sort();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PLANTILLAS DE RESPUESTA WHATSAPP (auto-respuestas curadas)
+// ═══════════════════════════════════════════════════════════════════════
+
+export interface PlantillaRespuesta {
+  id: number;
+  codigo: string;
+  tipo: 'bienvenida'|'ausencia'|'recibido'|'cierre'|'agradecimiento'|'garantia_recibida'|'medida_recibida'|'cita_confirmada'|'otro';
+  texto: string;
+  activo: boolean;
+  prioridad: number;
+  variables: string[] | null;
+  notas: string | null;
+}
+
+export async function fetchPlantillasRespuesta(tipo?: string): Promise<PlantillaRespuesta[]> {
+  let q = supabase.from('plantillas_respuesta').select('*').eq('activo', true);
+  if (tipo) q = q.eq('tipo', tipo);
+  const { data, error } = await q.order('prioridad', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as PlantillaRespuesta[];
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PERSONAS MENCIONADAS (base para agente A-Geo futuro)
+// ═══════════════════════════════════════════════════════════════════════
+
+export interface PersonaMencionada {
+  id: number;
+  persona_id: number | null;
+  nombre_mencionado: string;
+  rol_inferido: string | null;
+  persona_referida_id: number | null;
+  conjunto_id: number | null;
+  contexto: string | null;
+  confianza: string | null;
+  created_at: string;
+}
+
+export async function fetchPersonasMencionadasPorPersona(personaId: number): Promise<PersonaMencionada[]> {
+  const { data, error } = await supabase
+    .from('personas_mencionadas').select('*')
+    .eq('persona_id', personaId).is('deleted_at', null)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as PersonaMencionada[];
+}
+
 export async function fetchEventosConEvidenciaPorPersona(personaId: number): Promise<any[]> {
   // Usa el chat_id del proyecto del cliente activo. Buscamos eventos de chats
   // pertenecientes a proyectos del cliente, con evidencia_ids no vacío.
