@@ -3,6 +3,7 @@ import { Sidebar, type ModuloId } from './ui/Sidebar';
 import { TopBar } from './ui/TopBar';
 import { Modulo1 } from './panels/Modulo1';
 import { Modulo2 } from './panels/Modulo2';
+import { Modulo3 } from './panels/Modulo3';
 import { ModuloPlaceholder } from './panels/ModuloPlaceholder';
 import { CentroControl } from './panels/CentroControl';
 import { Captura } from './panels/Captura';
@@ -53,10 +54,11 @@ export default function App() {
             {modulo === 'clientes' && <Clientes />}
             {modulo === 'm1' && <Modulo1 />}
             {modulo === 'm2' && <Modulo2 />}
-            {modulo !== 'centro_control' && modulo !== 'captura' && modulo !== 'clientes' && modulo !== 'm1' && modulo !== 'm2' && (
+            {modulo === 'm3' && <Modulo3 />}
+            {modulo !== 'centro_control' && modulo !== 'captura' && modulo !== 'clientes' && modulo !== 'm1' && modulo !== 'm2' && modulo !== 'm3' && (
               <ModuloPlaceholder
                 titulo={MODULOS.find(m => m.id === modulo)?.nombre ?? '?'}
-                subtitulo="Pendiente — se construye después del MÓDULO 2"
+                subtitulo="Pendiente — se construye después del MÓDULO 3"
               />
             )}
           </main>

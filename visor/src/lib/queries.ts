@@ -827,6 +827,224 @@ export async function fetchSistemasSafra(): Promise<{ codigo: string; nombre: st
   return data ?? [];
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// MÓDULO 3 — FINANCIEROS
+// ═══════════════════════════════════════════════════════════════════════
+
+export type EstadoFactura = 'borrador' | 'emitida' | 'enviada' | 'pagada' | 'anulada';
+export type EstadoValidacionAbono = 'pendiente' | 'confirmado' | 'rechazado' | 'inconsistente';
+
+export interface Factura {
+  id: number;
+  cotizacion_id: number | null;
+  proyecto_id: number | null;
+  persona_id: number | null;
+  numero_factura: string;
+  fecha: string;
+  fecha_vencimiento: string | null;
+  valor_total: number;
+  estado: EstadoFactura;
+  notas: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface Abono {
+  id: number;
+  cotizacion_id: number | null;
+  factura_id: number | null;
+  persona_id: number | null;
+  monto: number;
+  fecha: string;
+  metodo: string | null;
+  referencia: string | null;
+  comprobante_url: string | null;
+  cuenta_receptora: string | null;
+  estado_validacion: EstadoValidacionAbono;
+  validado_por: number | null;
+  validado_at: string | null;
+  notas: string | null;
+  agente_origen: string | null;
+  shadow: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface ResumenCartera {
+  persona_id: number;
+  persona_nombre: string;
+  persona_telefono: string | null;
+  persona_email: string | null;
+  persona_ciudad: string | null;
+  cotizaciones_con_saldo: number;
+  facturas_pendientes: number;
+  facturado_total: number;
+  abonado_total: number;
+  deuda_total: number;
+  ultima_actividad: string | null;
+}
+
+// ── Facturas ──────────────────────────────────────────────────────────
+
+export async function fetchFacturasPorPersona(personaId: number): Promise<Factura[]> {
+  const { data, error } = await supabase
+    .from('facturas')
+    .select('*')
+    .eq('persona_id', personaId)
+    .eq('shadow', false)
+    .is('deleted_at', null)
+    .order('fecha', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as Factura[];
+}
+
+export interface CrearFacturaInput {
+  cotizacion_id?: number | null;
+  proyecto_id?: number | null;
+  persona_id: number;
+  numero_factura: string;
+  fecha?: string;
+  fecha_vencimiento?: string | null;
+  valor_total: number;
+  estado?: EstadoFactura;
+  notas?: string | null;
+}
+
+export async function crearFactura(input: CrearFacturaInput): Promise<Factura> {
+  const { data, error } = await supabase
+    .from('facturas')
+    .insert({
+      cotizacion_id: input.cotizacion_id ?? null,
+      proyecto_id: input.proyecto_id ?? null,
+      persona_id: input.persona_id,
+      numero_factura: input.numero_factura,
+      fecha: input.fecha ?? new Date().toISOString().slice(0, 10),
+      fecha_vencimiento: input.fecha_vencimiento ?? null,
+      valor_total: input.valor_total,
+      estado: input.estado ?? 'emitida',
+      notas: input.notas ?? null,
+      actualizado_por: 1,
+    })
+    .select('*').single();
+  if (error) throw error;
+  return data as Factura;
+}
+
+export async function actualizarFactura(id: number, patch: Partial<Factura>): Promise<void> {
+  const { error } = await supabase
+    .from('facturas')
+    .update({ ...patch, actualizado_por: 1 })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+export async function eliminarFactura(id: number): Promise<void> {
+  const { error } = await supabase
+    .from('facturas')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+// ── Abonos ────────────────────────────────────────────────────────────
+
+export async function fetchAbonosPorPersona(personaId: number): Promise<Abono[]> {
+  const { data, error } = await supabase
+    .from('abonos')
+    .select('*')
+    .eq('persona_id', personaId)
+    .eq('shadow', false)
+    .is('deleted_at', null)
+    .order('fecha', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as Abono[];
+}
+
+export async function fetchAbonosPorCotizacion(cotizacionId: number): Promise<Abono[]> {
+  const { data, error } = await supabase
+    .from('abonos')
+    .select('*')
+    .eq('cotizacion_id', cotizacionId)
+    .eq('shadow', false)
+    .is('deleted_at', null)
+    .order('fecha', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as Abono[];
+}
+
+export interface CrearAbonoInput {
+  cotizacion_id?: number | null;
+  factura_id?: number | null;
+  persona_id: number;
+  monto: number;
+  fecha?: string;
+  metodo?: string | null;
+  referencia?: string | null;
+  comprobante_url?: string | null;
+  cuenta_receptora?: string | null;
+  estado_validacion?: EstadoValidacionAbono;
+  notas?: string | null;
+}
+
+export async function crearAbono(input: CrearAbonoInput): Promise<Abono> {
+  const { data, error } = await supabase
+    .from('abonos')
+    .insert({
+      cotizacion_id: input.cotizacion_id ?? null,
+      factura_id: input.factura_id ?? null,
+      persona_id: input.persona_id,
+      monto: input.monto,
+      fecha: input.fecha ?? new Date().toISOString().slice(0, 10),
+      metodo: input.metodo ?? null,
+      referencia: input.referencia ?? null,
+      comprobante_url: input.comprobante_url ?? null,
+      cuenta_receptora: input.cuenta_receptora ?? null,
+      estado_validacion: input.estado_validacion ?? 'pendiente',
+      notas: input.notas ?? null,
+      actualizado_por: 1,
+    })
+    .select('*').single();
+  if (error) throw error;
+  return data as Abono;
+}
+
+export async function actualizarAbono(id: number, patch: Partial<Abono>): Promise<void> {
+  // Si pasa de no-confirmado a confirmado, registrar quién lo validó
+  const extra: any = { actualizado_por: 1 };
+  if (patch.estado_validacion === 'confirmado' && !patch.validado_at) {
+    extra.validado_at = new Date().toISOString();
+    extra.validado_por = 1;
+  }
+  const { error } = await supabase
+    .from('abonos')
+    .update({ ...patch, ...extra })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+export async function eliminarAbono(id: number): Promise<void> {
+  const { error } = await supabase
+    .from('abonos')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw error;
+}
+
+// ── Cartera (vista global) ───────────────────────────────────────────
+
+export async function fetchCartera(): Promise<ResumenCartera[]> {
+  const { data, error } = await supabase
+    .from('vw_cartera')
+    .select('*')
+    .order('deuda_total', { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as ResumenCartera[];
+}
+
 // ─── Eventos (detalle + linaje) ──────────────────────────────────────
 
 export async function fetchEventoDetalle(eventoId: number): Promise<any | null> {
