@@ -33,7 +33,7 @@ export function RutasZonas() {
         const finIso = fin.toISOString().slice(0, 10);
         const { data, error } = await supabase
           .from('instalaciones')
-          .select('id, zona_codigo, fecha_programada, instalador, persona_id, personas(nombre)')
+          .select('id, zona_codigo, fecha_programada, instalador, persona_id, personas!instalaciones_persona_id_fkey(nombre)')
           .gte('fecha_programada', hoy)
           .lte('fecha_programada', finIso)
           .is('deleted_at', null)

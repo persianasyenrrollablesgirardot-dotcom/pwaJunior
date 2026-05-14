@@ -107,6 +107,8 @@ export interface EventoPG {
 export interface ItemBuzon {
   id: number;
   evento_id: number;
+  persona_id?: number | null;
+  proyecto_id?: number | null;
   persona_nombre: string;
   proyecto_nombre?: string;
   ambito: Ambito;

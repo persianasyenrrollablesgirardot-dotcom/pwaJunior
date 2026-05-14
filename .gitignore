@@ -45,3 +45,13 @@ _pup_userdata/
 
 # Scripts temporales de verificación
 _verify_*.sql
+
+# Scripts SQL one-shot de activación de agentes (efímeros, ya aplicados a BD)
+sql_tmp/
+
+# Screenshots de tests E2E (artifacts no-código)
+test_*_shots/
+_audit_shots/
+
+# Scripts temporales _*.mjs en raíz (helpers de sesión)
+/_*.mjs

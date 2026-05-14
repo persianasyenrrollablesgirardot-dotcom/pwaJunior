@@ -14,10 +14,10 @@
 import 'dotenv/config';
 
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
-const DEEPSEEK_KEY = process.env.VITE_DEEPSEEK_API_KEY;
+const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY ?? process.env.VITE_DEEPSEEK_API_KEY;
 
 if (!DEEPSEEK_KEY) {
-  throw new Error('Falta VITE_DEEPSEEK_API_KEY en .env');
+  throw new Error('Falta DEEPSEEK_API_KEY en .env');
 }
 
 // Pricing en USD por millón de tokens

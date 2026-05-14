@@ -19,10 +19,12 @@ export function Recompra() {
   const [filas, setFilas] = useState<{ cotizacion: Cotizacion; persona_nombre: string | null }[]>([]);
   const [cargando, setCargando] = useState(true);
 
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    setCargando(true);
+    setCargando(true); setError(null);
     fetchCotizacionesGlobal({ recompraDesdeMeses: meses })
       .then(setFilas)
+      .catch(e => setError(e?.message ?? String(e)))
       .finally(() => setCargando(false));
   }, [meses]);
 
@@ -62,6 +64,7 @@ export function Recompra() {
         <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto' }}>{lista.length} candidatos</span>
       </div>
 
+      {error && <div style={{ padding: 12, background: '#ffe5e5', color: 'var(--red)', borderRadius: 6, fontSize: 12, marginBottom: 12 }}>Error: {error}</div>}
       {cargando && <div style={{ padding: 30, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>Cargando…</div>}
 
       {!cargando && lista.length === 0 && (

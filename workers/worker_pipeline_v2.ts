@@ -1,0 +1,460 @@
+/**
+ * Worker pipeline v2 — orquestador unificado.
+ *
+ * Reemplaza:
+ *   - workers/worker_pipeline.ts (resolución de identidad)
+ *   - workers/worker_extractor.ts (regex sobre mensajes)
+ *
+ * En vez de tener dos workers, ahora hay UNO con tres ciclos:
+ *
+ *   Ciclo A (cada 10s) — extractor regex sobre mensajes
+ *     Salida temporal hasta que A1_ENTIDADES/A1_MEDIDAS/A1_MONTOS estén implementados.
+ *     Lee `mensajes` con metadata.extractor_done != true → aplica regex →
+ *     inserta evento_pg(tipo_evento='dato_extraido', estado=PROCESADO).
+ *
+ *   Ciclo B (cada 5s) — resolución de identidad (NUEVO → IDENTIFICADO)
+ *     Usa la IdentidadService legacy. Cuando A3_IDENTIDAD esté implementado,
+ *     este ciclo se va a eliminar y la resolución va a pasar dentro del pipeline.
+ *
+ *   Ciclo C (cada 5s) — ejecución de pipelines (IDENTIFICADO → PROCESADO)
+ *     Busca eventos en estado IDENTIFICADO, encuentra el pipeline aplicable
+ *     por trigger_tipo_evento + condiciones, llama a ejecutarPipeline(),
+ *     y marca el evento como PROCESADO.
+ *
+ * Flags:
+ *   --once                   un solo barrido de los 3 ciclos, luego exit
+ *   --agent-only=A1_MEDIDAS  solo corre ESE agente del pipeline (debug)
+ *   --skip-extractor         omite Ciclo A
+ *   --skip-identidad         omite Ciclo B (cuidado: ningún evento pasará a IDENTIFICADO)
+ *   --skip-pipeline          omite Ciclo C
+ *
+ * Robustez (heredada de v1):
+ *   - Timeouts duros en queries
+ *   - uncaughtException/unhandledRejection no tumban el proceso
+ *   - cicloEnCurso flag evita overlapping si el ciclo previo aún corre
+ *   - Eventos del mismo chat se procesan SECUENCIALES (anti-race condition)
+ *
+ * Uso:
+ *   npm run worker:v2           # corre indefinido
+ *   npm run worker:v2:once      # un solo ciclo
+ *   tsx workers/worker_pipeline_v2.ts --agent-only=A1_MEDIDAS --once
+ */
+
+import 'dotenv/config';
+import { createClient } from '@supabase/supabase-js';
+import { IdentidadService } from '../identidad/matcher.js';
+import { extraer } from '../agentes/extractor/extractor.js';
+import {
+  cargarPipeline,
+  pipelineAplicable,
+  ejecutarPipeline,
+  listarAgentesRegistrados,
+  type PipelineDefinicion,
+  type FaseDefinicion,
+} from '../agentes/lib/pipeline.js';
+import { registrarTodosLosAgentes } from '../agentes/registro_agentes.js';
+
+// ─── Config y env ─────────────────────────────────────────────────────────
+const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
+const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!SUPABASE_URL || !SERVICE_KEY) {
+  console.error('Falta VITE_SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en .env');
+  process.exit(1);
+}
+
+const sb = createClient(SUPABASE_URL, SERVICE_KEY, {
+  auth: { persistSession: false },
+  realtime: { params: { eventsPerSecond: 10 } },
+});
+
+// ─── Flags ────────────────────────────────────────────────────────────────
+const ARGS = process.argv.slice(2);
+const ONCE_MODE       = ARGS.includes('--once');
+const SKIP_EXTRACTOR  = ARGS.includes('--skip-extractor');
+const SKIP_IDENTIDAD  = ARGS.includes('--skip-identidad');
+const SKIP_PIPELINE   = ARGS.includes('--skip-pipeline');
+const AGENT_ONLY      = (ARGS.find(a => a.startsWith('--agent-only='))?.split('=')[1] ?? '').trim() || null;
+
+// ─── Tunables ─────────────────────────────────────────────────────────────
+const POLL_EXTRACTOR_MS   = 10_000;
+const POLL_IDENTIDAD_MS   = 5_000;
+const POLL_PIPELINE_MS    = 5_000;
+const BATCH_EXTRACTOR     = 200;
+const BATCH_IDENTIDAD     = 20;
+const BATCH_PIPELINE      = 20;
+const PARALLEL_CHATS      = 3;
+const STATS_INTERVAL_MS   = 30_000;
+const QUERY_TIMEOUT_MS    = 10_000;
+const LEASE_PIPELINE_S    = 300;
+
+// ─── Stats ────────────────────────────────────────────────────────────────
+const stats = {
+  // extractor
+  ex_ciclos: 0, ex_mensajes: 0, ex_extracciones: 0, ex_eventos: 0, ex_fallidos: 0,
+  // identidad
+  id_ciclos: 0, id_resueltos: 0, id_ambiguos: 0, id_fallidos: 0,
+  // pipeline
+  pi_ciclos: 0, pi_eventos: 0, pi_ok: 0, pi_skip_sin_pipe: 0, pi_fallidos: 0, pi_costo_usd: 0,
+};
+
+// ─── Robustez global ──────────────────────────────────────────────────────
+process.on('uncaughtException', (err) => console.error('[V2] ⚠ uncaughtException:', err));
+process.on('unhandledRejection', (r) => console.error('[V2] ⚠ unhandledRejection:', r));
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`TIMEOUT ${label} ${ms}ms`)), ms)),
+  ]);
+}
+
+// ─── Servicios ────────────────────────────────────────────────────────────
+const identidad = new IdentidadService(sb);
+
+/**
+ * Si está activo `--agent-only=X`, devuelve un pipeline "modificado" con UNA sola
+ * fase serial que contiene solo ese agente. Si X no aparece en ninguna fase del
+ * pipeline original, devuelve null (significa: ese agente no aplica a este pipeline).
+ */
+function filtrarPipelinePorAgente(pipe: PipelineDefinicion, codigoAgente: string): PipelineDefinicion | null {
+  const aparece = pipe.pasos.fases.some(f =>
+    (f.agentes ?? []).includes(codigoAgente) ||
+    Object.values(f.rutas ?? {}).some(lista => lista.includes(codigoAgente))
+  );
+  if (!aparece) return null;
+  const faseUnica: FaseDefinicion = { id: `solo-${codigoAgente}`, modo: 'serial', agentes: [codigoAgente] };
+  return { ...pipe, pasos: { fases: [faseUnica] } };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CICLO A — EXTRACTOR REGEX
+// ═══════════════════════════════════════════════════════════════════════════
+let extractorEnCurso = false;
+
+async function cicloExtractor(): Promise<number> {
+  if (extractorEnCurso) return 0;
+  extractorEnCurso = true;
+  const t0 = Date.now();
+  try {
+    const { data: msgs, error } = await withTimeout(
+      Promise.resolve(sb.from('mensajes')
+        .select(`id, canal_msg_id, texto, chat_id, metadata, persona_autor_id,
+                 chats!inner(id, ia_historico_procesado, proyecto_id, ambito)`)
+        .not('texto', 'is', null)
+        .not('texto', 'eq', '')
+        .is('deleted_at', null)
+        .filter('chats.ia_historico_procesado', 'eq', true)
+        .or('metadata->>extractor_done.is.null,metadata->>extractor_done.eq.false')
+        .limit(BATCH_EXTRACTOR)),
+      QUERY_TIMEOUT_MS, 'extractor SELECT',
+    );
+
+    if (error) { console.error('[V2/EX] poll error:', error.message); return 0; }
+    if (!msgs || msgs.length === 0) { stats.ex_ciclos++; return 0; }
+
+    let conExtracciones = 0;
+    let totalEx = 0;
+
+    for (const m of msgs) {
+      const exts = extraer(m.texto, m.canal_msg_id);
+      const meta = { ...((m.metadata as any) ?? {}), extractor_done: true };
+
+      if (exts.length > 0) {
+        conExtracciones++;
+        totalEx += exts.length;
+        const chat: any = (m as any).chats;
+        const ambito = chat?.ambito ?? 'comercial';
+        const proyecto_id = chat?.proyecto_id ?? null;
+
+        const { error: eErr } = await sb.from('evento_pg').insert({
+          canal: 'interno', ambito,
+          tipo_evento: 'dato_extraido', estado: 'PROCESADO',
+          chat_id: m.chat_id, persona_id: m.persona_autor_id ?? null, proyecto_id,
+          agente_origen: 'EXTRACTOR', confianza: 'INFERIDO', costo_usd: 0,
+          payload: {
+            preview: exts.length + ' extracciones de regex',
+            extracciones: exts.map(e => ({ tipo: e.tipo, valor: e.valor, valor_raw: e.valor_raw, confianza: e.confianza, meta: e.meta })),
+            mensaje_id: m.id,
+          },
+          evidencia_ids: { msg_ids: [m.canal_msg_id] },
+          ts_canal: new Date().toISOString(),
+        });
+        if (eErr) {
+          console.error(`[V2/EX] insert evento_pg msg ${m.id}: ${eErr.message}`);
+          stats.ex_fallidos++;
+          continue;
+        }
+        stats.ex_eventos++;
+      }
+
+      const { error: uErr } = await sb.from('mensajes').update({ metadata: meta }).eq('id', m.id);
+      if (uErr) { console.error(`[V2/EX] update meta msg ${m.id}: ${uErr.message}`); stats.ex_fallidos++; }
+    }
+
+    stats.ex_mensajes += msgs.length;
+    stats.ex_extracciones += totalEx;
+    stats.ex_ciclos++;
+    const dt = Date.now() - t0;
+    console.log(`[V2/EX] ciclo ${stats.ex_ciclos}: ${msgs.length} msgs (${conExtracciones} con datos, ${totalEx} ext) en ${dt}ms`);
+    return msgs.length;
+  } finally {
+    extractorEnCurso = false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CICLO B — IDENTIDAD (NUEVO → IDENTIFICADO)
+// ═══════════════════════════════════════════════════════════════════════════
+let identidadEnCurso = false;
+
+async function procesarEventoIdentidad(evt: any): Promise<void> {
+  try {
+    if (evt.estado !== 'NUEVO') return;
+    const r = await withTimeout(identidad.resolverEvento(evt), QUERY_TIMEOUT_MS, `resolver(${evt.id})`);
+    if (r === null) {
+      const u = await withTimeout(
+        Promise.resolve(sb.from('evento_pg').update({ estado: 'AMBIGUO' }).eq('id', evt.id)),
+        QUERY_TIMEOUT_MS, `update AMBIGUO(${evt.id})`,
+      );
+      if (u.error) console.error(`[V2/ID] update AMBIGUO(${evt.id}): ${u.error.message}`);
+      stats.id_ambiguos++;
+      return;
+    }
+    await withTimeout(identidad.aplicarResolucion(evt.id, r), QUERY_TIMEOUT_MS, `aplicar(${evt.id})`);
+    stats.id_resueltos++;
+  } catch (e: any) {
+    stats.id_fallidos++;
+    console.error(`[V2/ID] evento ${evt.id} ERROR: ${e.message}`);
+    const errRes = await sb.from('evento_pg').update({ estado: 'ERROR' }).eq('id', evt.id);
+    if (errRes.error) console.error(`[V2/ID] update ERROR(${evt.id}): ${errRes.error.message}`);
+  }
+}
+
+async function cicloIdentidad(): Promise<number> {
+  if (identidadEnCurso) return 0;
+  identidadEnCurso = true;
+  const t0 = Date.now();
+  try {
+    const { data, error } = await withTimeout(
+      Promise.resolve(sb.from('evento_pg')
+        .select('*')
+        .eq('estado', 'NUEVO')
+        .is('deleted_at', null)
+        .order('prioridad', { ascending: true })
+        .order('ts_creado', { ascending: true })
+        .limit(BATCH_IDENTIDAD)),
+      QUERY_TIMEOUT_MS, 'identidad SELECT',
+    );
+
+    if (error) { console.error('[V2/ID] poll error:', error.message); return 0; }
+    if (!data || data.length === 0) { stats.id_ciclos++; return 0; }
+
+    // Agrupar por chat: eventos del mismo chat = secuenciales (anti-race)
+    const grupos = new Map<string, any[]>();
+    for (const evt of data) {
+      const key = String(evt.chat_id ?? `solo-${evt.id}`);
+      if (!grupos.has(key)) grupos.set(key, []);
+      grupos.get(key)!.push(evt);
+    }
+    const claves = Array.from(grupos.keys());
+    for (let i = 0; i < claves.length; i += PARALLEL_CHATS) {
+      const lote = claves.slice(i, i + PARALLEL_CHATS);
+      await Promise.all(lote.map(async (chatKey) => {
+        for (const evt of grupos.get(chatKey)!) await procesarEventoIdentidad(evt);
+      }));
+    }
+    stats.id_ciclos++;
+    const dt = Date.now() - t0;
+    console.log(`[V2/ID] ciclo ${stats.id_ciclos}: ${data.length} eventos en ${dt}ms | resueltos:${stats.id_resueltos} ambiguos:${stats.id_ambiguos}`);
+    return data.length;
+  } finally {
+    identidadEnCurso = false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CICLO C — PIPELINE (IDENTIFICADO → PROCESADO)
+// ═══════════════════════════════════════════════════════════════════════════
+let pipelineEnCurso = false;
+
+async function procesarEventoPipeline(evt: any): Promise<void> {
+  const tag = `[V2/PI ev${evt.id}]`;
+  try {
+    // Buscar pipeline aplicable: trigger_tipo_evento + condiciones
+    // El payload puede tener `tipo` o `tipo_canonical` (de la extensión).
+    // Traducimos los valores en inglés de WA a los enums internos.
+    const tipoRaw = evt.payload?.tipo ?? evt.payload?.tipo_canonical ?? null;
+    const TIPO_MAP: Record<string, string> = {
+      text: 'texto', texto: 'texto',
+      image: 'imagen', imagen: 'imagen',
+      audio: 'audio', ptt: 'audio',
+      video: 'video',
+      document: 'documento', pdf: 'documento', documento: 'documento',
+      sticker: 'sticker',
+      location: 'ubicacion', ubicacion: 'ubicacion',
+      contact: 'contacto', contacto: 'contacto',
+    };
+    const tipoNormalizado = tipoRaw ? (TIPO_MAP[String(tipoRaw).toLowerCase()] ?? tipoRaw) : null;
+    const contextoEvento: Record<string, any> = {
+      ambito: evt.ambito,
+      tipo_mensaje: tipoNormalizado,
+    };
+    const pipe = await pipelineAplicable(sb, evt.tipo_evento, contextoEvento);
+
+    if (!pipe) {
+      // Sin pipeline para este tipo: marcar PROCESADO sin enjambre
+      stats.pi_skip_sin_pipe++;
+      const u = await sb.from('evento_pg')
+        .update({ estado: 'PROCESADO', ts_procesado: new Date().toISOString() })
+        .eq('id', evt.id);
+      if (u.error) console.error(`${tag} update PROCESADO sin pipe: ${u.error.message}`);
+      return;
+    }
+
+    // --agent-only: si está activo, restringir el pipeline a ese agente
+    const pipeAUsar = AGENT_ONLY ? filtrarPipelinePorAgente(pipe, AGENT_ONLY) : pipe;
+    if (!pipeAUsar) {
+      // El agente requerido no participa en este pipeline → skip silencioso (debug)
+      console.log(`${tag} skip — agente ${AGENT_ONLY} no aparece en pipeline ${pipe.codigo}`);
+      return;
+    }
+
+    // Lock liviano sobre evento_pg para evitar doble-procesamiento entre workers
+    const lockHasta = new Date(Date.now() + LEASE_PIPELINE_S * 1000).toISOString();
+    const lockPor = `pipeline-v2@${process.pid}`;
+    const { data: lockRow, error: lockErr } = await sb.from('evento_pg')
+      .update({ procesando_por: lockPor, procesando_hasta: lockHasta })
+      .eq('id', evt.id)
+      .or(`procesando_hasta.is.null,procesando_hasta.lt.${new Date().toISOString()}`)
+      .select('id')
+      .maybeSingle();
+    if (lockErr) { console.error(`${tag} lock err: ${lockErr.message}`); }
+    if (!lockRow) { console.log(`${tag} ya tomado por otro worker — skip`); return; }
+
+    const resultado = await ejecutarPipeline(sb, pipeAUsar, {
+      evento_id: evt.id,
+      chat_id: evt.chat_id,
+      persona_id: evt.persona_id,
+      proyecto_id: evt.proyecto_id,
+      ambito: evt.ambito,
+    });
+
+    stats.pi_eventos++;
+    stats.pi_costo_usd += resultado.costo_usd_total;
+    if (resultado.ok) stats.pi_ok++; else stats.pi_fallidos++;
+
+    // Marcar evento como procesado y liberar lock
+    const u = await sb.from('evento_pg')
+      .update({
+        estado: 'PROCESADO',
+        ts_procesado: new Date().toISOString(),
+        procesando_por: null,
+        procesando_hasta: null,
+      })
+      .eq('id', evt.id);
+    if (u.error) console.error(`${tag} update PROCESADO: ${u.error.message}`);
+  } catch (e: any) {
+    stats.pi_fallidos++;
+    console.error(`${tag} ERROR: ${e.message}`);
+    await sb.from('evento_pg')
+      .update({ estado: 'ERROR', procesando_por: null, procesando_hasta: null })
+      .eq('id', evt.id);
+  }
+}
+
+async function cicloPipeline(): Promise<number> {
+  if (pipelineEnCurso) return 0;
+  pipelineEnCurso = true;
+  const t0 = Date.now();
+  try {
+    const { data, error } = await withTimeout(
+      Promise.resolve(sb.from('evento_pg')
+        .select('*')
+        .eq('estado', 'IDENTIFICADO')
+        .is('deleted_at', null)
+        .order('prioridad', { ascending: true })
+        .order('ts_creado', { ascending: true })
+        .limit(BATCH_PIPELINE)),
+      QUERY_TIMEOUT_MS, 'pipeline SELECT',
+    );
+
+    if (error) { console.error('[V2/PI] poll error:', error.message); return 0; }
+    if (!data || data.length === 0) { stats.pi_ciclos++; return 0; }
+
+    // Por chat: secuencial para evitar race condition en escrituras del mismo proyecto/persona
+    const grupos = new Map<string, any[]>();
+    for (const evt of data) {
+      const key = String(evt.chat_id ?? `solo-${evt.id}`);
+      if (!grupos.has(key)) grupos.set(key, []);
+      grupos.get(key)!.push(evt);
+    }
+    const claves = Array.from(grupos.keys());
+    for (let i = 0; i < claves.length; i += PARALLEL_CHATS) {
+      const lote = claves.slice(i, i + PARALLEL_CHATS);
+      await Promise.all(lote.map(async (chatKey) => {
+        for (const evt of grupos.get(chatKey)!) await procesarEventoPipeline(evt);
+      }));
+    }
+    stats.pi_ciclos++;
+    const dt = Date.now() - t0;
+    console.log(`[V2/PI] ciclo ${stats.pi_ciclos}: ${data.length} eventos en ${dt}ms | ok:${stats.pi_ok} sin-pipe:${stats.pi_skip_sin_pipe} fail:${stats.pi_fallidos} $${stats.pi_costo_usd.toFixed(4)}`);
+    return data.length;
+  } finally {
+    pipelineEnCurso = false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════════════════════
+async function main() {
+  // 1. Registrar agentes (hoy: 0 hooks; pipeline marca cada uno NOT_IMPLEMENTED y sigue)
+  registrarTodosLosAgentes();
+  const registrados = listarAgentesRegistrados();
+  console.log(`[V2] iniciando worker pipeline v2 — supabase=${SUPABASE_URL!.replace(/^https:\/\//, '')}`);
+  console.log(`[V2] flags: once=${ONCE_MODE} skip-ex=${SKIP_EXTRACTOR} skip-id=${SKIP_IDENTIDAD} skip-pi=${SKIP_PIPELINE} agent-only=${AGENT_ONLY ?? '(off)'}`);
+  console.log(`[V2] agentes registrados: ${registrados.length === 0 ? '0 (todos NOT_IMPLEMENTED, esperado en F1)' : registrados.join(',')}`);
+
+  // 2. Pre-cargar los 3 pipelines en cache (también valida que existan en BD)
+  if (!SKIP_PIPELINE) {
+    for (const cod of ['PIPE_MENSAJE_COMERCIAL', 'PIPE_AUDIO', 'PIPE_IMAGEN']) {
+      try {
+        const p = await cargarPipeline(sb, cod);
+        console.log(`[V2] pipeline ${cod}: ${p.pasos.fases.length} fases · prioridad=${p.prioridad} · shadow=${p.shadow}`);
+      } catch (e: any) {
+        console.warn(`[V2] no pude cargar pipeline ${cod}: ${e.message}`);
+      }
+    }
+  }
+
+  // 3. Drenar pendientes al arrancar
+  if (!SKIP_EXTRACTOR) {
+    let pend = BATCH_EXTRACTOR;
+    while (pend >= BATCH_EXTRACTOR) pend = await cicloExtractor().catch(() => 0);
+  }
+  if (!SKIP_IDENTIDAD) {
+    let pend = BATCH_IDENTIDAD;
+    while (pend >= BATCH_IDENTIDAD) pend = await cicloIdentidad().catch(() => 0);
+  }
+  if (!SKIP_PIPELINE) {
+    let pend = BATCH_PIPELINE;
+    while (pend >= BATCH_PIPELINE) pend = await cicloPipeline().catch(() => 0);
+  }
+
+  if (ONCE_MODE) {
+    console.log(`[V2] --once · stats=${JSON.stringify(stats)}`);
+    process.exit(0);
+  }
+
+  // 4. Bucle periódico
+  if (!SKIP_EXTRACTOR) setInterval(() => { cicloExtractor().catch(e => console.error('[V2/EX]', e?.message)); }, POLL_EXTRACTOR_MS);
+  if (!SKIP_IDENTIDAD) setInterval(() => { cicloIdentidad().catch(e => console.error('[V2/ID]', e?.message)); }, POLL_IDENTIDAD_MS);
+  if (!SKIP_PIPELINE)  setInterval(() => { cicloPipeline().catch(e => console.error('[V2/PI]', e?.message)); }, POLL_PIPELINE_MS);
+
+  setInterval(() => console.log(`[V2] stats: ${JSON.stringify(stats)}`), STATS_INTERVAL_MS);
+
+  process.on('SIGINT', () => { console.log('[V2] SIGINT → exit'); process.exit(0); });
+}
+
+main().catch(e => { console.error('[V2] fatal:', e); process.exit(1); });

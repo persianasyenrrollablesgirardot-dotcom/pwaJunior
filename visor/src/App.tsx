@@ -8,6 +8,7 @@ import { Modulo4 } from './panels/Modulo4';
 import { Modulo5 } from './panels/Modulo5';
 import { Modulo6 } from './panels/Modulo6';
 import { Modulo7 } from './panels/Modulo7';
+import { Modulo8 } from './panels/Modulo8';
 import { ModuloPlaceholder } from './panels/ModuloPlaceholder';
 import { CentroControl } from './panels/CentroControl';
 import { Captura } from './panels/Captura';
@@ -66,7 +67,8 @@ export default function App() {
             {modulo === 'm5' && <Modulo5 />}
             {modulo === 'm6' && <Modulo6 />}
             {modulo === 'm7' && <Modulo7 />}
-            {modulo !== 'centro_control' && modulo !== 'captura' && modulo !== 'clientes' && modulo !== 'vistas_globales' && modulo !== 'm1' && modulo !== 'm2' && modulo !== 'm3' && modulo !== 'm4' && modulo !== 'm5' && modulo !== 'm6' && modulo !== 'm7' && (
+            {modulo === 'm8' && <Modulo8 />}
+            {modulo !== 'centro_control' && modulo !== 'captura' && modulo !== 'clientes' && modulo !== 'vistas_globales' && modulo !== 'm1' && modulo !== 'm2' && modulo !== 'm3' && modulo !== 'm4' && modulo !== 'm5' && modulo !== 'm6' && modulo !== 'm7' && modulo !== 'm8' && (
               <ModuloPlaceholder
                 titulo={MODULOS.find(m => m.id === modulo)?.nombre ?? '?'}
                 subtitulo="Pendiente — se construye después del MÓDULO 7"

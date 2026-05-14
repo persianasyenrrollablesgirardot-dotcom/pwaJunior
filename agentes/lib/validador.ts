@@ -45,10 +45,14 @@ export const CONFIANZA = ['CONFIRMADO', 'INFERIDO', 'DUDOSO', 'ALERTA', 'RECHAZA
 export type Confianza = typeof CONFIANZA[number];
 
 export const TIPOS_EVENTO = [
+  // originales (002_schema_inicial)
   'mensaje_entrante', 'mensaje_saliente', 'dato_extraido', 'inferencia',
   'cambio_estado', 'solicitud_aprobacion', 'contradiccion', 'pago', 'medida',
   'garantia', 'variacion', 'tarea', 'alerta', 'evidencia', 'pregunta_humano',
   'primer_contacto', 'cambio_externo', 'correccion_humana',
+  // agregados por migración 025 para agentes L4-L8
+  'cotizacion', 'cotizacion_item', 'cotizacion_objecion',
+  'abono', 'instalacion', 'mantenimiento', 'review', 'reclamo', 'costo',
 ] as const;
 
 // ─── Output canónico de un agente ────────────────────────────────────────
@@ -85,6 +89,33 @@ export interface ContextoValidacion {
   agente: string;
 }
 
+// ─── Helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Resuelve un msg_id citado por el LLM contra los disponibles, tolerando que
+ * el LLM omita el prefijo `true_`/`false_` (que indica fromMe en WhatsApp).
+ * El LLM tiende a interpretar esos prefijos como booleanos literales y los
+ * recorta al copiar el id.
+ *
+ * Retorna el msg_id real si hay match (directo o con prefijo restaurado), o
+ * null si no existe ni siquiera tolerando el prefijo.
+ */
+export function resolverMsgId(citado: string, disponibles: Set<string>): string | null {
+  if (!citado) return null;
+  if (disponibles.has(citado)) return citado;
+  // Prefijo true_/false_ omitido
+  if (disponibles.has(`false_${citado}`)) return `false_${citado}`;
+  if (disponibles.has(`true_${citado}`))  return `true_${citado}`;
+  // El LLM puede haber truncado todo el prefijo "false_NUMBER@" o "true_NUMBER@"
+  // y citado solo el sufijo "lid_XXX" o "broadcast_XXX". Buscar matches por sufijo.
+  if (citado.includes('lid_') || citado.includes('broadcast_') || citado.startsWith('msg_')) {
+    for (const real of disponibles) {
+      if (real.endsWith(citado) || real.endsWith('@' + citado)) return real;
+    }
+  }
+  return null;
+}
+
 // ─── Validación principal ────────────────────────────────────────────────
 
 export function validarOutput(out: OutputAgente, ctx: ContextoValidacion): void {
@@ -109,11 +140,17 @@ export function validarOutput(out: OutputAgente, ctx: ContextoValidacion): void 
     }
   }
 
-  // 3. Cada msg_id citado debe existir en el chat actual
-  for (const msgId of out.evidencia_msg_ids ?? []) {
-    if (!ctx.msg_ids_disponibles.has(msgId)) {
-      throw new ValidacionError('R-anti-alucinacion',
-        `msg_id citado '${msgId}' NO existe en el chat actual del agente`);
+  // 3. Cada msg_id citado debe existir en el chat actual.
+  // Tolerar truncado de prefijo true_/false_ y sustituir in-place por el real
+  // para que se persista el id válido en BD.
+  if (Array.isArray(out.evidencia_msg_ids)) {
+    for (let i = 0; i < out.evidencia_msg_ids.length; i++) {
+      const real = resolverMsgId(out.evidencia_msg_ids[i], ctx.msg_ids_disponibles);
+      if (!real) {
+        throw new ValidacionError('R-anti-alucinacion',
+          `msg_id citado '${out.evidencia_msg_ids[i]}' NO existe en el chat actual del agente`);
+      }
+      out.evidencia_msg_ids[i] = real;
     }
   }
 

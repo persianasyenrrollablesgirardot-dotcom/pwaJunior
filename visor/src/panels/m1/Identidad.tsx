@@ -309,7 +309,7 @@ function ModalEditarPersona({ persona, todasPersonas, modo, onClose, onDone, onE
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
         <FormRow label="Rol"><input style={inp} value={form.rol} onChange={e => setForm({...form, rol: e.target.value})} placeholder="comprador, arquitecto, esposa..." /></FormRow>
         <FormRow label="Ámbito principal">
-          <select style={inp} value={form.ambito_principal} onChange={e => setForm({...form, ambito_principal: e.target.value})}>
+          <select style={inp} value={form.ambito_principal} onChange={e => setForm({...form, ambito_principal: e.target.value as any})}>
             {AMBITOS.map(a => <option key={a.codigo} value={a.codigo}>{a.label}</option>)}
           </select>
         </FormRow>

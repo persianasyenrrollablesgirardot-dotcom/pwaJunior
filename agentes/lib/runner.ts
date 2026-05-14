@@ -58,9 +58,42 @@ export interface ResultadoEjecucion {
   motivo_skip?: 'lock' | 'dlq' | 'desactivado';
 }
 
+/**
+ * Resultado de procesarSinLLM — para agentes que NO usan chat LLM
+ * (ej. A1_AUDIO con Whisper, A1_OCR con Vision, o agentes que solo leen BD).
+ */
+export interface ResultadoNoLLM {
+  output: OutputAgente;
+  costo_usd: number;
+  latencia_ms: number;
+  modelo: string;            // 'whisper-1', 'gpt-4o-mini', 'lookup', etc.
+  tokens_in?: number;
+  tokens_out?: number;
+  tokens_cached?: number;
+}
+
 export interface AgenteHooks<TDatos = any> {
   cargarContexto(sb: SupabaseClient, params: { evento_id: number; chat_id: number; persona_id: number; proyecto_id: number | null; correcciones_previas: any[] }): Promise<TDatos>;
-  construirPrompt(datos: TDatos, agente: AgenteDefinicion): ChatMessage[];
+
+  /**
+   * Construye los mensajes para el chat LLM (DeepSeek).
+   * REQUERIDO si el agente usa chat LLM. OMITIR si el agente define procesarSinLLM.
+   */
+  construirPrompt?(datos: TDatos, agente: AgenteDefinicion): ChatMessage[];
+
+  /**
+   * Ruta alternativa al chat LLM: el agente produce output directamente
+   * (Whisper, Vision, búsqueda en BD, regex). Si está definido, el runner
+   * lo usa Y SALTEA deepseekChat + parseo JSON. La validación estándar
+   * y postProcesar siguen corriendo.
+   */
+  procesarSinLLM?(
+    sb: SupabaseClient,
+    datos: TDatos,
+    agente: AgenteDefinicion,
+    params: { evento_id: number; chat_id: number; persona_id: number; proyecto_id: number | null; ambito: string },
+  ): Promise<ResultadoNoLLM>;
+
   validarOutputEspecifico?(out: OutputAgente, datos: TDatos): void;
   postProcesar(sb: SupabaseClient, out: OutputAgente, ctx: ContextoAgente): Promise<{ entidad_tipo?: string; entidad_id?: number } | void>;
 }
@@ -101,12 +134,18 @@ function mapTipoDecision(tipo_evento: string): string {
 
 /**
  * Ejecuta un agente sobre un evento específico.
+ *
+ * `opts.skipLock=true` salta el lock del evento — el caller (típicamente
+ * pipeline.ts cuando lo invoca el worker) ya tomó el lock global del evento
+ * y coordina la concurrencia entre agentes paralelos. Sin esto, agentes en
+ * fase 'paralelo' del pipeline fallan todos con "evento ya tomado".
  */
 export async function ejecutarAgente<TDatos = any>(
   sb: SupabaseClient,
   agente: AgenteDefinicion,
   params: { evento_id: number; chat_id: number; persona_id: number; proyecto_id: number | null; ambito: string },
   hooks: AgenteHooks<TDatos>,
+  opts: { skipLock?: boolean } = {},
 ): Promise<ResultadoEjecucion> {
   const t0 = Date.now();
   const tag = `${agente.codigo}/ev${params.evento_id}`;
@@ -115,6 +154,14 @@ export async function ejecutarAgente<TDatos = any>(
 
   // ─── 1. LOCK DEL EVENTO ─────────────────────────────────────────────
   // Tomar lease específico de este agente. Si otro worker ya lo tomó, salir.
+  // Si skipLock=true: leer intentos_agente sin tomar lock (caller ya lockeó).
+  if (opts.skipLock) {
+    const { data: row } = await sb.from('evento_pg')
+      .select('intentos_agente')
+      .eq('id', params.evento_id)
+      .maybeSingle();
+    intentosPrevios = Number(row?.intentos_agente ?? 0);
+  } else {
   const procesandoHasta = new Date(Date.now() + LEASE_SEGUNDOS * 1000).toISOString();
   const procesandoPor = `${agente.codigo}@${process.pid}`;
   const { data: lockData, error: lockErr } = await sb
@@ -133,25 +180,30 @@ export async function ejecutarAgente<TDatos = any>(
   } else {
     intentosPrevios = Number(lockData.intentos_agente ?? 0);
   }
+  } // fin del else (lock path)
 
-  // ─── 2. CHECK DEAD LETTER ───────────────────────────────────────────
-  if (intentosPrevios >= MAX_INTENTOS_AGENTE) {
-    console.warn(`[${tag}] evento con ${intentosPrevios} intentos previos — moviendo a DLQ`);
-    await sb.from('dead_letter_queue').insert({
-      evento_id: params.evento_id,
-      agente_codigo: agente.codigo,
-      ultimo_error: `Reintentos agotados (${intentosPrevios})`,
-      stack_trace: null,
-      intentos: intentosPrevios,
-    } as any);
-    await sb.from('evento_pg').update({ estado: 'ERROR', procesando_por: null, procesando_hasta: null }).eq('id', params.evento_id);
-    return { ok: false, error: 'max-intentos', costo_usd: 0, latencia_ms: Date.now() - t0, shadow: agente.shadow, fue_al_buzon: false, motivo_skip: 'dlq' };
+  // ─── 2. CHECK DEAD LETTER + 3. INCREMENTAR INTENTOS ───────────────
+  // Estos pasos SOLO aplican fuera del pipeline. Dentro del pipeline,
+  // `intentos_agente` cuenta los pasos del pipeline (no reintentos reales),
+  // así que un evento con 4 agentes se iría a DLQ en el 4to. Cada agente
+  // tiene su propio contador en `agente_invocaciones.intentos`.
+  if (!opts.skipLock) {
+    if (intentosPrevios >= MAX_INTENTOS_AGENTE) {
+      console.warn(`[${tag}] evento con ${intentosPrevios} intentos previos — moviendo a DLQ`);
+      await sb.from('dead_letter_queue').insert({
+        evento_id: params.evento_id,
+        agente_codigo: agente.codigo,
+        ultimo_error: `Reintentos agotados (${intentosPrevios})`,
+        stack_trace: null,
+        intentos: intentosPrevios,
+      } as any);
+      await sb.from('evento_pg').update({ estado: 'ERROR', procesando_por: null, procesando_hasta: null }).eq('id', params.evento_id);
+      return { ok: false, error: 'max-intentos', costo_usd: 0, latencia_ms: Date.now() - t0, shadow: agente.shadow, fue_al_buzon: false, motivo_skip: 'dlq' };
+    }
+    await sb.from('evento_pg')
+      .update({ intentos_agente: intentosPrevios + 1 } as any)
+      .eq('id', params.evento_id);
   }
-
-  // ─── 3. INCREMENTAR INTENTOS ────────────────────────────────────────
-  await sb.from('evento_pg')
-    .update({ intentos_agente: intentosPrevios + 1 } as any)
-    .eq('id', params.evento_id);
 
   // ─── 4. CARGAR CORRECCIONES PREVIAS (memoria de errores pasados) ───
   const { data: correccionesRaw } = await sb
@@ -182,66 +234,107 @@ export async function ejecutarAgente<TDatos = any>(
     .is('deleted_at', null);
   const msg_ids_disponibles = new Set((msgs ?? []).map(m => m.canal_msg_id));
 
-  // ─── 8. CONSTRUIR PROMPT ───────────────────────────────────────────
-  let messages: ChatMessage[];
-  try {
-    messages = hooks.construirPrompt(datos, agente);
-    // Inyectar correcciones previas al system prompt si hay alguna
-    if (correcciones_previas.length > 0 && messages.length > 0 && messages[0].role === 'system') {
-      const correccionesTexto = correcciones_previas
-        .slice(0, 5)
-        .map(c => `- ${c.campo}: ${JSON.stringify(c.valor_nuevo)}`)
-        .join('\n');
-      messages[0] = {
-        ...messages[0],
-        content: messages[0].content +
-          `\n\n# CORRECCIONES PREVIAS DEL HUMANO PARA ESTA PERSONA\n` +
-          `Tenelas en cuenta. NO repitas errores corregidos antes:\n${correccionesTexto}`,
-      };
+  // ─── 8-11. OBTENER OUTPUT — vía LLM o vía procesarSinLLM
+  // Dos caminos: si el hook define procesarSinLLM (Whisper, Vision, lookup),
+  // lo usamos y salteamos chat LLM + parse JSON. Si no, flujo normal con DeepSeek.
+  let output: OutputAgente;
+  let costoInvocacion = 0;
+  let latenciaInvocacion = 0;
+  let modeloInvocacion = 'deepseek-chat';
+  let tokensIn: number | null = null;
+  let tokensOut: number | null = null;
+  let tokensCached: number | null = null;
+
+  if (hooks.procesarSinLLM) {
+    // Camino non-LLM
+    try {
+      const r = await hooks.procesarSinLLM(sb, datos, agente, params);
+      output = r.output;
+      costoInvocacion = r.costo_usd;
+      latenciaInvocacion = r.latencia_ms;
+      modeloInvocacion = r.modelo;
+      tokensIn = r.tokens_in ?? null;
+      tokensOut = r.tokens_out ?? null;
+      tokensCached = r.tokens_cached ?? null;
+    } catch (e: any) {
+      return await finalizarConError(sb, agente, params, t0, 0, intentosPrevios + 1, 'procesarSinLLM: ' + e.message, tag);
     }
-  } catch (e: any) {
-    return await finalizarConError(sb, agente, params, t0, 0, intentosPrevios + 1, 'construirPrompt: ' + e.message, tag);
+  } else if (hooks.construirPrompt) {
+    // Camino chat LLM (DeepSeek)
+    let messages: ChatMessage[];
+    try {
+      messages = hooks.construirPrompt(datos, agente);
+      if (correcciones_previas.length > 0 && messages.length > 0 && messages[0].role === 'system') {
+        const correccionesTexto = correcciones_previas
+          .slice(0, 5)
+          .map(c => `- ${c.campo}: ${JSON.stringify(c.valor_nuevo)}`)
+          .join('\n');
+        messages[0] = {
+          ...messages[0],
+          content: messages[0].content +
+            `\n\n# CORRECCIONES PREVIAS DEL HUMANO PARA ESTA PERSONA\n` +
+            `Tenelas en cuenta. NO repitas errores corregidos antes:\n${correccionesTexto}`,
+        };
+      }
+    } catch (e: any) {
+      return await finalizarConError(sb, agente, params, t0, 0, intentosPrevios + 1, 'construirPrompt: ' + e.message, tag);
+    }
+
+    let llm: DeepSeekResult;
+    try {
+      llm = await deepseekChat({
+        messages,
+        response_format: { type: 'json_object' },
+        max_tokens: 1000,
+        costoLimiteUsd: agente.costo_limite_usd,
+        agente: agente.codigo,
+      });
+    } catch (e: any) {
+      return await finalizarConError(sb, agente, params, t0, 0, intentosPrevios + 1, 'LLM: ' + e.message, tag);
+    }
+    costoInvocacion = llm.costo_usd;
+    latenciaInvocacion = llm.latencia_ms;
+    modeloInvocacion = 'deepseek-chat';
+    tokensIn = llm.tokens_in;
+    tokensOut = llm.tokens_out;
+    tokensCached = llm.tokens_cached;
+
+    // Parsear JSON del LLM
+    const parsed = parsearJSONSeguro(llm.contenido);
+    if (!parsed.ok) {
+      const parseErr = (parsed as { ok: false; error: string }).error;
+      // Persistir invocación fallida antes de salir
+      const { data: invErr } = await sb.from('agente_invocaciones').insert({
+        agente_codigo: agente.codigo, evento_id: params.evento_id, persona_id: params.persona_id,
+        modelo: modeloInvocacion, tokens_in: tokensIn, tokens_out: tokensOut, tokens_cached: tokensCached,
+        costo_usd: costoInvocacion, latencia_ms: latenciaInvocacion, intentos: intentosPrevios + 1,
+        ok: false, error_msg: 'parse: ' + parseErr, shadow: agente.shadow,
+      } as any).select('id').maybeSingle();
+      invocacionId = invErr?.id ?? null;
+      return await finalizarConError(sb, agente, params, t0, costoInvocacion, intentosPrevios + 1, 'parse: ' + parseErr, tag);
+    }
+    output = parsed.data as OutputAgente;
+  } else {
+    return await finalizarConError(sb, agente, params, t0, 0, intentosPrevios + 1,
+      `agente ${agente.codigo} no define construirPrompt ni procesarSinLLM`, tag);
   }
 
-  // ─── 9. LLAMAR LLM ─────────────────────────────────────────────────
-  let llm: DeepSeekResult;
-  try {
-    llm = await deepseekChat({
-      messages,
-      response_format: { type: 'json_object' },
-      max_tokens: 1000,
-      costoLimiteUsd: agente.costo_limite_usd,
-      agente: agente.codigo,
-    });
-  } catch (e: any) {
-    return await finalizarConError(sb, agente, params, t0, 0, intentosPrevios + 1, 'LLM: ' + e.message, tag);
-  }
-
-  // ─── 10. PERSISTIR agente_invocaciones (siempre, incluso si falla parsing/validación)
+  // ─── PERSISTIR agente_invocaciones (común a ambos caminos)
   const { data: invRow } = await sb.from('agente_invocaciones').insert({
     agente_codigo: agente.codigo,
     evento_id: params.evento_id,
     persona_id: params.persona_id,
-    modelo: 'deepseek-chat',
-    tokens_in: llm.tokens_in,
-    tokens_out: llm.tokens_out,
-    tokens_cached: llm.tokens_cached,
-    costo_usd: llm.costo_usd,
-    latencia_ms: llm.latencia_ms,
+    modelo: modeloInvocacion,
+    tokens_in: tokensIn,
+    tokens_out: tokensOut,
+    tokens_cached: tokensCached,
+    costo_usd: costoInvocacion,
+    latencia_ms: latenciaInvocacion,
     intentos: intentosPrevios + 1,
-    ok: true,       // se actualiza después si hay error post-LLM
+    ok: true,
     shadow: agente.shadow,
   } as any).select('id').maybeSingle();
   invocacionId = invRow?.id ?? null;
-
-  // ─── 11. PARSEAR JSON ──────────────────────────────────────────────
-  const parsed = parsearJSONSeguro(llm.contenido);
-  if (!parsed.ok) {
-    const parseErr = (parsed as { ok: false; error: string }).error;
-    await marcarInvocacionError(sb, invocacionId, 'parse: ' + parseErr);
-    return await finalizarConError(sb, agente, params, t0, llm.costo_usd, intentosPrevios + 1, 'parse: ' + parseErr, tag);
-  }
-  const output = parsed.data as OutputAgente;
 
   // ─── 12. VALIDAR (estándar + específico)
   const ctxVal: ContextoValidacion = {
@@ -259,14 +352,14 @@ export async function ejecutarAgente<TDatos = any>(
         canal: 'interno', ambito: params.ambito, tipo_evento: 'alerta',
         estado: 'PROCESADO', persona_id: params.persona_id, proyecto_id: params.proyecto_id, chat_id: params.chat_id,
         agente_origen: agente.codigo, evento_padre_id: params.evento_id,
-        confianza: 'RECHAZADO', costo_usd: llm.costo_usd,
+        confianza: 'RECHAZADO', costo_usd: costoInvocacion,
         payload: { regla_violada: e.regla, mensaje: e.message, output_intentado: output },
         ts_canal: new Date().toISOString(),
       } as any);
       await marcarInvocacionError(sb, invocacionId, `validación: ${e.regla} ${e.message}`);
       await sb.from('evento_pg').update({ procesando_por: null, procesando_hasta: null }).eq('id', params.evento_id);
       console.error(`[${tag}] validación falló (${e.regla}):`, e.message);
-      return { ok: false, error: e.message, costo_usd: llm.costo_usd, latencia_ms: Date.now() - t0, shadow: agente.shadow, fue_al_buzon: false };
+      return { ok: false, error: e.message, costo_usd: costoInvocacion, latencia_ms: Date.now() - t0, shadow: agente.shadow, fue_al_buzon: false };
     }
     throw e;
   }
@@ -279,12 +372,12 @@ export async function ejecutarAgente<TDatos = any>(
   };
 
   if (agente.shadow) {
-    console.log(`[${tag}] SHADOW · ${llm.latencia_ms}ms · $${llm.costo_usd.toFixed(6)} · out:`, JSON.stringify(output).slice(0, 200));
+    console.log(`[${tag}] SHADOW · ${latenciaInvocacion}ms · $${costoInvocacion.toFixed(6)} · ${modeloInvocacion} · out:`, JSON.stringify(output).slice(0, 200));
     await sb.from('evento_pg').insert({
       canal: 'interno', ambito: params.ambito, tipo_evento: output.tipo_evento,
       estado: 'PROCESADO', persona_id: params.persona_id, proyecto_id: params.proyecto_id, chat_id: params.chat_id,
       agente_origen: agente.codigo, evento_padre_id: params.evento_id,
-      confianza: output.confianza, costo_usd: llm.costo_usd,
+      confianza: output.confianza, costo_usd: costoInvocacion,
       shadow: true,
       payload: output.payload,
       evidencia_ids: { msg_ids: output.evidencia_msg_ids },
@@ -292,7 +385,7 @@ export async function ejecutarAgente<TDatos = any>(
     } as any);
     // Liberar lock
     await sb.from('evento_pg').update({ procesando_por: null, procesando_hasta: null }).eq('id', params.evento_id);
-    return { ok: true, output, costo_usd: llm.costo_usd, latencia_ms: Date.now() - t0, shadow: true, fue_al_buzon: false };
+    return { ok: true, output, costo_usd: costoInvocacion, latencia_ms: Date.now() - t0, shadow: true, fue_al_buzon: false };
   }
 
   // ─── 14. POST-PROCESAR (escribir a tablas de negocio)
@@ -302,7 +395,7 @@ export async function ejecutarAgente<TDatos = any>(
     if (ret) entidadInfo = ret;
   } catch (e: any) {
     await marcarInvocacionError(sb, invocacionId, 'postProcesar: ' + e.message);
-    return await finalizarConError(sb, agente, params, t0, llm.costo_usd, intentosPrevios + 1, 'postProcesar: ' + e.message, tag);
+    return await finalizarConError(sb, agente, params, t0, costoInvocacion, intentosPrevios + 1, 'postProcesar: ' + e.message, tag);
   }
 
   // ─── 15. REGISTRAR evento_pg de la inferencia
@@ -310,7 +403,7 @@ export async function ejecutarAgente<TDatos = any>(
     canal: 'interno', ambito: params.ambito, tipo_evento: output.tipo_evento,
     estado: 'PROCESADO', persona_id: params.persona_id, proyecto_id: params.proyecto_id, chat_id: params.chat_id,
     agente_origen: agente.codigo, evento_padre_id: params.evento_id,
-    confianza: output.confianza, costo_usd: llm.costo_usd,
+    confianza: output.confianza, costo_usd: costoInvocacion,
     payload: output.payload,
     evidencia_ids: { msg_ids: output.evidencia_msg_ids },
     ts_canal: new Date().toISOString(),
@@ -342,8 +435,8 @@ export async function ejecutarAgente<TDatos = any>(
     .update({ procesando_por: null, procesando_hasta: null, intentos_agente: 0 } as any)
     .eq('id', params.evento_id);
 
-  console.log(`[${tag}] ✓ ${output.tipo_evento} · ${output.confianza} · $${llm.costo_usd.toFixed(6)} · ${fue_al_buzon ? 'AL BUZÓN' : 'directo'}`);
-  return { ok: true, output, costo_usd: llm.costo_usd, latencia_ms: Date.now() - t0, shadow: false, fue_al_buzon };
+  console.log(`[${tag}] ✓ ${output.tipo_evento} · ${output.confianza} · $${costoInvocacion.toFixed(6)} · ${modeloInvocacion} · ${fue_al_buzon ? 'AL BUZÓN' : 'directo'}`);
+  return { ok: true, output, costo_usd: costoInvocacion, latencia_ms: Date.now() - t0, shadow: false, fue_al_buzon };
 }
 
 // ── Helpers privados ─────────────────────────────────────────────────

@@ -801,7 +801,7 @@ export async function fetchResumenComercial(personaId?: number): Promise<Resumen
 export async function fetchCotizacionesGlobal(opts: { recompraDesdeMeses?: number } = {}): Promise<{ cotizacion: Cotizacion; persona_nombre: string | null }[]> {
   const { data, error } = await supabase
     .from('cotizaciones')
-    .select('*, personas(id, nombre)')
+    .select('*, personas!cotizaciones_persona_id_fkey(id, nombre)')
     .eq('shadow', false)
     .is('deleted_at', null)
     .order('updated_at', { ascending: false })
@@ -2440,15 +2440,16 @@ export async function fetchEventosHijos(eventoId: number): Promise<any[]> {
 // ─── Buzón de validación (acciones humanas) ──────────────────────────
 
 export async function aprobarItemBuzon(itemId: number, comentario?: string): Promise<void> {
-  const { error } = await supabase
-    .from('buzon_validacion')
-    .update({
-      estado: 'aprobado',
-      resuelto_at: new Date().toISOString(),
-      comentario_humano: comentario ?? null,
-      resuelto_por: 1,  // Jhon (rol dueño) por ahora
-    })
-    .eq('id', itemId);
+  // RPC atómica: marca el buzón como aprobado y, si el ítem tiene
+  // entidad polimórfica (cotizacion / abono / medida / etc), levanta su
+  // shadow=false para que aparezca en el módulo correspondiente.
+  // Antes esto era un UPDATE plano que solo cambiaba estado, dejando la
+  // entidad shadow huérfana → el ítem nunca llegaba a M2/M3/etc.
+  const { error } = await supabase.rpc('aprobar_buzon_atomic', {
+    p_buzon_id: itemId,
+    p_resuelto_por: 1, // Jhon (rol dueño) por ahora
+    p_comentario: comentario ?? null,
+  });
   if (error) throw error;
 }
 
@@ -2663,6 +2664,8 @@ export async function fetchBuzon(): Promise<ItemBuzon[]> {
   return (data ?? []).map(b => ({
     id: b.id,
     evento_id: b.evento_id,
+    persona_id: b.persona_id ?? null,
+    proyecto_id: b.proyecto_id ?? null,
     persona_nombre: b.persona_nombre ?? '(sin persona)',
     proyecto_nombre: b.proyecto_nombre ?? undefined,
     ambito: b.ambito as Ambito,

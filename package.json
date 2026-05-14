@@ -8,6 +8,8 @@
     "migrate": "node apply_migration.mjs",
     "worker:pipeline": "tsx workers/worker_pipeline.ts",
     "worker:pipeline:once": "tsx workers/worker_pipeline.ts --once",
+    "worker:v2": "tsx workers/worker_pipeline_v2.ts",
+    "worker:v2:once": "tsx workers/worker_pipeline_v2.ts --once",
     "visor:dev": "cd visor && npm run dev"
   },
   "dependencies": {
