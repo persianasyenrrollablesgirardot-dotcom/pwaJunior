@@ -72,11 +72,13 @@ const TOLERANCIA_MATCH_COP = 100; // diferencia ≤ $100 → considerar match ex
 export const a5ComprobHooks: AgenteHooks<DatosA5Comprob> = {
   async cargarContexto(sb, params) {
     const { data: evt } = await sb.from('evento_pg')
-      .select('evidencia_ids, ts_canal')
+      .select('evidencia_ids, ts_canal, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
-    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? null;
-    if (!msgIdPrincipal) throw new Error(`evento ${params.evento_id} sin evidencia_ids.msg_ids`);
+    // Eventos originales (mensaje_*) traen canal_msg_id directo; eventos
+    // derivados traen evidencia_ids.msg_ids. Tomar el primero disponible.
+    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? evt?.canal_msg_id ?? null;
+    if (!msgIdPrincipal) throw new Error(`evento ${params.evento_id} sin canal_msg_id ni evidencia_ids.msg_ids`);
 
     const { data: m } = await sb.from('mensajes')
       .select('canal_msg_id, direccion, texto, tipo, ts_canal, metadata')
@@ -295,8 +297,21 @@ activa.`,
       }
       const v: ValidacionMatch | null = p.validacion_match;
       if (v) {
-        if (typeof v.monto_coincide !== 'boolean') throw new ValidacionError('schema', 'monto_coincide debe ser boolean');
-        if (typeof v.es_abono_parcial !== 'boolean') throw new ValidacionError('schema', 'es_abono_parcial debe ser boolean');
+        // Si no hay cotización activa (esperado_monto=null), monto_coincide y
+        // es_abono_parcial pueden ser null (no hay nada contra qué comparar).
+        const hayEsperado = v.esperado_monto !== null && v.esperado_monto !== undefined;
+        if (hayEsperado) {
+          if (typeof v.monto_coincide !== 'boolean') throw new ValidacionError('schema', 'con esperado_monto, monto_coincide debe ser boolean');
+          if (typeof v.es_abono_parcial !== 'boolean') throw new ValidacionError('schema', 'con esperado_monto, es_abono_parcial debe ser boolean');
+        } else {
+          // Sin cotización activa: aceptamos null o boolean
+          if (v.monto_coincide !== null && v.monto_coincide !== undefined && typeof v.monto_coincide !== 'boolean') {
+            throw new ValidacionError('schema', 'monto_coincide debe ser null o boolean');
+          }
+          if (v.es_abono_parcial !== null && v.es_abono_parcial !== undefined && typeof v.es_abono_parcial !== 'boolean') {
+            throw new ValidacionError('schema', 'es_abono_parcial debe ser null o boolean');
+          }
+        }
         if (v.esperado_monto !== null && v.esperado_monto !== undefined && d.monto_visible !== null && d.monto_visible !== undefined) {
           const diffEsperada = v.esperado_monto - d.monto_visible;
           if (v.diferencia !== null && v.diferencia !== undefined) {

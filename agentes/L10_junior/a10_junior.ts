@@ -87,10 +87,10 @@ export const a10JuniorHooks: AgenteHooks<DatosA10Junior> = {
   async cargarContexto(sb, params) {
     // 1. Pregunta de Jhon (el mensaje del evento)
     const { data: evt } = await sb.from('evento_pg')
-      .select('evidencia_ids, ts_canal')
+      .select('evidencia_ids, ts_canal, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
-    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? null;
+    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? evt?.canal_msg_id ?? null;
 
     let preguntaJhon: MensajeCtx | null = null;
     if (msgIdPrincipal) {

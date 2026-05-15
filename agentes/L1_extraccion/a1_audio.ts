@@ -35,14 +35,16 @@ interface DatosA1Audio {
 export const a1AudioHooks: AgenteHooks<DatosA1Audio> = {
   async cargarContexto(sb, params) {
     const { data: evt, error: eErr } = await sb.from('evento_pg')
-      .select('evidencia_ids, ts_canal, payload')
+      .select('evidencia_ids, ts_canal, payload, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
     if (eErr || !evt) throw new Error(`evento ${params.evento_id} no encontrado: ${eErr?.message}`);
 
+    // Eventos originales (mensaje_entrante/saliente) traen canal_msg_id directo;
+    // eventos derivados traen evidencia_ids.msg_ids. Tomar el primero disponible.
     const evidIds = (evt.evidencia_ids as any)?.msg_ids ?? [];
-    const msgIdPrincipal: string | null = evidIds[0] ?? null;
-    if (!msgIdPrincipal) throw new Error(`evento ${params.evento_id} sin evidencia_ids.msg_ids`);
+    const msgIdPrincipal: string | null = evidIds[0] ?? evt.canal_msg_id ?? null;
+    if (!msgIdPrincipal) throw new Error(`evento ${params.evento_id} sin canal_msg_id ni evidencia_ids.msg_ids`);
 
     const { data: m, error: mErr } = await sb.from('mensajes')
       .select('canal_msg_id, tipo, texto, media_mime, metadata')

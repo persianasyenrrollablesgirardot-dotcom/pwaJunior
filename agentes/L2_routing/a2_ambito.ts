@@ -65,10 +65,10 @@ export const a2AmbitoHooks: AgenteHooks<DatosA2Ambito> = {
 
     // 2. Mensaje disparador
     const { data: evt } = await sb.from('evento_pg')
-      .select('evidencia_ids')
+      .select('evidencia_ids, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
-    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? null;
+    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? evt?.canal_msg_id ?? null;
 
     let mensajeDisparador: MensajeCtx | null = null;
     if (msgIdPrincipal) {

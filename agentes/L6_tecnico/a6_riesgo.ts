@@ -72,10 +72,10 @@ const N_CONTEXTO = 5;
 export const a6RiesgoHooks: AgenteHooks<DatosA6Riesgo> = {
   async cargarContexto(sb, params) {
     const { data: evt } = await sb.from('evento_pg')
-      .select('evidencia_ids, ts_canal')
+      .select('evidencia_ids, ts_canal, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
-    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? null;
+    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? evt?.canal_msg_id ?? null;
 
     let mensajeActual: MensajeCtx | null = null;
     if (msgIdPrincipal) {
@@ -161,7 +161,7 @@ export const a6RiesgoHooks: AgenteHooks<DatosA6Riesgo> = {
     // Si no hay cotizaciones aún, leer outputs shadow recientes de A4_COTIZ
     if (sistemas.length === 0) {
       const { data: cotShadow } = await sb.from('evento_pg')
-        .select('payload')
+        .select('payload, canal_msg_id')
         .eq('evento_padre_id', params.evento_id)
         .eq('agente_origen', 'A4_COTIZ')
         .eq('shadow', true)

@@ -109,14 +109,17 @@ function clasificarTipoImagen(aiText: string, caption: string | null): { tipo: T
 export const a1OcrHooks: AgenteHooks<DatosA1Ocr> = {
   async cargarContexto(sb, params) {
     const { data: evt, error: eErr } = await sb.from('evento_pg')
-      .select('evidencia_ids, payload')
+      .select('evidencia_ids, payload, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
     if (eErr || !evt) throw new Error(`evento ${params.evento_id} no encontrado: ${eErr?.message}`);
 
+    // Eventos originales (mensaje_entrante/saliente) traen canal_msg_id directo
+    // en la columna; los eventos derivados de agentes traen evidencia_ids.msg_ids.
+    // Tomar lo primero que exista.
     const evidIds = (evt.evidencia_ids as any)?.msg_ids ?? [];
-    const msgIdPrincipal: string | null = evidIds[0] ?? null;
-    if (!msgIdPrincipal) throw new Error(`evento ${params.evento_id} sin evidencia_ids.msg_ids`);
+    const msgIdPrincipal: string | null = evidIds[0] ?? evt.canal_msg_id ?? null;
+    if (!msgIdPrincipal) throw new Error(`evento ${params.evento_id} sin canal_msg_id ni evidencia_ids.msg_ids`);
 
     const { data: m, error: mErr } = await sb.from('mensajes')
       .select('canal_msg_id, tipo, texto, media_mime, metadata')

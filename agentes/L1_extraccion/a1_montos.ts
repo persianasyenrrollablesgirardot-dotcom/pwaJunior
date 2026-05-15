@@ -66,13 +66,13 @@ const MAX_COP = 50_000_000;  // tope superior (sanity)
 export const a1MontosHooks: AgenteHooks<DatosA1Montos> = {
   async cargarContexto(sb, params) {
     const { data: evt, error: eErr } = await sb.from('evento_pg')
-      .select('evidencia_ids, ts_canal, payload')
+      .select('evidencia_ids, ts_canal, payload, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
     if (eErr || !evt) throw new Error(`evento ${params.evento_id} no encontrado: ${eErr?.message}`);
 
     const evidIds = (evt.evidencia_ids as any)?.msg_ids ?? [];
-    const msgIdPrincipal: string | null = evidIds[0] ?? null;
+    const msgIdPrincipal: string | null = evidIds[0] ?? evt.canal_msg_id ?? null;
 
     let mensajeActual: MensajeCtx | null = null;
     if (msgIdPrincipal) {

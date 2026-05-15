@@ -78,10 +78,10 @@ export const a3IdentidadHooks: AgenteHooks<DatosA3Identidad> = {
     // 3. msg_id del evento (para evidencia válida). Fallback: último mensaje
     // del chat si el evento no tiene evidencia_ids (P-005).
     const { data: evt } = await sb.from('evento_pg')
-      .select('evidencia_ids')
+      .select('evidencia_ids, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
-    let msgIdPrincipal: string = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? '';
+    let msgIdPrincipal: string = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? evt?.canal_msg_id ?? '';
     if (!msgIdPrincipal) {
       const { data: m } = await sb.from('mensajes')
         .select('canal_msg_id')

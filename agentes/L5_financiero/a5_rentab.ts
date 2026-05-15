@@ -64,7 +64,7 @@ export const a5RentabHooks: AgenteHooks<DatosA5Rentab> = {
     let cotizacionId: number | null = null;
 
     const { data: evt } = await sb.from('evento_pg')
-      .select('payload, evidencia_ids')
+      .select('payload, evidencia_ids, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
     cotizacionId = (evt?.payload as any)?.cotizacion_id ?? null;
@@ -105,7 +105,7 @@ export const a5RentabHooks: AgenteHooks<DatosA5Rentab> = {
       .eq('cotizacion_id', cotizacionId)
       .is('deleted_at', null);
 
-    const eventoMsgId: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? null;
+    const eventoMsgId: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? evt?.canal_msg_id ?? null;
 
     return {
       cotizacion_id: cot.id,

@@ -64,10 +64,10 @@ const QUIEN_MIDIO_RIESGO = ['cliente', 'familiar'];
 export const a6MedidasHooks: AgenteHooks<DatosA6Medidas> = {
   async cargarContexto(sb, params) {
     const { data: evt } = await sb.from('evento_pg')
-      .select('evidencia_ids, ts_canal, payload')
+      .select('evidencia_ids, ts_canal, payload, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
-    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? null;
+    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? evt?.canal_msg_id ?? null;
 
     let mensajeActual: MensajeCtx | null = null;
     if (msgIdPrincipal) {
@@ -109,7 +109,7 @@ export const a6MedidasHooks: AgenteHooks<DatosA6Medidas> = {
 
     // Medidas previas de A1_MEDIDAS shadow events sobre este evento padre
     const { data: shadowEventos } = await sb.from('evento_pg')
-      .select('payload')
+      .select('payload, canal_msg_id')
       .eq('evento_padre_id', params.evento_id)
       .eq('agente_origen', 'A1_MEDIDAS')
       .eq('shadow', true)

@@ -59,10 +59,10 @@ export const a2RolHooks: AgenteHooks<DatosA2Rol> = {
     if (cErr || !chat) throw new Error(`chat ${params.chat_id} no encontrado: ${cErr?.message}`);
 
     const { data: evt } = await sb.from('evento_pg')
-      .select('evidencia_ids, ts_canal, payload')
+      .select('evidencia_ids, ts_canal, payload, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
-    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? null;
+    const msgIdPrincipal: string | null = (evt?.evidencia_ids as any)?.msg_ids?.[0] ?? evt?.canal_msg_id ?? null;
 
     let mensajeActual: MensajeCtx | null = null;
     if (msgIdPrincipal) {

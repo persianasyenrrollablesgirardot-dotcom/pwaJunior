@@ -62,13 +62,13 @@ export const a1EntidadesHooks: AgenteHooks<DatosA1Entidades> = {
   async cargarContexto(sb, params) {
     // 1. Cargar el evento para resolver el msg_id principal
     const { data: evt, error: eErr } = await sb.from('evento_pg')
-      .select('evidencia_ids, ts_canal, payload')
+      .select('evidencia_ids, ts_canal, payload, canal_msg_id')
       .eq('id', params.evento_id)
       .single();
     if (eErr || !evt) throw new Error(`evento ${params.evento_id} no encontrado: ${eErr?.message}`);
 
     const evidIds = (evt.evidencia_ids as any)?.msg_ids ?? [];
-    const msgIdPrincipal: string | null = evidIds[0] ?? null;
+    const msgIdPrincipal: string | null = evidIds[0] ?? evt.canal_msg_id ?? null;
 
     // 2. Localizar mensaje principal (por canal_msg_id si lo tenemos; fallback al último
     //    mensaje del chat <= ts_canal del evento)
