@@ -229,7 +229,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, path.resolve(__dirname, '..'), '');
   return {
     plugins: [react(), keysApiPlugin(env), transcribeApiPlugin(env), embeddedWorkerPlugin()],
-    server: { port: 5173, host: true },
+    server: { port: 5180, strictPort: true, host: true },
     define: {
       // SOLO las VITE_ se inyectan en el bundle (públicas por diseño)
       'import.meta.env.VITE_SUPABASE_URL':      JSON.stringify(env.VITE_SUPABASE_URL),
