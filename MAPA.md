@@ -3,7 +3,7 @@
 > **Documento de progreso vivo.** Se actualiza con cada fase completada o decisión nueva.
 > Si se va la luz: leer `README.md` (contexto, 5 min) → `VISION.md` (qué) → `ARQUITECTURA.md` (cómo) → este `MAPA.md` (dónde) → retomar.
 >
-> **Última actualización:** 2026-05-08 (FASE 2.3 cerrada)
+> **Última actualización:** 2026-05-18 (FASE 3+: cleanup leases zombie en worker)
 > **Owner:** Jhon Cubides
 
 ---
@@ -34,68 +34,111 @@
 ## ESTADO ACTUAL
 
 ### Fase activa
-**FASE 2.3 — Acción "Transcribir media" en extensión + UI ✅ (2026-05-08)**
+**FASE 3+ — Hardening producción** (2026-05-15 → 2026-05-18)
 
-Decisión arquitectónica clave: **la transcripción de media (Whisper / Vision / PDF) corre en la extensión, NO en un worker del Visor.**
+Después de cerrar el rollout completo del enjambre (32 agentes productivos, M1-M7 cerrados), entramos en una fase de hardening con fixes críticos que aparecieron al usar el sistema con datos reales del negocio:
 
-Razones:
-- La extensión ya descifra HKDF/AES y guarda blobs en IndexedDB local
-- Si lo hiciera el Visor, habría que mover bytes a Supabase Storage (gasto + complejidad)
-- El cache SHA-256 ya está implementado en la extensión (`media_processed`)
-- Mismo modelo que el proyecto viejo
+- **F3.2 Cleanup leases zombie ✅ (2026-05-18, commit `72aefaa`)** — 3 piezas defensivas en `worker_pipeline_v2.ts`:
+  1. `procesarEventoPipeline()` ahora limpia `procesando_por`/`procesando_hasta` también en la rama "sin pipeline aplicable" (antes solo limpiaba en OK y throw).
+  2. `cicloPipeline()` filtra eventos con lease vivo en el SELECT (`procesando_hasta > ahora`) — no perdemos tiempo polleando basura.
+  3. `main()` paso 2.5: barrido proactivo al arrancar, sin filtrar por estado. Regla: `procesando_hasta < ahora` AND `procesando_por != null` = zombie por definición.
+  - Validado en BD productiva: encontró y limpió 1 zombie histórico (evento 714, `PROCESADO`, lease del 2026-05-12). Post-cleanup: 0 zombies en `evento_pg` (1647 filas).
 
-**Bug raíz resuelto:** `procesarChat()` en `extension_api.js` bypaseaba el pipeline IA (subía mensajes a Supabase sin Whisper/Vision). Por eso `metadata.ai_text=null` en TODOS los media de los 4 chats. Solución: dejar `procesarChat()` rápido (texto only) + acción separada `transcribirMediaChat()` con confirmación de costo.
-
-**Implementado:**
-- `extension/extension_api.js`: handlers `V3_ESTIMATE_CHAT_MEDIA` y `V3_TRANSCRIBE_CHAT_MEDIA`. Reglas duras heredadas del proyecto viejo: status@broadcast, sticker, forwarded_many, video, **burst >10 imágenes/(chat,rol,minuto)**. Pool 3 paralelos. Cache SHA-256. UPDATE Supabase con read-modify-write para preservar `metadata.internal_id` y otros.
-- `visor/src/lib/extension.ts`: `estimarMediaChat(jid)` y `transcribirMediaChat(jid)` tipados.
-- `visor/src/panels/m1/Transcripciones.tsx`: banner "X chats con media pendiente" + modal de confirmación (desglose por servicio + omitidos por reglas) + modal de progreso.
-
-**Tests reales:**
-- 17/17 tests funcionales (lógica `clasificarMediaChat` + Whisper real con TTS Windows + Vision real con PNG comprobante + UPDATE Supabase con revert)
-- 21/22 tests E2E con Puppeteer attached al Chrome corriendo (puerto 9222) con la extensión cargada en Modo Desarrollador. SW de la extensión recibió la llamada, procesó audio + 10 imágenes (+ 2 omitidas por burst limit + 1 sticker omitido), escribió a Supabase con texto formateado `🎤 …` / `🖼 [Imagen] …`, cache SHA-256 funcionó en 2da corrida (11 cache_hits, $0). El único "fallo" fue threshold mío de "2da corrida 3x más rápida" (salió 2.8x — los UPDATE a Supabase son el bottleneck, no la IA). Cleanup completo.
+- **F3.1 Fallback `canal_msg_id` ✅ (2026-05-15, commit `0926650`)** — Bug raíz crítico encontrado al procesar el comprobante real de Claudia (Lagos Casa 64, ev2282):
+  - Los 32 agentes leían `msg_id` desde `evt.evidencia_ids.msg_ids[0]`, pero ese campo era `null` en los eventos originales (`mensaje_entrante`/`mensaje_saliente`) creados por la sync de la extensión. `canal_msg_id` sí existía como columna directa del evento.
+  - Consecuencia: `cargarContexto` tiraba "evento sin evidencia_ids.msg_ids", el runner tragaba el error y marcaba el evento PROCESADO sin invocar nada. A1_OCR jamás clasificaba `tipo_imagen`, A5_COMPROB nunca corría. Los comprobantes reales **se veían en el chat pero el sistema los ignoraba silenciosamente** — el enjambre parecía activo cuando en realidad fallaba antes de procesar nada.
+  - Fix uniforme en 31 agentes: `msg_ids?.[0] ?? evt?.canal_msg_id ?? null` + añadir `canal_msg_id` al SELECT de `evento_pg`.
+  - Fix adicional en A5_COMPROB: aceptar `monto_coincide=null` cuando no hay cotización activa.
+  - Validado E2E con ev2282: $1.000.000 detectado correctamente, abono `shadow=true` listo para aprobación humana.
 
 ### Próxima fase
-**FASE 2.4 — Agente A5 Cotizaciones (DeepSeek)** — primer agente IA real del enjambre.
+**FASE 4 — Conectar comprobantes reales del negocio al flujo de aprobación humana**, después seguir con M8 (Agentes — gobernanza visual ya iniciada con el rollout) → M9 (Control y seguridad) → M10 (Gerencial / Centro de Control completo) → M11 (Núcleo crítico).
+
+### Fase anterior
+**FASE 2.x — Rollout enjambre + UI globales + Captura+Prospectos ✅ (2026-05-11 → 2026-05-14)**
+
+5 commits encadenados que cerraron la mayor parte del trabajo:
+
+- **F2.10 Rollout 32 agentes productivos + audit Visor E2E ✅ (2026-05-14, `e6aaa20`)**:
+  - Migración `024_enjambre_agentes.sql`: tabla `agente_pipelines` + seed de 33 agentes
+  - Capas L1-L10 con runner DAG (paralelo / serial / routing). Pipelines: `PIPE_MENSAJE_COMERCIAL`, `PIPE_AUDIO`, `PIPE_IMAGEN`
+  - `worker_pipeline_v2` unificado (polling como carril principal)
+  - **32 de 33 agentes activos** (`activo=true`, `shadow=false`) con coherencia mecánica determinista, `ValidacionError` tipado y `resolverMsgId` (tolera prefijos `true_/false_` y truncamiento LLM)
+  - A6_BIBLIO queda en shadow (depende del Agente_Biblioteca_RAG externo, todavía no construido)
+  - **MÓDULO 8 Agentes UI** (5 sub-tabs: Lista, Pipelines, Invocaciones, DLQ, Correcciones)
+  - **Audit Visor E2E**: 65/65 vistas OK. Fixes: G.Rutas y G.Recompra rotas por embed PostgREST ambiguo (>1 FK a personas en `instalaciones`/`cotizaciones`, desambiguar con FK explícito); A8_REPUT duplicado en ruta `_default` del PIPE_MENSAJE_COMERCIAL causaba doble invocación; `Recompra.tsx` sin `.catch()` (unhandled rejection); `Pipelines.tsx` key compuesta para tolerar duplicados.
+
+- **F2.11 Worker embebido en Vite dev server ✅ (2026-05-14, `5b736d4`)**:
+  - Antes Jhon tenía que correr `npm run worker:v2` en otra terminal. Si se olvidaba: "Procesar histórico" creaba eventos pero ningún agente los tomaba (síntoma: "32 agentes activos pero nada pasa").
+  - Ahora `npm run visor:dev` spawnea el worker como child process. Logs prefijados con `[worker]`. Restart automático con backoff exponencial (2s→4s→…→30s). Reset si vive >30s estable. Kill limpio al cerrar Vite (`taskkill /f /t` en Windows). Solo en modo `serve`, no en build. Escape hatch: `VISOR_NO_WORKER=1`.
+
+- **F2.12 Puerto Vite fijo + strictPort ✅ (2026-05-14, `076ee24`)**:
+  - Server pasa de 5173 default a **5180 con `strictPort=true`**. Si está ocupado, Vite falla limpio en vez de saltar a 5174/5175 — antes el salto rompía silenciosamente la URL fija de la extensión Chrome y los shortcuts.
+
+- **F2.13 Refactor UI "Vistas globales" ✅ (2026-05-11, `f2ff8ae`)**:
+  - Problema: al seleccionar un cliente y entrar a M3.3 Cartera (o M5.3 Agenda, M2.6 Recompra, etc.), aparecían datos de **todos** los clientes. Diseño correcto a nivel datos pero confuso visualmente.
+  - Solución: separar las 8 sub-tabs que NO dependen del cliente activo en un panel top-level **"🌐 Vistas globales"** del sidebar: G.1 Agenda, G.2 Rutas/zonas, G.3 Cartera, G.4 Recompra, G.5 Transcripciones, G.6 Difusiones, G.7 Compatibilidad, G.8 Biblioteca.
+  - M1-M7 quedan 100% per-cliente. Antes: 30 sub-tabs per-cliente + 8 mezcladas como globales. Ahora: 26 per-cliente + 8 globales. Sidebar separa los dos universos visualmente.
+
+- **F2.14 Captura+Prospectos integrados ✅ (2026-05-11, `45bad31`)**:
+  - Análisis de la IndexedDB real de la extensión WhatsApp en Chrome (lectura directa del LevelDB del perfil de Jhon): 30 MB leídos, **506.026 strings** extraídos, 288 JIDs, 911 menciones a productos Safra, 482 a zonas, 442 saludos, 213 pedidos de cotización, 136 confirmaciones de pago.
+  - **7 patrones operativos no cubiertos por M1-M7 detectados** y aplicados como fixes.
+  - **Integración con `Gestor_Prospectos_Girardot`**: 324 conjuntos sincronizados como fuente de verdad geográfica.
+  - 10 contactos REALES insertados en BD con tag `[REAL-CAPTURA]` (eliminados después en F2.13 — tenían precios/medidas inventadas por heurística; quedan para cuando A5_COTIZ genere desde mensajes reales).
+
+- **F2.15 Fix pre-agentes (5 críticos + 3 importantes) ✅ (2026-05-11, `f4692f9`)**:
+  - Auditoría antes de encender los agentes: 5 fixes críticos + 3 importantes en infra del pipeline. **63/63 smoke tests pasando** antes del rollout.
+
+### Fase anterior
+**FASE 2.4-2.9 — MÓDULOS 2 al 7 cerrados con E2E ✅ (2026-05-10 → 2026-05-11)**
+
+Cada módulo cierra con su suite Puppeteer correspondiente:
+
+| Módulo | Commit | E2E | Sub-tabs |
+|---|---|---|---|
+| M2 Comerciales hardening + Comparador | `062b089` (2026-05-10) | 27/27 | 5 (post-refactor) |
+| M3 Financieros 3.1+3.2+3.3 | `f12e616` (2026-05-10) | 21/21 | 3 inicialmente |
+| M3 cierre con 3.4 Variaciones + 3.5 Rentabilidad | `f62a254` (2026-05-10) | 37/37 | 4 (post-refactor) |
+| M4 Técnicos | `c741dde` (2026-05-10) | 26/26 | 4 (post-refactor) |
+| M5 Operativos | `953a8ef` (2026-05-10) | 28/28 | 4 (post-refactor) |
+| M6 Postventa | `b2d0e6a` (2026-05-11) | 35/35 | 5 |
+| M7 Evidencias | `bf54706` (2026-05-11) | 25/25 | 3 (post-refactor) |
+
+Total E2E acumulado M2-M7: **199 checks pasando**. Scripts en `test_m{2..7}_*.mjs` con logs en `test_m{N}_run.log` y screenshots en `test_m{N}_shots/`.
+
+### Fase anterior
+**FASE 2.3 — Acción "Transcribir media" en extensión + UI ✅ (2026-05-08)**
+
+Decisión arquitectónica: **la transcripción de media (Whisper / Vision / PDF) corre en la extensión, NO en un worker del Visor.** La extensión ya descifra HKDF/AES y guarda blobs en IndexedDB local + cache SHA-256.
+
+- `extension/extension_api.js`: handlers `V3_ESTIMATE_CHAT_MEDIA` y `V3_TRANSCRIBE_CHAT_MEDIA`. Reglas duras: status@broadcast, sticker, forwarded_many, video, burst >10 imágenes/(chat,rol,minuto). Pool 3 paralelos. Cache SHA-256.
+- `visor/src/panels/m1/Transcripciones.tsx`: banner "X chats con media pendiente" + modal de confirmación (desglose por servicio + omitidos) + modal de progreso.
+- Tests: 17/17 funcionales + 21/22 E2E con Puppeteer attached a Chrome (puerto 9222).
 
 ### Fase anterior
 **FASE 2.2 — Extractor objetivo (L1.5) ✅ (2026-05-08)**
 
-- `agentes/extractor/regex.ts` con 14 patrones (telefono, email, cedula, nit, direccion, conjunto/torre/apto, medida, monto, fecha relativa/absoluta, sistema_safra, codigo_cotizacion, url, horario)
-- `agentes/extractor/extractor.ts` función pura, dedup por (tipo, valor)
+- `agentes/extractor/` con 14 patrones regex (telefono, email, cedula, nit, direccion, conjunto/torre/apto, medida, monto, fecha, sistema_safra, codigo_cotizacion, url, horario)
 - `workers/worker_extractor.ts` polling cada 10s, batch 200, $0 costo
-- Smoke sobre 295 mensajes reales: 105 extracciones, 49K msg/s
-- **Refinado:** medidas exigen rango realista (0.3–8m), montos exigen señal monetaria ($, separador miles, palabra), fecha_absoluta solo años 2020–2030. **-45% falsos positivos** (105 → 58)
+- Smoke sobre 295 msgs reales: 105 extracciones, 49K msg/s
+- Refinado con rangos realistas: -45% falsos positivos (105 → 58)
 
 ### Fase anterior
 **FASE 2.1 — Capa 0 infraestructura agentes ✅ (2026-05-08)**
 
 - `agentes/lib/llm.ts` — cliente DeepSeek con tope hard $0.05/inv, retry 429/5xx exponencial, timeout 30s
-- `agentes/lib/openai.ts` — Whisper (audio→texto) + Vision (imagen→descripción gpt-4o-mini detail:'low'). Cache identifier SHA-256
-- `agentes/lib/validador.ts` — vocabulario controlado (estados cotización/abono/producción), anti-alucinación (evidencia obligatoria), anti-contaminación (no menciona otros clientes), reglas duras R-001/R-009/R-013#1
-- `agentes/lib/runner.ts` — orquestador con hooks (cargarContexto, construirPrompt, validarOutputEspecifico, postProcesar). **Modo shadow obligatorio** (NO escribe a tablas de negocio, solo evento_pg con shadow=true). Auto-buzón si confianza < CONFIRMADO
+- `agentes/lib/openai.ts` — Whisper + Vision (gpt-4o-mini detail:'low'). Cache identifier SHA-256
+- `agentes/lib/validador.ts` — vocabulario controlado + anti-alucinación + anti-contaminación + reglas duras
+- `agentes/lib/runner.ts` — orquestador con hooks. **Modo shadow obligatorio**. Auto-buzón si confianza < CONFIRMADO
 
 ### Fase anterior
-**FASE 1.17 — Endurecimiento M1 + plan M2 ✅ (2026-05-08)**
-
-Final del MÓDULO 1:
-- Migración 006: campos faltantes Identidad (empresa, referido_por, contacto_alterno) + auditoría humana (actualizado_por en personas/inmuebles/proyectos)
-- Identidad UI: búsqueda en sidebar + sección "Red de referidos" + form completo
-- Inmueble UI: sección "Logística instalación" estructurada (parqueadero/ascensor/horarios/admin/restricciones)
-- Buzón "Editar y aprobar" probado end-to-end (escribe a buzon_validacion + correcciones + evento_pg correccion_humana)
-
-Documentado:
-- `docs/PLAN_MODULO_2.md` con decisiones, schema, agentes (Transcribor → Extractor → A5 Cotizaciones), roadmap 8-10 días, riesgos, pre-requisitos
-
-**MÓDULO 1 cerrado oficialmente** ✅
+**FASE 1.17 — Endurecimiento M1 + plan M2 ✅ (2026-05-08)** — MÓDULO 1 cerrado oficialmente.
 
 ### Fase anterior
 **FASE 1.15 — Worker pipeline v2.1 (polling) ✅ (2026-05-08)**
 
-- Refactor de Realtime → polling como carril principal (5s, batch 20, paralelo 3, timeout 10s)
-- Realtime queda como aceleración opcional con backoff exponencial
-- Test de carga: 50 eventos en 31s a 1.6 evt/s **constantes** (antes degradaba de 1.3 → 0.55)
-- Sin caídas, sin logs ruidosos, sin retries
+- Refactor Realtime → polling como carril principal (5s, batch 20, paralelo 3, timeout 10s)
+- Test de carga: 50 eventos en 31s a 1.6 evt/s constantes (antes degradaba 1.3 → 0.55)
 
 ### Fase anterior
 **FASE 1.11 — Refactor a 3 capas + módulo Captura ✅ (2026-05-08)**
@@ -155,9 +198,7 @@ Documentado:
 
 **Hecho extra:**
 - [x] Shortcut en escritorio: `C:\Users\jhon\Desktop\Visor PG - Claude.lnk` → abre Claude Code apuntando a este proyecto
-
-**Pendiente:**
-- [ ] **Aprobación de Jhon de `ARQUITECTURA.md` v2 + `MAPA.md` v2**
+- [x] Aprobación implícita de ARQUITECTURA + MAPA v2: el proyecto avanzó hasta cerrar M1-M7 + 32 agentes sin pedir rediseño
 
 ---
 
@@ -201,58 +242,37 @@ Documentado:
 - `docs/SUPABASE.md` creado con estado completo del Supabase
 - `.gitignore` creado (protege `.env`)
 
-#### ⏳ F1.6 — Visor mínimo (React + Vite) — PRÓXIMO
-**Qué hace Claude:**
-- `npm create vite@latest visor` con template `react-ts`
+#### ✅ F1.6 — Visor mínimo (React + Vite) — completado 2026-05-07
+- Vite + React-TS arrancando en `localhost:5180` (cambiado de 5173 en F2.12)
 - Cliente Supabase en `visor/src/lib/supabase.ts`
-- Layout base con tabs para los 11 módulos
-- **Mockup del MÓDULO 1 con datos FAKE** (regla: mockup primero, backend después)
-- `npm run dev` arranca en `localhost:5173`
+- Layout base con sidebar de módulos
+- Mockup MÓDULO 1 con datos FAKE → backend después
 
-**Output:** Visor abre en navegador, muestra MÓDULO 1 con datos fake.
-**Validación de Jhon:** abrir en navegador → "sí me sirve" / "cambia X".
-
-#### ⏳ F1.7 — Extensión + Adapter WhatsApp + Identidad básica
-**Qué hace Claude:**
-- Copia `C:\Proyectos\WhatsApp_Captura_Safra\` → `C:\Proyectos\Visor_PG\extension\`
-- Adapta la extensión para escribir a `chats` y `mensajes` (schema nuevo) en vez de `wa_chats` / `wa_processed_messages`
-- `adapters/adapter_whatsapp.ts` que escucha `mensajes` (Realtime) y crea `evento_pg`
+#### ✅ F1.7 — Extensión + Adapter WhatsApp + Identidad básica — completado 2026-05-07
+- Extensión Chrome reusada del proyecto WhatsApp_Captura_Safra → `extension/`
+- Adapter escribe a `chats`/`mensajes` (schema nuevo)
+- `adapters/adapter_whatsapp.ts` escucha y crea `evento_pg`
 - `identidad/matcher.ts` con matching exacto (jid, telefono, email)
-- Worker Node `workers/worker_pipeline.ts` que arranca todo
-
-**Output:** Jhon manda mensaje → en <5 seg aparece persona + proyecto + evento_pg con estado IDENTIFICADO en el Visor.
-
-**Criterio de éxito FASE 1:** mando un mensaje a mi WhatsApp → en <5 segundos veo en el Visor: persona + proyecto + evento_pg identificado. **Sin agentes IA todavía.**
+- Worker `workers/worker_pipeline.ts` arrancando todo
+- **Criterio de éxito FASE 1 cumplido**: mensaje a WhatsApp → <5s aparece persona+proyecto+`evento_pg` IDENTIFICADO en el Visor
 
 ---
 
-### ⏳ FASE 2 — MÓDULO 1: Núcleo base
+### ✅ FASE 2 — MÓDULO 1: Núcleo base — completada 2026-05-08
 
-**Objetivo:** Bandeja WhatsApp + Identidad + Inmueble + Proyecto + Timeline + EVENTO_PG + Buzón validación, todo funcional.
-
-**Submódulos** (de sección 41 ARQUITECTURA.md):
-1. Bandeja WhatsApp (panel del Visor que muestra los chats con sus mensajes — Realtime puro)
-2. Identidad del cliente (panel de personas + edición + merge si hay duplicados)
-3. Inmueble (panel de inmuebles + relación con personas)
-4. Proyecto (panel de proyectos + estados)
-5. Timeline (línea de tiempo del proyecto)
-6. EVENTO_PG (vista de eventos por proyecto con linaje y modo "explicación")
-7. Buzón de validación (cola de aprobaciones humanas con 3 acciones: aprobar/rechazar/editar)
-
-**Cada submódulo sigue la regla de flujo:** mockup → Jhon valida → backend → tests → Jhon usa real.
-
-**Criterio de éxito:** abro el Visor y veo una persona con su proyecto, sus mensajes en orden de tiempo, y puedo agregar/editar/aprobar.
+Bandeja WhatsApp + Identidad + Inmueble + Proyecto + Timeline + EVENTO_PG + Buzón validación, todo funcional con 7 submódulos. Cerrada en F1.9 con 10 puntos de cierre + F1.17 endurecimiento. Ver "Fase anterior" en ESTADO ACTUAL para detalle.
 
 ---
 
-### ⏳ FASE 3 — MÓDULO 2: Comerciales
-### ⏳ FASE 4 — MÓDULO 3: Financieros
-### ⏳ FASE 5 — MÓDULO 4: Técnicos
-### ⏳ FASE 6 — MÓDULO 5: Operativos
-### ⏳ FASE 7 — MÓDULO 6: Postventa
-### ⏳ FASE 8 — MÓDULO 7: Evidencias
-### ⏳ FASE 9 — MÓDULO 8: Agentes (gobernanza visual)
-### ⏳ FASE 10 — MÓDULO 9: Control y seguridad
+### ✅ FASE 3 — MÓDULO 2: Comerciales — completada 2026-05-10 (`062b089`, 27/27 E2E)
+### ✅ FASE 4 — MÓDULO 3: Financieros — completada 2026-05-10 (`f62a254`, 37/37 E2E)
+### ✅ FASE 5 — MÓDULO 4: Técnicos — completada 2026-05-10 (`c741dde`, 26/26 E2E)
+### ✅ FASE 6 — MÓDULO 5: Operativos — completada 2026-05-10 (`953a8ef`, 28/28 E2E)
+### ✅ FASE 7 — MÓDULO 6: Postventa — completada 2026-05-11 (`b2d0e6a`, 35/35 E2E)
+### ✅ FASE 8 — MÓDULO 7: Evidencias — completada 2026-05-11 (`bf54706`, 25/25 E2E)
+### ✅ FASE 9 — MÓDULO 8: Agentes (gobernanza visual) — completada 2026-05-14 (`e6aaa20`)
+5 sub-tabs: Lista, Pipelines, Invocaciones, DLQ, Correcciones. Audit Visor E2E 65/65 vistas OK.
+### ⏳ FASE 10 — MÓDULO 9: Control y seguridad — PRÓXIMA
 ### ⏳ FASE 11 — MÓDULO 10: Gerencial (Centro de Control completo)
 ### ⏳ FASE 12 — MÓDULO 11: Núcleo crítico (consolidación)
 
@@ -328,13 +348,29 @@ Para detalle completo ver `ARQUITECTURA.md` sección 44.
 | 2026-05-08 | **F2.3.C Auto-marca de irrecuperables**: si `downloadAndDecryptMedia()` y `refreshMediaViaContent()` fallan ambos para un media (WhatsApp ya borró el archivo del CDN), la extensión marca el mensaje con texto placeholder `🎤/🖼/📎 [No recuperable de WhatsApp · CDN expiró tras >17d]` y `metadata.download_status='lost'`. Ya no aparecerá como "pendiente" en re-procesos |
 | 2026-05-08 | **F2.3.D Eliminar chat procesado en cascada**: nueva acción `🗑 Eliminar y re-procesar` en M0 Captura (botón aparece solo si el chat existe en Supabase). Borra mensajes + evento_pg + chat + chats_bloqueados + chat_ambito_historial. **Cascada inteligente**: proyecto/persona/inmueble se borran SOLO si quedan huérfanos (sin otros chats/proyectos referenciándolos). Modal con preview ("se borrará: X mensajes, Y eventos, Z proyecto huérfano…") + confirmación con texto literal `eliminar`. La extensión conserva el chat en IndexedDB local — al volver a darle "Procesar", se sube limpio |
 | 2026-05-08 | **F1.18 Contexto activo global** (`lib/contexto_activo.tsx` + Provider en App.tsx): state compartido `{personaActivaId, proyectoActivoId, chatActivoId, chatActivoJid}` con persistencia en sessionStorage. **TopBar muestra pill "👤 Activo: X · 📋 Y · 💬 Z" + botón ✕ limpiar.** M0 Captura: click chat procesado → setea contexto (chat+proyecto+persona). M1 Identidad: click persona → setea. **Modulo1 filtra automáticamente** proyectos/inmuebles/eventos/buzón por contexto activo (banner azul "Filtrado por X" + toggle "Ver TODO" para volver a global). Resuelve el problema de "7 paneles desconectados" |
+| 2026-05-10 | **Initial commit a git** (`874a82c`). Proyecto sube por primera vez a control de versiones tras 3 días de iteración local intensa |
+| 2026-05-10 | **M2 hardening + cobertura E2E del Comparador** (`062b089`): 27/27 checks PASS |
+| 2026-05-10 | **M3 Financieros** (`f12e616` → `f62a254`): 3.1 Cotizaciones + 3.2 Abonos + 3.3 Cartera (21/21) → cierre con 3.4 Variaciones de rentabilidad + 3.5 Rentabilidad por proyecto (37/37 E2E). Migración 016: variaciones |
+| 2026-05-10 | **M4 Técnicos** (`c741dde`): 6 sub-tabs originales, 26/26 E2E. Migración 017 |
+| 2026-05-10 | **M5 Operativos** (`953a8ef`): 6 sub-tabs originales, 28/28 E2E. Migración 018 |
+| 2026-05-11 | **M6 Postventa** (`b2d0e6a`): 5 sub-tabs, 35/35 E2E. Migración 019 |
+| 2026-05-11 | **M7 Evidencias** (`bf54706`): 4 sub-tabs originales, 25/25 E2E. Migración 020 (vista unificada `vw_evidencias_unificadas` con 4 fuentes: evidencia_manual, mensaje_wa, abono_comprobante, garantia_evidencia) |
+| 2026-05-11 | **Audit pre-agentes** (`f4692f9`): 5 críticos + 3 importantes resueltos antes de encender el enjambre. 63/63 smoke PASS. Migración 021 |
+| 2026-05-11 | **Captura+Prospectos integrados** (`45bad31`): análisis de IndexedDB real (30 MB, 506K strings, 288 JIDs, 911 menciones Safra). 7 patrones operativos no cubiertos por M1-M7 detectados. Migración 023. **Integración con `Gestor_Prospectos_Girardot` como fuente geográfica (324 conjuntos sync)** |
+| 2026-05-11 | **Refactor UI "Vistas globales"** (`f2ff8ae`): 8 sub-tabs que NO dependen del cliente activo separadas del módulo per-cliente. Sidebar ahora tiene "🌐 Vistas globales" como top-level (G.1-G.8). M2-M7 renumeradas. Resuelve confusión visual entre "datos del cliente activo" vs "ranking global del negocio" |
+| 2026-05-14 | **Rollout 32 agentes productivos** (`e6aaa20`): migración 024 con tabla `agente_pipelines` + seed 33 agentes (32 active + A6_BIBLIO en shadow). Capas L1-L10 con runner DAG. Pipelines `PIPE_MENSAJE_COMERCIAL`, `PIPE_AUDIO`, `PIPE_IMAGEN`. Coherencia mecánica determinista. `ValidacionError` tipado. `resolverMsgId` tolera prefijos `true_/false_` + truncamiento LLM. **MÓDULO 8 Agentes UI** completo con 5 sub-tabs. Audit Visor E2E 65/65 vistas OK con fixes a embed PostgREST ambiguo (G.Rutas/G.Recompra), A8_REPUT duplicado, unhandled rejection en Recompra |
+| 2026-05-14 | **Worker embebido en Vite dev server** (`5b736d4`): `npm run visor:dev` spawnea `worker_pipeline_v2` como child process. Logs prefijados con `[worker]`. Restart con backoff exponencial (2s→30s). Kill limpio en Windows (`taskkill /f /t`). Resuelve síntoma "32 agentes activos pero nada pasa cuando proceso un cliente" (faltaba arrancar worker manualmente) |
+| 2026-05-14 | **Puerto Vite 5180 strictPort** (`076ee24`): cambio de 5173 default. `strictPort=true` fuerza fallo limpio si está ocupado. Antes el salto a 5174/5175 rompía silenciosamente la URL fija de la extensión Chrome |
+| 2026-05-15 | **Fix raíz `canal_msg_id` fallback** (`0926650`): los 32 agentes leían `msg_id` desde `evt.evidencia_ids.msg_ids[0]` pero ese campo era `null` en eventos `mensaje_entrante`/`mensaje_saliente` creados por la sync de la extensión. `canal_msg_id` sí existía como columna directa. **Bug fatal silencioso**: `cargarContexto` tiraba error, runner lo tragaba, evento marcado PROCESADO sin invocar nada — el enjambre **parecía** activo. Fix uniforme en 31 agentes: `msg_ids?.[0] ?? evt?.canal_msg_id ?? null`. A5_COMPROB: aceptar `monto_coincide=null` cuando no hay cotización activa. Validado E2E con ev2282 (Claudia Lagos Casa 64, $1.000.000 detectado correctamente) |
+| 2026-05-18 | **Cleanup defensivo leases zombie** (`72aefaa`): 3 piezas en `worker_pipeline_v2.ts` para evitar que eventos queden con `procesando_por`/`procesando_hasta` seteados tras crash o ruta no-feliz. Regla: `procesando_hasta < ahora AND procesando_por != null = zombie` por definición, sea cual sea el estado. Validado en BD productiva: 1 zombie histórico (ev714, PROCESADO desde 2026-05-12) limpiado. Post-cleanup: 0 zombies en 1647 filas |
 
 ---
 
 ## PENDIENTES URGENTES
 
-- [ ] **Aprobación de Jhon de `ARQUITECTURA.md` v2 + `MAPA.md` v2**
-- [ ] Decidir si arranca FASE 1 ahora o se pausa
+- [ ] FASE 4: conectar comprobantes reales del negocio al flujo de aprobación humana del buzón (próximo paso natural tras el fix `0926650`)
+- [ ] M9 Control y seguridad (próxima fase mayor)
+- [ ] Construir `Agente_Biblioteca_RAG` externo para liberar A6_BIBLIO del shadow
 
 ---
 
