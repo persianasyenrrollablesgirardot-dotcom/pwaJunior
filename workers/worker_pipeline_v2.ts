@@ -303,10 +303,16 @@ async function procesarEventoPipeline(evt: any): Promise<void> {
     const pipe = await pipelineAplicable(sb, evt.tipo_evento, contextoEvento);
 
     if (!pipe) {
-      // Sin pipeline para este tipo: marcar PROCESADO sin enjambre
+      // Sin pipeline para este tipo: marcar PROCESADO sin enjambre + limpiar lease
+      // (defensivo: si había un lease zombie de un crash previo, lo limpiamos).
       stats.pi_skip_sin_pipe++;
       const u = await sb.from('evento_pg')
-        .update({ estado: 'PROCESADO', ts_procesado: new Date().toISOString() })
+        .update({
+          estado: 'PROCESADO',
+          ts_procesado: new Date().toISOString(),
+          procesando_por: null,
+          procesando_hasta: null,
+        })
         .eq('id', evt.id);
       if (u.error) console.error(`${tag} update PROCESADO sin pipe: ${u.error.message}`);
       return;
@@ -368,11 +374,16 @@ async function cicloPipeline(): Promise<number> {
   pipelineEnCurso = true;
   const t0 = Date.now();
   try {
+    // Filtramos eventos con lease vivo (procesando_hasta en el futuro): los toma
+    // otro worker o son zombies de un crash. Si son zombies, expirarán y el
+    // próximo poll los agarrará — no perdemos tiempo polleándolos antes.
+    const ahora = new Date().toISOString();
     const { data, error } = await withTimeout(
       Promise.resolve(sb.from('evento_pg')
         .select('*')
         .eq('estado', 'IDENTIFICADO')
         .is('deleted_at', null)
+        .or(`procesando_hasta.is.null,procesando_hasta.lt.${ahora}`)
         .order('prioridad', { ascending: true })
         .order('ts_creado', { ascending: true })
         .limit(BATCH_PIPELINE)),
@@ -426,6 +437,34 @@ async function main() {
         console.warn(`[V2] no pude cargar pipeline ${cod}: ${e.message}`);
       }
     }
+  }
+
+  // 2.5. Limpiar leases caducados al arrancar. Regla: un evento con
+  // `procesando_hasta` ya vencido y `procesando_por` no nulo nunca es legítimo,
+  // sea cual sea su estado. Es zombie por definición. Causas posibles:
+  //   - IDENTIFICADO: worker crasheó antes de procesar (bloquea reprocesamiento)
+  //   - ERROR: versiones viejas que crasheaban sin limpiar (hoy el catch lo hace)
+  //   - PROCESADO: bugs históricos del enjambre (ej. agentes que seteaban
+  //     procesando_por sin limpiarlo al cerrar — arreglado en `f4692f9`)
+  // Sin filtro por estado: blindaje para cualquier estado actual o futuro.
+  try {
+    const ahora = new Date().toISOString();
+    const { data: limpiados, error: limpErr } = await sb.from('evento_pg')
+      .update({ procesando_por: null, procesando_hasta: null })
+      .not('procesando_por', 'is', null)
+      .lt('procesando_hasta', ahora)
+      .select('id, estado');
+    if (limpErr) {
+      console.warn(`[V2] cleanup leases caducados error: ${limpErr.message}`);
+    } else if (limpiados && limpiados.length > 0) {
+      const porEstado = limpiados.reduce((acc: Record<string, number>, r: any) => {
+        acc[r.estado] = (acc[r.estado] ?? 0) + 1;
+        return acc;
+      }, {});
+      console.log(`[V2] cleanup: ${limpiados.length} leases caducados liberados (${JSON.stringify(porEstado)})`);
+    }
+  } catch (e: any) {
+    console.warn(`[V2] cleanup leases excepción: ${e.message}`);
   }
 
   // 3. Drenar pendientes al arrancar
