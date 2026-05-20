@@ -3,7 +3,7 @@
 > **Documento de progreso vivo.** Se actualiza con cada fase completada o decisión nueva.
 > Si se va la luz: leer `README.md` (contexto, 5 min) → `VISION.md` (qué) → `ARQUITECTURA.md` (cómo) → este `MAPA.md` (dónde) → retomar.
 >
-> **Última actualización:** 2026-05-18 (FASE 3+: cleanup leases zombie en worker)
+> **Última actualización:** 2026-05-20 (FASE 4: Visor inteligente — módulos como síntesis)
 > **Owner:** Jhon Cubides
 
 ---
@@ -34,25 +34,36 @@
 ## ESTADO ACTUAL
 
 ### Fase activa
-**FASE 3+ — Hardening producción** (2026-05-15 → 2026-05-18)
+**FASE 4 — Visor inteligente: módulos como síntesis** (2026-05-19 → 2026-05-20)
 
-Después de cerrar el rollout completo del enjambre (32 agentes productivos, M1-M7 cerrados), entramos en una fase de hardening con fixes críticos que aparecieron al usar el sistema con datos reales del negocio:
+**Cambio de fondo del producto, decidido por Jhon.** El Visor deja de comportarse como un CRM de gestión manual. Cada módulo (M1-M7) debe entregar **UNA conclusión redactada por un agente analista** — síntesis + estado + próximo paso + alerta — no tablas de registros para aprobar. Frase de Jhon: "no quiero un CRM, quiero un visor totalmente inteligente; lo único manual son las capturas y el procesamiento de los chats".
 
-- **F3.2 Cleanup leases zombie ✅ (2026-05-18, commit `72aefaa`)** — 3 piezas defensivas en `worker_pipeline_v2.ts`:
-  1. `procesarEventoPipeline()` ahora limpia `procesando_por`/`procesando_hasta` también en la rama "sin pipeline aplicable" (antes solo limpiaba en OK y throw).
-  2. `cicloPipeline()` filtra eventos con lease vivo en el SELECT (`procesando_hasta > ahora`) — no perdemos tiempo polleando basura.
-  3. `main()` paso 2.5: barrido proactivo al arrancar, sin filtrar por estado. Regla: `procesando_hasta < ahora` AND `procesando_por != null` = zombie por definición.
-  - Validado en BD productiva: encontró y limpió 1 zombie histórico (evento 714, `PROCESADO`, lease del 2026-05-12). Post-cleanup: 0 zombies en `evento_pg` (1647 filas).
+- **F4.3 Capa de síntesis + integración al pipeline ✅ (2026-05-20, commit `4058c88`)**
+  - Migración `026`: tabla `modulo_sintesis` (una síntesis por cliente y módulo).
+  - `agentes/sintesis/analistas.ts`: **7 analistas especializados** (Cliente, Comercial, Financiero, Técnico, Operativo, Postventa, Evidencias). Leen todo lo que extrajeron los 31 agentes de un cliente y redactan la conclusión del dominio.
+  - `visor/src/panels/PanelSintesis.tsx`: panel reusable, integrado arriba de M1-M7. El detalle (sub-tabs) queda como soporte secundario.
+  - `worker_pipeline_v2`: re-sintetiza al cliente cuando el pipeline drena la cola. Acumula personas con actividad y sintetiza una vez al final del drenado (no por batch).
+  - Validado E2E: procesar el chat de Jorge dispara pipeline (31 agentes) + los 7 analistas automáticamente. Costo ~$0.026 por cliente reprocesado.
+  - **Arquitectura final:** 31 extractores (dato crudo por mensaje) → 7 analistas (síntesis por cliente/módulo) → Junior (visión global). Jerarquía por reportes, no por llamadas — cada nivel lee lo que el anterior dejó.
 
-- **F3.1 Fallback `canal_msg_id` ✅ (2026-05-15, commit `0926650`)** — Bug raíz crítico encontrado al procesar el comprobante real de Claudia (Lagos Casa 64, ev2282):
-  - Los 32 agentes leían `msg_id` desde `evt.evidencia_ids.msg_ids[0]`, pero ese campo era `null` en los eventos originales (`mensaje_entrante`/`mensaje_saliente`) creados por la sync de la extensión. `canal_msg_id` sí existía como columna directa del evento.
-  - Consecuencia: `cargarContexto` tiraba "evento sin evidencia_ids.msg_ids", el runner tragaba el error y marcaba el evento PROCESADO sin invocar nada. A1_OCR jamás clasificaba `tipo_imagen`, A5_COMPROB nunca corría. Los comprobantes reales **se veían en el chat pero el sistema los ignoraba silenciosamente** — el enjambre parecía activo cuando en realidad fallaba antes de procesar nada.
-  - Fix uniforme en 31 agentes: `msg_ids?.[0] ?? evt?.canal_msg_id ?? null` + añadir `canal_msg_id` al SELECT de `evento_pg`.
-  - Fix adicional en A5_COMPROB: aceptar `monto_coincide=null` cuando no hay cotización activa.
-  - Validado E2E con ev2282: $1.000.000 detectado correctamente, abono `shadow=true` listo para aprobación humana.
+- **F4.2 Modo B — sin buzón de aprobación rutinaria ✅ (2026-05-19, commit `4058c88`)**
+  - El buzón de validación dejó de ser paso obligatorio. `runner.ts`: solo `confianza=ALERTA` (contradicción / riesgo grave) va al buzón. `CONFIRMADO/INFERIDO/DUDOSO` escriben directo al módulo, visibles.
+  - 12 agentes: el `postProcesar` escribe `shadow = (confianza === 'ALERTA')`; antes hardcodeaba `shadow=true`. El dato del agente se ve sin pre-aprobación.
+  - Modelo nuevo: **corrección post-hoc** (Jhon edita en el módulo si algo sale mal), no pre-aprobación. Revierte la decisión fundacional del 2026-05-07 que ponía el buzón antes del CRM.
+
+- **F4.1 Diagnóstico del enjambre + reproceso de huérfanos ✅ (2026-05-19)**
+  - Diagnóstico profundo: de 225 eventos `mensaje_*` en estado PROCESADO, **206 eran huérfanos** — el worker los marcó procesados ANTES del rollout (2026-05-14), sin que ningún agente corriera. Por eso los módulos se veían vacíos.
+  - Reproceso: los 206 huérfanos reseteados a `IDENTIFICADO`; el enjambre actual los procesó. Costo del reproceso completo ~$2 USD.
 
 ### Próxima fase
-**FASE 4 — Conectar comprobantes reales del negocio al flujo de aprobación humana**, después seguir con M8 (Agentes — gobernanza visual ya iniciada con el rollout) → M9 (Control y seguridad) → M10 (Gerencial / Centro de Control completo) → M11 (Núcleo crítico).
+**FASE 5 — Junior (visión global)** + endurecer los 7 analistas con datos de chats nuevos. Después M9 (Control y seguridad) → M10 (Gerencial / Centro de Control) → M11 (Núcleo crítico).
+
+### Fase anterior
+**FASE 3+ — Hardening producción ✅ (2026-05-15 → 2026-05-18)**
+
+- **F3.2 Cleanup leases zombie ✅ (2026-05-18, commit `72aefaa`)** — 3 piezas defensivas en `worker_pipeline_v2.ts`: limpieza de lease en rama "sin pipeline", filtro de leases vivos en el SELECT del ciclo, y barrido proactivo al arrancar (`procesando_hasta < ahora` AND `procesando_por != null` = zombie). Limpió 1 zombie histórico (ev714).
+
+- **F3.1 Fallback `canal_msg_id` ✅ (2026-05-15, commit `0926650`)** — Bug raíz crítico: los 32 agentes leían `msg_id` desde `evt.evidencia_ids.msg_ids[0]`, `null` en los eventos originales. El runner tragaba el error y marcaba PROCESADO sin invocar nada — el enjambre **parecía activo pero ignoraba todo silenciosamente**. Fix en 31 agentes: `msg_ids?.[0] ?? evt?.canal_msg_id ?? null`. Validado E2E con el comprobante de Claudia ($1.000.000).
 
 ### Fase anterior
 **FASE 2.x — Rollout enjambre + UI globales + Captura+Prospectos ✅ (2026-05-11 → 2026-05-14)**
@@ -363,12 +374,17 @@ Para detalle completo ver `ARQUITECTURA.md` sección 44.
 | 2026-05-14 | **Puerto Vite 5180 strictPort** (`076ee24`): cambio de 5173 default. `strictPort=true` fuerza fallo limpio si está ocupado. Antes el salto a 5174/5175 rompía silenciosamente la URL fija de la extensión Chrome |
 | 2026-05-15 | **Fix raíz `canal_msg_id` fallback** (`0926650`): los 32 agentes leían `msg_id` desde `evt.evidencia_ids.msg_ids[0]` pero ese campo era `null` en eventos `mensaje_entrante`/`mensaje_saliente` creados por la sync de la extensión. `canal_msg_id` sí existía como columna directa. **Bug fatal silencioso**: `cargarContexto` tiraba error, runner lo tragaba, evento marcado PROCESADO sin invocar nada — el enjambre **parecía** activo. Fix uniforme en 31 agentes: `msg_ids?.[0] ?? evt?.canal_msg_id ?? null`. A5_COMPROB: aceptar `monto_coincide=null` cuando no hay cotización activa. Validado E2E con ev2282 (Claudia Lagos Casa 64, $1.000.000 detectado correctamente) |
 | 2026-05-18 | **Cleanup defensivo leases zombie** (`72aefaa`): 3 piezas en `worker_pipeline_v2.ts` para evitar que eventos queden con `procesando_por`/`procesando_hasta` seteados tras crash o ruta no-feliz. Regla: `procesando_hasta < ahora AND procesando_por != null = zombie` por definición, sea cual sea el estado. Validado en BD productiva: 1 zombie histórico (ev714, PROCESADO desde 2026-05-12) limpiado. Post-cleanup: 0 zombies en 1647 filas |
+| 2026-05-19 | **Diagnóstico: 206 eventos huérfanos pre-rollout.** De 225 eventos `mensaje_*` en PROCESADO, 206 nunca pasaron por ningún agente — el worker los marcó procesados antes de que existieran los pipelines (rollout 2026-05-14). Causa raíz de "los módulos se ven vacíos". Reproceso: reseteados a IDENTIFICADO, el enjambre los procesó (~$2 USD) |
+| 2026-05-19 | **MODO B — se elimina el buzón de aprobación rutinaria** (`4058c88`). Decisión de Jhon: "para qué quiero un buzón de 100 aprobaciones, los agentes están para trabajar por mí". `runner.ts` ahora manda al buzón SOLO `confianza=ALERTA` (contradicción/riesgo grave). Todo lo demás escribe directo al módulo, visible. 12 agentes: `shadow = (confianza===ALERTA)`. Modelo: corrección post-hoc, no pre-aprobación. **Revierte la decisión fundacional del 2026-05-07** (buzón antes del CRM) |
+| 2026-05-20 | **El Visor NO es un CRM — es un visor inteligente.** Decisión de Jhon: cada módulo entrega UNA síntesis redactada por agentes, no tablas de gestión manual. Nace la **capa de síntesis**: 7 analistas (`agentes/sintesis/analistas.ts`) sobre los 31 extractores. Migración `026` tabla `modulo_sintesis`. `PanelSintesis.tsx` en M1-M7. Worker re-sintetiza al cliente al drenar el pipeline (`4058c88`) |
+| 2026-05-20 | **Jerarquía del enjambre confirmada (organigrama).** 31 extractores (dato crudo por mensaje) → 7 analistas (síntesis por cliente/módulo) → Junior (visión global). "A cargo" = cada nivel LEE el reporte del de abajo; NO se llaman entre sí. Jerarquía por reportes para no re-acoplar como el visor viejo |
 
 ---
 
 ## PENDIENTES URGENTES
 
-- [ ] FASE 4: conectar comprobantes reales del negocio al flujo de aprobación humana del buzón (próximo paso natural tras el fix `0926650`)
+- [ ] FASE 5: poner a **Junior** a leer las 7 síntesis y dar la visión global del cliente + responder preguntas transversales
+- [ ] Endurecer los 7 analistas a medida que entren chats reales nuevos (hoy generados sobre datos reprocesados)
 - [ ] M9 Control y seguridad (próxima fase mayor)
 - [ ] Construir `Agente_Biblioteca_RAG` externo para liberar A6_BIBLIO del shadow
 
