@@ -32,10 +32,22 @@ interface ClienteRow {
   eventos_total: number;
 }
 
+interface JuniorSint {
+  sintesis: string | null;
+  estado: string | null;
+  estado_semaforo: 'verde' | 'amarillo' | 'rojo' | null;
+  alerta: string | null;
+}
+
+const SEMAFORO_COLOR: Record<string, string> = {
+  verde: '#34c759', amarillo: '#ff9500', rojo: '#ff3b30',
+};
+
 export function Clientes() {
   const ctx = useContextoActivo();
   const nav = useNavegacion();
   const [rows, setRows] = useState<ClienteRow[]>([]);
+  const [junior, setJunior] = useState<Record<number, JuniorSint>>({});
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busqueda, setBusqueda] = useState('');
@@ -69,6 +81,15 @@ export function Clientes() {
         msgs_ultimo_ts: r.msgs_ultimo_ts,
         eventos_total: Number(r.eventos_total) || 0,
       })));
+
+      // Visión global de Junior por cliente (la conclusión de las 7 síntesis)
+      const { data: jsint } = await supabase
+        .from('modulo_sintesis')
+        .select('persona_id,sintesis,estado,estado_semaforo,alerta')
+        .eq('modulo', 'junior');
+      const jmap: Record<number, JuniorSint> = {};
+      (jsint ?? []).forEach((j: any) => { if (j.persona_id) jmap[j.persona_id] = j; });
+      setJunior(jmap);
     } catch (e: any) {
       setError(e.message ?? String(e));
     } finally {
@@ -152,6 +173,8 @@ export function Clientes() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
           {filtradas.map(r => {
             const activo = ctx.chatActivoId === r.chat_id;
+            const jr = r.persona_id ? junior[r.persona_id] : undefined;
+            const semColor = jr?.estado_semaforo ? SEMAFORO_COLOR[jr.estado_semaforo] : null;
             const initial = ((r.persona_nombre ?? r.chat_titulo) || '').split(' ').filter(Boolean).map(s => s[0] || '').join('').slice(0, 2).toUpperCase() || '?';
             const ultMsg = r.msgs_ultimo_ts
               ? new Date(r.msgs_ultimo_ts).toLocaleString('es-CO', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
@@ -162,6 +185,7 @@ export function Clientes() {
                   display: 'block', textAlign: 'left',
                   background: activo ? 'var(--accent-soft)' : 'var(--bg-panel)',
                   border: `1px solid ${activo ? 'var(--accent)' : 'var(--border-soft)'}`,
+                  borderLeft: semColor ? `4px solid ${semColor}` : `1px solid ${activo ? 'var(--accent)' : 'var(--border-soft)'}`,
                   borderRadius: 8, padding: 14, cursor: 'pointer',
                   transition: 'transform 0.05s, box-shadow 0.1s',
                 }}
@@ -195,6 +219,21 @@ export function Clientes() {
                   <div>🗂 {r.eventos_total} eventos</div>
                   <div style={{ gridColumn: 'span 2', fontSize: 10, color: 'var(--text-muted)' }}>último: {ultMsg}</div>
                 </div>
+
+                {jr?.sintesis && (
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border-soft)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+                      {semColor && <span style={{ width: 7, height: 7, borderRadius: '50%', background: semColor, display: 'inline-block', flexShrink: 0 }} />}
+                      <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                        🤖 Junior{jr.estado ? ` · ${jr.estado}` : ''}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11, lineHeight: 1.45, color: 'var(--text)' }}>{jr.sintesis}</div>
+                    {jr.alerta && (
+                      <div style={{ marginTop: 4, fontSize: 10, color: '#ff3b30', lineHeight: 1.4 }}>⚠ {jr.alerta}</div>
+                    )}
+                  </div>
+                )}
               </button>
             );
           })}

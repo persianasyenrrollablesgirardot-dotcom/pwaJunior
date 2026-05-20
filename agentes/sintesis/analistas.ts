@@ -65,9 +65,10 @@ function parsear(texto: string): SintesisParseada {
     const m = texto.match(re);
     return m ? m[1].trim() : null;
   };
-  const sintesis     = get('S[ÍI]NTESIS', 'ESTADO\\s*:');
-  const estado       = get('ESTADO', 'PR[ÓO]XIMO PASO\\s*:');
-  const proximo_paso = get('PR[ÓO]XIMO PASO', 'ALERTA\\s*:');
+  // \\S* en vez del carácter acentuado: inmune a problemas de encoding del acento.
+  const sintesis     = get('S\\S*NTESIS', 'ESTADO\\s*:');
+  const estado       = get('ESTADO', 'PR\\S*XIMO\\s+PASO\\s*:');
+  const proximo_paso = get('PR\\S*XIMO\\s+PASO', 'ALERTA\\s*:');
   let alerta         = get('ALERTA', '$');
   if (alerta && /^ningun/i.test(alerta.trim())) alerta = null;
   let semaforo: 'verde' | 'amarillo' | 'rojo' = 'verde';
@@ -163,5 +164,72 @@ Tareas: ${tareas.length ? JSON.stringify(tareas) : 'ninguna'}`;
     }
   }
 
+  // Junior cierra: lee las 7 síntesis recién generadas y da la visión global.
+  try {
+    const j = await sintetizarJunior(sb, personaId);
+    costo_usd += j.costo_usd;
+    if (j.ok) ok++; else fallidos++;
+  } catch (e: any) {
+    fallidos++;
+    console.error(`[A10_JUNIOR] ${e.message}`);
+  }
+
   return { ok, fallidos, costo_usd };
+}
+
+const JUNIOR_SYSTEM =
+`Sos JUNIOR, el asistente personal de Jhon, dueño de Fábrica de Cortinas Girardot.
+Te paso los 7 análisis de un cliente — uno por área (Cliente, Comercial, Financiero,
+Técnico, Operativo, Postventa, Evidencias). Tu trabajo es darle a Jhon la VISIÓN GLOBAL:
+la foto completa del cliente en pocas frases. Qué es lo más importante AHORA, qué hay
+que priorizar. NO repitas los 7 análisis uno por uno — integralos en una conclusión
+de alto nivel, como el gerente que lee los reportes de sus 7 jefes de área.` + FORMATO;
+
+/**
+ * Junior — lee las 7 síntesis de módulo de un cliente y produce la visión global.
+ * Se guarda en modulo_sintesis con modulo='junior'. Corre después de los 7 analistas.
+ */
+export async function sintetizarJunior(
+  sb: SupabaseClient,
+  personaId: number,
+): Promise<{ ok: boolean; costo_usd: number }> {
+  const persona = (await sb.from('personas').select('nombre').eq('id', personaId).maybeSingle()).data;
+  if (!persona) return { ok: false, costo_usd: 0 };
+
+  const { data: sints } = await sb.from('modulo_sintesis')
+    .select('modulo,sintesis,estado,proximo_paso,alerta')
+    .eq('persona_id', personaId)
+    .in('modulo', ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7']);
+  if (!sints || sints.length === 0) return { ok: false, costo_usd: 0 };
+
+  const NOMBRE: Record<string, string> = {
+    m1: 'CLIENTE', m2: 'COMERCIAL', m3: 'FINANCIERO', m4: 'TÉCNICO',
+    m5: 'OPERATIVO', m6: 'POSTVENTA', m7: 'EVIDENCIAS',
+  };
+  const bloques = sints
+    .sort((a, b) => a.modulo.localeCompare(b.modulo))
+    .map(s => `### ${NOMBRE[s.modulo] ?? s.modulo}
+${s.sintesis ?? '(sin síntesis)'}
+Estado: ${s.estado ?? '—'}${s.proximo_paso ? `\nPróximo paso: ${s.proximo_paso}` : ''}${s.alerta ? `\n⚠ Alerta: ${s.alerta}` : ''}`)
+    .join('\n\n');
+
+  const res = await deepseekChat({
+    agente: 'A10_JUNIOR',
+    temperature: 0.3,
+    messages: [
+      { role: 'system', content: JUNIOR_SYSTEM },
+      { role: 'user', content: `CLIENTE: ${persona.nombre}\n\n=== LOS 7 ANÁLISIS DE ÁREA ===\n${bloques}\n\nDame la visión global de este cliente.` },
+    ],
+  });
+  const campos = parsear(res.contenido);
+  const { error } = await sb.from('modulo_sintesis').upsert({
+    persona_id: personaId, modulo: 'junior',
+    sintesis: campos.sintesis, estado: campos.estado, estado_semaforo: campos.estado_semaforo,
+    proximo_paso: campos.proximo_paso, alerta: campos.alerta,
+    generado_por: 'A10_JUNIOR', modelo: res.modelo,
+    tokens_in: res.tokens_in, tokens_out: res.tokens_out, costo_usd: res.costo_usd,
+    generado_at: new Date().toISOString(),
+  } as any, { onConflict: 'persona_id,modulo' });
+  if (error) { console.error(`[A10_JUNIOR] upsert: ${error.message}`); return { ok: false, costo_usd: res.costo_usd }; }
+  return { ok: true, costo_usd: res.costo_usd };
 }
