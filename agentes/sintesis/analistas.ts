@@ -31,9 +31,37 @@ export const ANALISTAS: Record<string, Analista> = {
 cómo se llama, cómo contactarlo, qué inmueble/conjunto tiene, de qué zona es, y su historia
 con el negocio. Una ficha viva: lo esencial para saber con quién estamos tratando.` + FORMATO },
   m2: { titulo: 'Análisis Comercial', system:
-`Sos el ANALISTA COMERCIAL de Fábrica de Cortinas Girardot. Analizá la situación comercial:
-qué pidió el cliente, qué cotizaciones hay, en qué etapa del embudo está, objeciones,
-si está cerca de cerrar o se enfrió.` + FORMATO },
+`Sos el ANALISTA COMERCIAL de Fábrica de Cortinas Girardot (persianas Safra, Girardot, Colombia).
+Leé toda la conversación de WhatsApp con un cliente y devolvé el análisis comercial Y las
+cotizaciones estructuradas.
+
+Devolvé EXCLUSIVAMENTE un objeto JSON con esta forma (nada de texto fuera del JSON):
+{
+  "sintesis": "2-3 frases: qué pidió, qué pasó, en qué etapa del embudo está",
+  "estado": "🟢 o 🟡 o 🔴 + frase corta de estado",
+  "proximo_paso": "1 acción concreta para Jhon",
+  "alerta": "texto si hay algo urgente o contradictorio, o null",
+  "cotizaciones": [
+    {
+      "descripcion": "qué cotiza, corto (ej: Tapaluces blackout sala-comedor)",
+      "estado": "propuesta|negociando|intencion_cierre|ganada|perdida|vencida|cancelada",
+      "fecha": "YYYY-MM-DD o null",
+      "total": número entero en COP o null,
+      "items": [
+        { "sistema": "uno de: blackout, screen_solar, sheer_elegance, panel_japones, enrollables, verticales, peliculas_solares, toldos, motores, domotica, rieles, cadenillas",
+          "ambiente": "sala, cocina, habitacion, etc. o null",
+          "ancho_m": número o null, "alto_m": número o null,
+          "cantidad": número entero, "color": "texto o null" }
+      ]
+    }
+  ]
+}
+
+REGLAS:
+- CONSOLIDÁ: si el cliente pidió una cotización con varias ventanas, es UNA entrada con varios items. NO crees una cotización por cada mensaje.
+- Incluí solo cotizaciones REALES (pedidos concretos o montos), no saludos ni charla.
+- Si no hay cotizaciones claras, devolvé "cotizaciones": [].
+- Moneda: pesos colombianos (COP), número entero sin puntos ni símbolos.` },
   m3: { titulo: 'Análisis Financiero', system:
 `Sos el ANALISTA FINANCIERO de Fábrica de Cortinas Girardot. Analizá la plata: qué se cotizó,
 cuánto pagó el cliente, cuánto debe, abonos, comprobantes, saldos pendientes. ¿Está al día o debe?` + FORMATO },
@@ -137,6 +165,16 @@ Tareas: ${tareas.length ? JSON.stringify(tareas) : 'ninguna'}`;
   let ok = 0, fallidos = 0, costo_usd = 0;
 
   for (const [modulo, cfg] of Object.entries(ANALISTAS)) {
+    // M2 tiene manejo especial: además del texto, estructura las cotizaciones
+    // en la tabla. Así el análisis y la sub-tab salen de la misma fuente.
+    if (modulo === 'm2') {
+      try {
+        const r = await sintetizarComercial(sb, personaId, persona.nombre, ctxComun, cfg.system);
+        costo_usd += r.costo_usd;
+        if (r.ok) ok++; else fallidos++;
+      } catch (e: any) { fallidos++; console.error(`[A_SINTESIS_M2] ${e.message}`); }
+      continue;
+    }
     try {
       const res = await deepseekChat({
         agente: `A_SINTESIS_${modulo.toUpperCase()}`,
@@ -175,6 +213,106 @@ Tareas: ${tareas.length ? JSON.stringify(tareas) : 'ninguna'}`;
   }
 
   return { ok, fallidos, costo_usd };
+}
+
+const SISTEMAS_SAFRA = new Set([
+  'blackout', 'screen_solar', 'sheer_elegance', 'panel_japones', 'enrollables',
+  'verticales', 'peliculas_solares', 'toldos', 'motores', 'domotica', 'rieles', 'cadenillas',
+]);
+
+/**
+ * Analista comercial (M2). Además de la síntesis textual, devuelve las
+ * cotizaciones estructuradas y las escribe en la tabla `cotizaciones` — así la
+ * sub-tab Cotizaciones y el panel de análisis salen de la misma fuente.
+ */
+async function sintetizarComercial(
+  sb: SupabaseClient,
+  personaId: number,
+  nombre: string,
+  ctxComun: string,
+  system: string,
+): Promise<{ ok: boolean; costo_usd: number }> {
+  const res = await deepseekChat({
+    agente: 'A_SINTESIS_M2',
+    temperature: 0.3,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: `CLIENTE: ${nombre}\n\n${ctxComun}\n\nDevolvé el objeto JSON.` },
+    ],
+  });
+
+  let data: any;
+  try { data = JSON.parse(res.contenido); }
+  catch { console.error('[A_SINTESIS_M2] JSON inválido del LLM'); return { ok: false, costo_usd: res.costo_usd }; }
+
+  const estadoRaw: string = data.estado ?? '';
+  let semaforo: 'verde' | 'amarillo' | 'rojo' = 'verde';
+  if (estadoRaw.includes('🔴')) semaforo = 'rojo';
+  else if (estadoRaw.includes('🟡')) semaforo = 'amarillo';
+  const alerta = data.alerta && !/^ningun/i.test(String(data.alerta)) ? String(data.alerta) : null;
+
+  const { error } = await sb.from('modulo_sintesis').upsert({
+    persona_id: personaId, modulo: 'm2',
+    sintesis: data.sintesis ?? null,
+    estado: estadoRaw.replace(/[🟢🟡🔴]/g, '').trim() || null,
+    estado_semaforo: semaforo,
+    proximo_paso: data.proximo_paso ?? null,
+    alerta,
+    generado_por: 'A_SINTESIS_M2', modelo: res.modelo,
+    tokens_in: res.tokens_in, tokens_out: res.tokens_out, costo_usd: res.costo_usd,
+    generado_at: new Date().toISOString(),
+  } as any, { onConflict: 'persona_id,modulo' });
+  if (error) { console.error(`[A_SINTESIS_M2] upsert sintesis: ${error.message}`); return { ok: false, costo_usd: res.costo_usd }; }
+
+  await poblarCotizaciones(sb, personaId, Array.isArray(data.cotizaciones) ? data.cotizaciones : []);
+  return { ok: true, costo_usd: res.costo_usd };
+}
+
+/**
+ * Reemplaza las cotizaciones generadas por agentes con las que estructuró el
+ * analista. Las cotizaciones hechas a mano por Jhon (agente_origen NULL) no se tocan.
+ */
+async function poblarCotizaciones(sb: SupabaseClient, personaId: number, cots: any[]): Promise<void> {
+  const proy = (await sb.from('proyectos').select('id,ambito').eq('persona_id', personaId).limit(1)).data?.[0];
+
+  const viejas = (await sb.from('cotizaciones')
+    .select('id').eq('persona_id', personaId).not('agente_origen', 'is', null)).data ?? [];
+  if (viejas.length > 0) {
+    const ids = viejas.map(v => v.id);
+    await sb.from('cotizacion_items').delete().in('cotizacion_id', ids);
+    await sb.from('cotizaciones').delete().in('id', ids);
+  }
+
+  const hoy = new Date().toISOString().slice(0, 10);
+  for (const c of cots) {
+    const total = typeof c.total === 'number' ? c.total : 0;
+    const { data: row, error } = await sb.from('cotizaciones').insert({
+      proyecto_id: proy?.id ?? null, persona_id: personaId, ambito: proy?.ambito ?? 'comercial',
+      estado: c.estado ?? 'propuesta', fecha: c.fecha ?? hoy,
+      subtotal: total, total,
+      notas: c.descripcion ?? null,
+      agente_origen: 'A_SINTESIS_M2', shadow: false,
+    } as any).select('id').single();
+    if (error || !row) { console.error(`[A_SINTESIS_M2] insert cotizacion: ${error?.message ?? 'sin data'}`); continue; }
+
+    const items = Array.isArray(c.items) ? c.items : [];
+    if (items.length > 0) {
+      const rows = items.map((it: any, idx: number) => ({
+        cotizacion_id: row.id,
+        sistema_safra_codigo: SISTEMAS_SAFRA.has(it.sistema) ? it.sistema : null,
+        ambiente: it.ambiente ?? null,
+        ancho_m: typeof it.ancho_m === 'number' ? it.ancho_m : null,
+        alto_m: typeof it.alto_m === 'number' ? it.alto_m : null,
+        cantidad: typeof it.cantidad === 'number' ? it.cantidad : 1,
+        color: it.color ?? null,
+        orden: idx,
+        agente_origen: 'A_SINTESIS_M2', shadow: false,
+      }));
+      const { error: ei } = await sb.from('cotizacion_items').insert(rows as any);
+      if (ei) console.error(`[A_SINTESIS_M2] insert items: ${ei.message}`);
+    }
+  }
 }
 
 const JUNIOR_SYSTEM =
