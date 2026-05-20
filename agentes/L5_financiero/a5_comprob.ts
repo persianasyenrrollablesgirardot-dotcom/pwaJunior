@@ -395,7 +395,7 @@ activa.`,
       referencia: d.referencia_visible,
       cuenta_receptora: d.cuenta_destino_visible,
       estado_validacion: 'pendiente',
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
       agente_origen: ctx.agente.codigo,
       notas,
     } as any).select('id').single();

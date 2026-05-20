@@ -10,6 +10,7 @@
  */
 import { useState } from 'react';
 import { useContextoActivo } from '../lib/contexto_activo';
+import { PanelSintesis } from './PanelSintesis';
 import { useNavegacion } from '../lib/navegacion';
 import { Medidas } from './m4/Medidas';
 import { RiesgoMedidas } from './m4/RiesgoMedidas';
@@ -41,9 +42,11 @@ export function Modulo4() {
       <div style={{ padding: '16px 24px 0' }}>
         <h1 style={{ margin: '0 0 2px', fontSize: 18, fontWeight: 700 }}>MÓDULO 4 · Técnicos</h1>
         <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 12 }}>
-          Medidas, riesgos, producto, advertencias técnicas, compatibilidades y biblioteca técnica del cliente activo.
+          Análisis técnico del cliente activo. El detalle (medidas, riesgos, compatibilidad…) está en las sub-tabs.
         </p>
       </div>
+
+      <PanelSintesis modulo="m4" titulo="Análisis Técnico" />
 
       <div style={{ display: 'flex', gap: 4, padding: '12px 24px 0', borderBottom: '1px solid var(--border-soft)', flexWrap: 'wrap' }}>
         {TABS.map(t => {

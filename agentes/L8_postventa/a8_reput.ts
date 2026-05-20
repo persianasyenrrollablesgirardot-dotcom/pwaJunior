@@ -387,7 +387,7 @@ basado en TODOS los criterios. Sé estricto y conservador.`,
       apto_para_resena: true,
       estado: 'apto',
       notas: `${r.motivo}\n\nPlantilla sugerida:\n${r.plantilla_mensaje_sugerido}\n\nEnvío sugerido: ${r.fecha_envio_sugerida ?? 'sin fecha'}`,
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
       agente_origen: ctx.agente.codigo,
     } as any).select('id').single();
     if (error || !row) {

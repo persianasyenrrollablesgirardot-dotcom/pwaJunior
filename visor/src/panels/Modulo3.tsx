@@ -13,6 +13,7 @@
  */
 import { useState } from 'react';
 import { useContextoActivo } from '../lib/contexto_activo';
+import { PanelSintesis } from './PanelSintesis';
 import { useNavegacion } from '../lib/navegacion';
 import { Facturacion } from './m3/Facturacion';
 import { Abonos } from './m3/Abonos';
@@ -43,9 +44,11 @@ export function Modulo3() {
       <div style={{ padding: '16px 24px 0' }}>
         <h1 style={{ margin: '0 0 2px', fontSize: 18, fontWeight: 700 }}>MÓDULO 3 · Financieros</h1>
         <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 12 }}>
-          Facturación, abonos, cartera, variaciones económicas y rentabilidad real del cliente activo.
+          Análisis financiero del cliente activo. El detalle (facturación, abonos, cartera…) está en las sub-tabs.
         </p>
       </div>
+
+      <PanelSintesis modulo="m3" titulo="Análisis Financiero" />
 
       <div style={{ display: 'flex', gap: 4, padding: '12px 24px 0', borderBottom: '1px solid var(--border-soft)' }}>
         {TABS.map(t => {

@@ -385,7 +385,7 @@ Validá las medidas. Recordá: ancho_m/alto_m/quien_midio/bandera_riesgo TOP-LEV
       fecha: new Date().toISOString().slice(0, 10),
       notas: p.resumen ?? null,
       riesgo_medicion,
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
       agente_origen: ctx.agente.codigo,
     } as any).select('id').single();
     if (error || !row) {

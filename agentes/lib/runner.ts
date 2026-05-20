@@ -409,9 +409,12 @@ export async function ejecutarAgente<TDatos = any>(
     ts_canal: new Date().toISOString(),
   } as any).select('id').maybeSingle();
 
-  // ─── 16. SI confianza < CONFIRMADO → al buzón polimórfico
+  // ─── 16. SOLO confianza=ALERTA va al buzón (contradicción / riesgo grave).
+  //         CONFIRMADO / INFERIDO / DUDOSO escriben directo al módulo, visibles.
+  //         Decisión de Jhon (2026-05-19): cero aprobación rutinaria — los
+  //         agentes trabajan solos, Jhon corrige post-hoc en el módulo.
   let fue_al_buzon = false;
-  if (output.confianza !== 'CONFIRMADO' && output.confianza !== 'RECHAZADO') {
+  if (output.confianza === 'ALERTA') {
     await sb.from('buzon_validacion').insert({
       evento_id: evtNew?.id,
       proyecto_id: params.proyecto_id,

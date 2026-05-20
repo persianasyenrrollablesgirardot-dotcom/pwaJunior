@@ -410,7 +410,7 @@ Determiná si es un reclamo sensible. Si severidad=critica, marcá confianza=ALE
       escalado_a: r.escalado_a || 'jhon',
       fecha_apertura: new Date().toISOString().slice(0, 10),
       notas,
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
       agente_origen: ctx.agente.codigo,
     } as any).select('id').single();
     if (error || !row) {

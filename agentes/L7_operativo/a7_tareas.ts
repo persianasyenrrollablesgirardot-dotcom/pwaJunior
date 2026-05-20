@@ -318,7 +318,7 @@ Detectá tareas operativas. Si el mensaje no implica acción clara, devolvé tar
       origen: 'agente',
       origen_chat_id: ctx.chat_id,
       prioridad: t.prioridad,
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
       agente_origen: ctx.agente.codigo,
     } as any).select('id').single();
     if (error || !row) {

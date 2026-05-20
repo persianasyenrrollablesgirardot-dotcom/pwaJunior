@@ -10,6 +10,7 @@
  */
 import { useState } from 'react';
 import { useContextoActivo } from '../lib/contexto_activo';
+import { PanelSintesis } from './PanelSintesis';
 import { useNavegacion } from '../lib/navegacion';
 import { Produccion } from './m5/Produccion';
 import { Instalaciones } from './m5/Instalaciones';
@@ -40,9 +41,11 @@ export function Modulo5() {
       <div style={{ padding: '16px 24px 0' }}>
         <h1 style={{ margin: '0 0 2px', fontSize: 18, fontWeight: 700 }}>MÓDULO 5 · Operativos</h1>
         <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 12 }}>
-          Producción, instalaciones, agenda, rutas, tareas y checklist de instalación.
+          Análisis operativo del cliente activo. El detalle (producción, instalaciones, agenda…) está en las sub-tabs.
         </p>
       </div>
+
+      <PanelSintesis modulo="m5" titulo="Análisis Operativo" />
 
       <div style={{ display: 'flex', gap: 4, padding: '12px 24px 0', borderBottom: '1px solid var(--border-soft)', flexWrap: 'wrap' }}>
         {TABS.map(t => {

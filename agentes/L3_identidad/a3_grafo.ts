@@ -332,7 +332,7 @@ el mensaje analizado, NO la incluyas.`,
       contexto: contextoNota,
       agente_origen: ctx.agente.codigo,
       confianza: m.confianza_mencion,
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
     } as any).select('id').single();
     if (error || !row) {
       throw new Error(`A3_GRAFO insert mencion: ${error?.message ?? 'sin data'}`);

@@ -339,7 +339,7 @@ Determiná si aplica registro de satisfacción y el estado_cliente.`,
       fecha_check: new Date().toISOString().slice(0, 10),
       fuente: s.fuente,
       notas: `${s.notas_para_jhon}\n\nEvidencia: "${s.evidencia_texto}"`,
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
       agente_origen: ctx.agente.codigo,
     } as any).select('id').single();
     if (error || !row) {

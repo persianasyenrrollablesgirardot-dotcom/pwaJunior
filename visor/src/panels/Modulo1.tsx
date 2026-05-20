@@ -10,6 +10,7 @@ import { EventoPGVista } from './m1/EventoPGVista';
 import { Transcripciones } from './m1/Transcripciones';
 import { BuzonValidacion } from './m1/BuzonValidacion';
 import { useContextoActivo } from '../lib/contexto_activo';
+import { PanelSintesis } from './PanelSintesis';
 import { useNavegacion } from '../lib/navegacion';
 
 type Sub = 'identidad' | 'inmueble' | 'proyecto' | 'timeline' | 'evento_pg' | 'transcripciones' | 'buzon';
@@ -162,6 +163,9 @@ export function Modulo1() {
           <strong>BD vacía.</strong> Para ver datos reales: 1) carga la extensión Visor PG en Chrome, 2) abre WhatsApp Web, 3) autoriza un chat con el popup. Los mensajes aparecen acá en &lt;5 seg.
         </div>
       )}
+
+      {/* La conclusión del agente analista — lo primero que se ve */}
+      <PanelSintesis modulo="m1" titulo="Análisis del Cliente" />
 
       {/* Tabs internos */}
       <div style={{ display: 'flex', gap: 4, padding: '12px 24px 0', borderBottom: '1px solid var(--border-soft)' }}>

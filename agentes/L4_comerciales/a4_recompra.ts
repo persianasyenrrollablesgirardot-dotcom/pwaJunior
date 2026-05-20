@@ -332,7 +332,7 @@ Si no, dejá tarea_propuesta=null y explicá en resumen.`,
       asignado_a: t.asignado_a || 'jhon',
       origen: 'agente',
       prioridad: t.prioridad,
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
       agente_origen: ctx.agente.codigo,
     } as any).select('id').single();
     if (error || !row) {

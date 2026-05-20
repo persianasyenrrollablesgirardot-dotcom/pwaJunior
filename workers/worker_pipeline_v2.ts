@@ -53,6 +53,7 @@ import {
   type FaseDefinicion,
 } from '../agentes/lib/pipeline.js';
 import { registrarTodosLosAgentes } from '../agentes/registro_agentes.js';
+import { sintetizarPersona } from '../agentes/sintesis/analistas.js';
 
 // ─── Config y env ─────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
@@ -369,6 +370,27 @@ async function procesarEventoPipeline(evt: any): Promise<void> {
   }
 }
 
+// Personas con actividad nueva, pendientes de re-síntesis. Se acumulan mientras
+// el pipeline drena a full-batch y se sintetizan cuando el ciclo cierra parcial
+// (cola casi vacía) — así una corrida de 50 mensajes re-sintetiza al cliente
+// UNA vez al final, no una vez por batch.
+const personasSintesisPendiente = new Set<number>();
+
+async function drenarSintesis(): Promise<void> {
+  if (personasSintesisPendiente.size === 0) return;
+  const pendientes = [...personasSintesisPendiente];
+  personasSintesisPendiente.clear();
+  for (const pid of pendientes) {
+    try {
+      const r = await sintetizarPersona(sb, pid);
+      stats.pi_costo_usd += r.costo_usd;
+      console.log(`[V2/SINT] persona ${pid}: ${r.ok}/7 módulos · $${r.costo_usd.toFixed(4)}`);
+    } catch (e: any) {
+      console.error(`[V2/SINT] persona ${pid}: ${e.message}`);
+    }
+  }
+}
+
 async function cicloPipeline(): Promise<number> {
   if (pipelineEnCurso) return 0;
   pipelineEnCurso = true;
@@ -391,7 +413,7 @@ async function cicloPipeline(): Promise<number> {
     );
 
     if (error) { console.error('[V2/PI] poll error:', error.message); return 0; }
-    if (!data || data.length === 0) { stats.pi_ciclos++; return 0; }
+    if (!data || data.length === 0) { stats.pi_ciclos++; await drenarSintesis(); return 0; }
 
     // Por chat: secuencial para evitar race condition en escrituras del mismo proyecto/persona
     const grupos = new Map<string, any[]>();
@@ -410,6 +432,8 @@ async function cicloPipeline(): Promise<number> {
     stats.pi_ciclos++;
     const dt = Date.now() - t0;
     console.log(`[V2/PI] ciclo ${stats.pi_ciclos}: ${data.length} eventos en ${dt}ms | ok:${stats.pi_ok} sin-pipe:${stats.pi_skip_sin_pipe} fail:${stats.pi_fallidos} $${stats.pi_costo_usd.toFixed(4)}`);
+    for (const evt of data) if (evt.persona_id) personasSintesisPendiente.add(evt.persona_id);
+    if (data.length < BATCH_PIPELINE) await drenarSintesis();
     return data.length;
   } finally {
     pipelineEnCurso = false;

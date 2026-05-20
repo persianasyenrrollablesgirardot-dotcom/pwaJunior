@@ -365,7 +365,7 @@ todos los campos.`,
       responsable: g.responsable,
       estado: 'abierta',
       notas: g.descripcion_falla,
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
       agente_origen: ctx.agente.codigo,
     } as any).select('id').single();
     if (error || !row) {

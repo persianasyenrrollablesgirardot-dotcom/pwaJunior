@@ -370,7 +370,7 @@ Determiná si el MENSAJE A ANALIZAR confirma un pago ya realizado.`,
       referencia: a.referencia,
       cuenta_receptora: a.cuenta_receptora,
       estado_validacion: 'pendiente',
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
       agente_origen: ctx.agente.codigo,
     } as any).select('id').single();
     if (error || !ab) {

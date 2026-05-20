@@ -332,7 +332,7 @@ objeciones=[].`,
       notas: objeciones.length > 1
         ? `Detectadas ${objeciones.length} objeciones — esta es la primera. Ver detalle del ítem del buzón.`
         : null,
-      shadow: true,
+      shadow: out.confianza === 'ALERTA',
       agente_origen: ctx.agente.codigo,
       confianza: o.confianza_objecion,
       evento_origen_id: ctx.evento_id,

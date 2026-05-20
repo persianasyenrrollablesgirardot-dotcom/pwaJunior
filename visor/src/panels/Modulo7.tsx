@@ -8,6 +8,7 @@
  */
 import { useState } from 'react';
 import { useContextoActivo } from '../lib/contexto_activo';
+import { PanelSintesis } from './PanelSintesis';
 import { useNavegacion } from '../lib/navegacion';
 import { ArchivoDocumental } from './m7/ArchivoDocumental';
 import { EvidenciaEventos } from './m7/EvidenciaEventos';
@@ -35,9 +36,11 @@ export function Modulo7() {
       <div style={{ padding: '16px 24px 0' }}>
         <h1 style={{ margin: '0 0 2px', fontSize: 18, fontWeight: 700 }}>MÓDULO 7 · Evidencias</h1>
         <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 12 }}>
-          Archivo unificado de fotos/videos/audios/comprobantes + eventos con evidencia + transcripciones + captura manual.
+          Análisis de evidencias del cliente activo. El detalle (archivo, eventos, transcripciones…) está en las sub-tabs.
         </p>
       </div>
+
+      <PanelSintesis modulo="m7" titulo="Análisis de Evidencias" />
 
       <div style={{ display: 'flex', gap: 4, padding: '12px 24px 0', borderBottom: '1px solid var(--border-soft)', flexWrap: 'wrap' }}>
         {TABS.map(t => {
