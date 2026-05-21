@@ -31,21 +31,40 @@ const SEMAFORO: Record<string, { color: string; emoji: string }> = {
 const fmtFecha = (s: string) =>
   new Date(s).toLocaleString('es-CO', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 
+const fmtFechaCorta = (s: string) =>
+  new Date(s).toLocaleDateString('es-CO', { day: '2-digit', month: 'short' });
+
+interface Novedad { id: number; hecho: string; created_at: string }
+
 export function PanelSintesis({ modulo, titulo }: { modulo: string; titulo: string }) {
   const ctx = useContextoActivo();
   const [data, setData] = useState<Sintesis | null>(null);
+  const [novedades, setNovedades] = useState<Novedad[]>([]);
   const [cargando, setCargando] = useState(true);
 
   useEffect(() => {
-    if (ctx.personaActivaId == null) { setData(null); setCargando(false); return; }
+    if (ctx.personaActivaId == null) { setData(null); setNovedades([]); setCargando(false); return; }
     setCargando(true);
-    supabase
-      .from('modulo_sintesis')
-      .select('sintesis,estado,estado_semaforo,proximo_paso,alerta,generado_at,generado_por')
-      .eq('persona_id', ctx.personaActivaId)
-      .eq('modulo', modulo)
-      .maybeSingle()
-      .then(({ data }) => { setData((data as Sintesis) ?? null); setCargando(false); });
+    const personaId = ctx.personaActivaId;
+    Promise.all([
+      supabase
+        .from('modulo_sintesis')
+        .select('sintesis,estado,estado_semaforo,proximo_paso,alerta,generado_at,generado_por')
+        .eq('persona_id', personaId)
+        .eq('modulo', modulo)
+        .maybeSingle(),
+      supabase
+        .from('correcciones_humanas')
+        .select('id,hecho,created_at')
+        .eq('persona_id', personaId)
+        .eq('modulo', modulo)
+        .eq('vigente', true)
+        .order('created_at', { ascending: false }),
+    ]).then(([sint, corr]) => {
+      setData((sint.data as Sintesis) ?? null);
+      setNovedades((corr.data as Novedad[]) ?? []);
+      setCargando(false);
+    });
   }, [ctx.personaActivaId, modulo]);
 
   if (ctx.personaActivaId == null) return null;
@@ -117,6 +136,23 @@ export function PanelSintesis({ modulo, titulo }: { modulo: string; titulo: stri
           fontSize: 13, lineHeight: 1.5, color: '#ff3b30',
         }}>
           <strong>⚠ Alerta: </strong>{data.alerta}
+        </div>
+      )}
+
+      {/* Novedades registradas — las correcciones que Jhon le dio a Junior */}
+      {novedades.length > 0 && (
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border-soft)' }}>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 6 }}>
+            📌 Novedades que registraste
+          </div>
+          {novedades.map(n => (
+            <div key={n.id} style={{ display: 'flex', gap: 8, fontSize: 12, lineHeight: 1.5, marginBottom: 4 }}>
+              <span style={{ color: 'var(--text-muted)', flexShrink: 0, fontWeight: 600 }}>
+                {fmtFechaCorta(n.created_at)}
+              </span>
+              <span style={{ color: 'var(--text)' }}>{n.hecho}</span>
+            </div>
+          ))}
         </div>
       )}
     </div>
