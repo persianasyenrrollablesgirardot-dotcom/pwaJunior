@@ -14,6 +14,7 @@ import { CentroControl } from './panels/CentroControl';
 import { Captura } from './panels/Captura';
 import { Clientes } from './panels/Clientes';
 import { VistasGlobales } from './panels/VistasGlobales';
+import { Junior } from './panels/Junior';
 import { sincronizarKeysExtension } from './lib/extension';
 import { ContextoActivoProvider } from './lib/contexto_activo';
 import { NavegacionProvider } from './lib/navegacion';
@@ -68,7 +69,8 @@ export default function App() {
             {modulo === 'm6' && <Modulo6 />}
             {modulo === 'm7' && <Modulo7 />}
             {modulo === 'm8' && <Modulo8 />}
-            {modulo !== 'centro_control' && modulo !== 'captura' && modulo !== 'clientes' && modulo !== 'vistas_globales' && modulo !== 'm1' && modulo !== 'm2' && modulo !== 'm3' && modulo !== 'm4' && modulo !== 'm5' && modulo !== 'm6' && modulo !== 'm7' && modulo !== 'm8' && (
+            {modulo === 'junior' && <Junior />}
+            {modulo !== 'centro_control' && modulo !== 'captura' && modulo !== 'clientes' && modulo !== 'vistas_globales' && modulo !== 'junior' && modulo !== 'm1' && modulo !== 'm2' && modulo !== 'm3' && modulo !== 'm4' && modulo !== 'm5' && modulo !== 'm6' && modulo !== 'm7' && modulo !== 'm8' && (
               <ModuloPlaceholder
                 titulo={MODULOS.find(m => m.id === modulo)?.nombre ?? '?'}
                 subtitulo="Pendiente — se construye después del MÓDULO 7"

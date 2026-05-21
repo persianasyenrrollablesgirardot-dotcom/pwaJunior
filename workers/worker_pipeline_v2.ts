@@ -54,6 +54,7 @@ import {
 } from '../agentes/lib/pipeline.js';
 import { registrarTodosLosAgentes } from '../agentes/registro_agentes.js';
 import { sintetizarPersona } from '../agentes/sintesis/analistas.js';
+import { responderJunior } from '../agentes/sintesis/junior_chat.js';
 
 // ─── Config y env ─────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
@@ -441,6 +442,52 @@ async function cicloPipeline(): Promise<number> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// CHAT DE JUNIOR
+// ═══════════════════════════════════════════════════════════════════════════
+// Jhon escribe en junior_chat (rol='usuario', estado='pendiente'). Este ciclo
+// los toma, arma el contexto con las síntesis de todos los clientes, deja que
+// Junior responda, e inserta la respuesta (rol='junior').
+let juniorChatEnCurso = false;
+async function cicloJuniorChat(): Promise<void> {
+  if (juniorChatEnCurso) return;
+  juniorChatEnCurso = true;
+  try {
+    const { data: pendientes } = await sb.from('junior_chat')
+      .select('id, mensaje')
+      .eq('rol', 'usuario').eq('estado', 'pendiente')
+      .order('created_at', { ascending: true });
+    if (!pendientes || pendientes.length === 0) return;
+
+    for (const msg of pendientes) {
+      try {
+        const { data: hist } = await sb.from('junior_chat')
+          .select('rol, mensaje')
+          .eq('estado', 'completo')
+          .order('created_at', { ascending: true });
+        const historial = (hist ?? []).map((h: any) => ({ rol: h.rol, mensaje: h.mensaje }));
+
+        const r = await responderJunior(sb, msg.mensaje, historial);
+        await sb.from('junior_chat').insert({
+          rol: 'junior', mensaje: r.respuesta, estado: 'completo',
+          costo_usd: r.costo_usd, modelo: 'deepseek-chat',
+        } as any);
+        await sb.from('junior_chat').update({ estado: 'completo' }).eq('id', msg.id);
+        console.log(`[V2/JUNIOR] respondió mensaje ${msg.id} · $${r.costo_usd.toFixed(4)}`);
+      } catch (e: any) {
+        console.error(`[V2/JUNIOR] error en mensaje ${msg.id}: ${e.message}`);
+        await sb.from('junior_chat').update({ estado: 'error' }).eq('id', msg.id);
+        await sb.from('junior_chat').insert({
+          rol: 'junior', estado: 'completo',
+          mensaje: 'Disculpá, tuve un problema procesando tu mensaje. Probá de nuevo.',
+        } as any);
+      }
+    }
+  } finally {
+    juniorChatEnCurso = false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════
 async function main() {
@@ -514,6 +561,7 @@ async function main() {
   if (!SKIP_EXTRACTOR) setInterval(() => { cicloExtractor().catch(e => console.error('[V2/EX]', e?.message)); }, POLL_EXTRACTOR_MS);
   if (!SKIP_IDENTIDAD) setInterval(() => { cicloIdentidad().catch(e => console.error('[V2/ID]', e?.message)); }, POLL_IDENTIDAD_MS);
   if (!SKIP_PIPELINE)  setInterval(() => { cicloPipeline().catch(e => console.error('[V2/PI]', e?.message)); }, POLL_PIPELINE_MS);
+  setInterval(() => { cicloJuniorChat().catch(e => console.error('[V2/JUNIOR]', e?.message)); }, 3000);
 
   setInterval(() => console.log(`[V2] stats: ${JSON.stringify(stats)}`), STATS_INTERVAL_MS);
 
