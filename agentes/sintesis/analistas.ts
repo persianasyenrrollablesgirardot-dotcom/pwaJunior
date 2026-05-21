@@ -28,6 +28,8 @@ const METODOS_PAGO = new Set(['bancolombia', 'nequi', 'daviplata', 'efectivo', '
 const TIPOS_TAREA = new Set(['llamar', 'enviar_cotizacion', 'confirmar_pago', 'pedir_ficha', 'agendar_instalacion', 'reclamar_proveedor', 'pedir_resena', 'otro']);
 const MOTIVOS_RECLAMO = new Set(['cliente_molesto', 'garantia_mal_manejada', 'dano_costoso', 'publicacion_negativa', 'mala_resena', 'incumplimiento', 'otro']);
 const ESTADOS_RECLAMO = new Set(['abierto', 'en_contencion', 'escalado', 'resuelto', 'cerrado_negativo']);
+// WhatsApp de Fábrica de Cortinas Girardot — aparece en todos los chats, se descarta.
+const TELEFONO_NEGOCIO = '3202381865';
 
 const FORMATO = `
 
@@ -209,6 +211,9 @@ export async function sintetizarPersona(
     : [];
 
   if (msgs.length === 0) return { ok: 0, fallidos: 0, costo_usd: 0 };
+
+  // Extraer el teléfono del cliente de los mensajes / OCR de comprobantes.
+  await extraerTelefonoCliente(sb, personaId, msgs);
 
   // Cada mensaje va con SU fecha real de envío (ts_canal). Sin esto el analista
   // no puede resolver "el jueves" / "mañana" ni calcular qué venció — causa raíz
@@ -496,6 +501,34 @@ async function poblarPostventa(sb: SupabaseClient, personaId: number, data: any)
     } as any);
     if (error) console.error(`[A_SINTESIS_M6] insert reclamo: ${error.message}`);
   }
+}
+
+/**
+ * Extrae el teléfono del cliente de sus mensajes y del OCR de comprobantes.
+ * Texto plano de la BD — no toca WhatsApp, no se rompe con sus updates.
+ * Solo carga si la persona todavía no tiene teléfono (no pisa lo manual).
+ */
+async function extraerTelefonoCliente(sb: SupabaseClient, personaId: number, msgs: any[]): Promise<void> {
+  const p = (await sb.from('personas').select('telefono_e164').eq('id', personaId).maybeSingle()).data;
+  if (!p || p.telefono_e164) return;   // ya tiene teléfono → no tocar
+
+  const re = /(?:\+?57[\s-]?)?(3\d{2}[\s-]?\d{3}[\s-]?\d{4})/g;
+  const conteo = new Map<string, number>();
+  for (const m of msgs) {
+    const t = (m.texto || '') + ' ' + ((m.metadata as any)?.ai_text || '');
+    for (const x of t.matchAll(re)) {
+      const num = x[1].replace(/[\s-]/g, '');   // 10 dígitos: 3XXXXXXXXX
+      if (num.length !== 10 || num === TELEFONO_NEGOCIO) continue;
+      conteo.set(num, (conteo.get(num) ?? 0) + 1);
+    }
+  }
+  if (conteo.size === 0) return;
+
+  const mejor = [...conteo.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const e164 = '+57' + mejor;
+  const { error } = await sb.from('personas').update({ telefono_e164: e164 }).eq('id', personaId);
+  if (error) console.error(`[telefono] persona ${personaId}: ${error.message}`);
+  else console.log(`[telefono] persona ${personaId} → ${e164} (extraído de mensajes/OCR)`);
 }
 
 const JUNIOR_SYSTEM =
