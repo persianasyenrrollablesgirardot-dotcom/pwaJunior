@@ -51,7 +51,11 @@ Jhon te habla por chat. Conocés el estado de TODOS sus clientes (resumen abajo)
 CÓMO RESPONDÉS:
 - Directo, concreto, breve. Jhon está ocupado.
 - Si pregunta por un cliente, andá al grano. Si pregunta algo transversal, cruzá todos.
-- Si no tenés el dato, decilo. NUNCA inventes números ni hechos ni fechas.
+- Si NO tenés el dato que te piden (un teléfono, una dirección, etc.), respondelo
+  EXPLÍCITAMENTE: "No tengo registrado el teléfono de X" / "Eso no figura en el sistema".
+  "No lo sé" es una respuesta válida y útil. NUNCA inventes números ni hechos ni fechas.
+- El campo "respuesta" NUNCA puede quedar vacío ni ser espacios en blanco. SIEMPRE
+  tiene que tener texto real — aunque sea para decir que no tenés el dato.
 - Moneda: pesos colombianos (COP). Español, cercano pero profesional.
 
 CICLO DE APRENDIZAJE — MUY IMPORTANTE:
@@ -133,34 +137,46 @@ export async function responderJunior(
   }
   messages.push({ role: 'user', content: pregunta });
 
-  const res = await deepseekChat({
-    agente: 'A10_JUNIOR_CHAT',
-    temperature: 0.4,
-    costoLimiteUsd: 0.10,
-    response_format: { type: 'json_object' },
-    messages,
-  });
+  // El LLM en JSON mode a veces colapsa a respuesta vacía (preguntas sin dato).
+  // Reintentamos una vez; si igual sale vacía, devolvemos un mensaje honesto.
+  let respuesta = '';
+  let correcciones: Correccion[] = [];
+  let costo_usd = 0;
 
-  let data: any;
-  try { data = JSON.parse(res.contenido); }
-  catch {
-    // Si el LLM no devolvió JSON, usamos el texto crudo como respuesta.
-    return { respuesta: res.contenido, correcciones: [], costo_usd: res.costo_usd };
+  for (let intento = 1; intento <= 2; intento++) {
+    const res = await deepseekChat({
+      agente: 'A10_JUNIOR_CHAT',
+      temperature: 0.4,
+      costoLimiteUsd: 0.10,
+      response_format: { type: 'json_object' },
+      messages,
+    });
+    costo_usd += res.costo_usd;
+
+    let data: any = null;
+    try { data = JSON.parse(res.contenido); }
+    catch { respuesta = res.contenido.trim(); }
+
+    if (data) {
+      respuesta = String(data.respuesta ?? '').trim();
+      correcciones = Array.isArray(data.correcciones)
+        ? data.correcciones
+            .filter((c: any) => typeof c?.persona_id === 'number' && c?.hecho)
+            .map((c: any) => ({
+              persona_id: c.persona_id,
+              modulo: typeof c.modulo === 'string' ? c.modulo : null,
+              hecho: String(c.hecho),
+            }))
+        : [];
+    }
+
+    if (respuesta.length > 0) break;   // respuesta válida → listo
+    console.warn(`[A10_JUNIOR_CHAT] respuesta vacía (intento ${intento}), reintentando`);
   }
 
-  const correcciones: Correccion[] = Array.isArray(data.correcciones)
-    ? data.correcciones
-        .filter((c: any) => typeof c?.persona_id === 'number' && c?.hecho)
-        .map((c: any) => ({
-          persona_id: c.persona_id,
-          modulo: typeof c.modulo === 'string' ? c.modulo : null,
-          hecho: String(c.hecho),
-        }))
-    : [];
+  if (respuesta.length === 0) {
+    respuesta = 'Disculpá, no pude armar la respuesta. ¿Me la repetís o reformulás?';
+  }
 
-  return {
-    respuesta: data.respuesta ?? '(sin respuesta)',
-    correcciones,
-    costo_usd: res.costo_usd,
-  };
+  return { respuesta, correcciones, costo_usd };
 }

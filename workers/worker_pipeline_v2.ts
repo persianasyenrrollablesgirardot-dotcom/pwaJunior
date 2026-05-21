@@ -464,7 +464,11 @@ async function cicloJuniorChat(): Promise<void> {
           .select('rol, mensaje')
           .eq('estado', 'completo')
           .order('created_at', { ascending: true });
-        const historial = (hist ?? []).map((h: any) => ({ rol: h.rol, mensaje: h.mensaje }));
+        // Descartar mensajes vacíos/basura — no aportan al hilo y contaminan
+        // (Junior copiaría el patrón de respuesta vacía).
+        const historial = (hist ?? [])
+          .filter((h: any) => h.mensaje && h.mensaje.trim().length > 0)
+          .map((h: any) => ({ rol: h.rol, mensaje: h.mensaje }));
 
         const r = await responderJunior(sb, msg.mensaje, historial);
         await sb.from('junior_chat').insert({
