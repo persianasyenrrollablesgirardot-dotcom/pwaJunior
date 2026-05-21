@@ -69,14 +69,15 @@ y a qué módulo corresponde:
   m7 Evidencias (fotos, comprobantes).
 En tu respuesta confirmale a Jhon qué registraste y que vas a actualizar ese módulo.
 
-FORMATO DE SALIDA — devolvé EXCLUSIVAMENTE este JSON:
-{
-  "respuesta": "lo que le decís a Jhon en el chat",
-  "correcciones": [
-    { "persona_id": número, "modulo": "m1|m2|m3|m4|m5|m6|m7", "hecho": "el hecho confirmado, redactado claro y completo" }
-  ]
-}
-Si el mensaje es SOLO una pregunta (sin info nueva), devolvé "correcciones": [].
+FORMATO DE SALIDA:
+Respondé en TEXTO NATURAL, directo y claro. NO uses JSON.
+
+Si —y solo si— el mensaje de Jhon trae información nueva o una corrección sobre un
+cliente, DESPUÉS de tu respuesta agregá una línea por cada corrección, con este
+formato EXACTO (una por renglón, al final):
+[CORRECCION] persona_id=<número> | modulo=<m1..m7> | hecho=<el hecho confirmado, redactado claro>
+
+Si el mensaje es solo una pregunta (sin info nueva), NO agregues ninguna línea [CORRECCION].
 
 === CLIENTES (persona_id: nombre) ===
 ${listaClientes}
@@ -88,7 +89,7 @@ ${contextoClientes}`;
 /** Arma el bloque de contexto con el estado de todos los clientes. */
 async function construirContextoClientes(sb: SupabaseClient): Promise<{ contexto: string; lista: string }> {
   const { data: personas } = await sb.from('personas')
-    .select('id,nombre').is('deleted_at', null);
+    .select('id,nombre,telefono_e164,email,ciudad').is('deleted_at', null);
   if (!personas || personas.length === 0) {
     return { contexto: '(todavía no hay clientes procesados)', lista: '(sin clientes)' };
   }
@@ -110,7 +111,12 @@ async function construirContextoClientes(sb: SupabaseClient): Promise<{ contexto
     const lineas = ss.map(s =>
       `  · ${MODULO_NOMBRE[s.modulo] ?? s.modulo}: ${s.sintesis ?? '—'}` +
       (s.alerta ? ` [ALERTA: ${s.alerta}]` : ''));
-    bloques.push(`▸ ${p.nombre} (id ${p.id})\n${lineas.join('\n')}`);
+    const contacto = [
+      p.telefono_e164 ? `tel: ${p.telefono_e164}` : null,
+      p.email ? `email: ${p.email}` : null,
+      p.ciudad ? `ciudad: ${p.ciudad}` : null,
+    ].filter(Boolean).join(' · ');
+    bloques.push(`▸ ${p.nombre} (id ${p.id})${contacto ? '\n  contacto → ' + contacto : ''}\n${lineas.join('\n')}`);
   }
   return {
     contexto: bloques.join('\n\n'),
@@ -126,7 +132,7 @@ export async function responderJunior(
   sb: SupabaseClient,
   pregunta: string,
   historial: MensajeChat[],
-): Promise<{ respuesta: string; correcciones: Correccion[]; costo_usd: number }> {
+): Promise<{ respuesta: string; correcciones: Correccion[]; costo_usd: number; ok: boolean }> {
   const { contexto, lista } = await construirContextoClientes(sb);
 
   const messages: ChatMessage[] = [
@@ -137,8 +143,8 @@ export async function responderJunior(
   }
   messages.push({ role: 'user', content: pregunta });
 
-  // El LLM en JSON mode a veces colapsa a respuesta vacía (preguntas sin dato).
-  // Reintentamos una vez; si igual sale vacía, devolvemos un mensaje honesto.
+  // Texto natural (no JSON): el JSON mode hacía colapsar al LLM ante preguntas
+  // cortas. Las correcciones van en líneas [CORRECCION] al final, que parseamos.
   let respuesta = '';
   let correcciones: Correccion[] = [];
   let costo_usd = 0;
@@ -148,35 +154,29 @@ export async function responderJunior(
       agente: 'A10_JUNIOR_CHAT',
       temperature: 0.4,
       costoLimiteUsd: 0.10,
-      response_format: { type: 'json_object' },
       messages,
     });
     costo_usd += res.costo_usd;
 
-    let data: any = null;
-    try { data = JSON.parse(res.contenido); }
-    catch { respuesta = res.contenido.trim(); }
-
-    if (data) {
-      respuesta = String(data.respuesta ?? '').trim();
-      correcciones = Array.isArray(data.correcciones)
-        ? data.correcciones
-            .filter((c: any) => typeof c?.persona_id === 'number' && c?.hecho)
-            .map((c: any) => ({
-              persona_id: c.persona_id,
-              modulo: typeof c.modulo === 'string' ? c.modulo : null,
-              hecho: String(c.hecho),
-            }))
-        : [];
+    const reCorr = /^\s*\[CORRECCION\]\s*persona_id\s*=\s*(\d+)\s*\|\s*modulo\s*=\s*(m[1-7])\s*\|\s*hecho\s*=\s*(.+)$/i;
+    const lineasResp: string[] = [];
+    correcciones = [];
+    for (const linea of res.contenido.split('\n')) {
+      const m = linea.match(reCorr);
+      if (m) correcciones.push({ persona_id: Number(m[1]), modulo: m[2].toLowerCase(), hecho: m[3].trim() });
+      else lineasResp.push(linea);
     }
+    respuesta = lineasResp.join('\n').trim();
 
-    if (respuesta.length > 0) break;   // respuesta válida → listo
+    if (respuesta.length > 0) break;
     console.warn(`[A10_JUNIOR_CHAT] respuesta vacía (intento ${intento}), reintentando`);
   }
 
+  let ok = true;
   if (respuesta.length === 0) {
     respuesta = 'Disculpá, no pude armar la respuesta. ¿Me la repetís o reformulás?';
+    ok = false;
   }
 
-  return { respuesta, correcciones, costo_usd };
+  return { respuesta, correcciones, costo_usd, ok };
 }

@@ -471,8 +471,10 @@ async function cicloJuniorChat(): Promise<void> {
           .map((h: any) => ({ rol: h.rol, mensaje: h.mensaje }));
 
         const r = await responderJunior(sb, msg.mensaje, historial);
+        // Los fallback ("no pude armar la respuesta") se marcan 'error': se
+        // muestran a Jhon pero NO entran al historial (lo contaminarían).
         await sb.from('junior_chat').insert({
-          rol: 'junior', mensaje: r.respuesta, estado: 'completo',
+          rol: 'junior', mensaje: r.respuesta, estado: r.ok ? 'completo' : 'error',
           costo_usd: r.costo_usd, modelo: 'deepseek-chat',
         } as any);
         await sb.from('junior_chat').update({ estado: 'completo' }).eq('id', msg.id);
