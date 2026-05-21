@@ -210,10 +210,16 @@ export async function sintetizarPersona(
 
   if (msgs.length === 0) return { ok: 0, fallidos: 0, costo_usd: 0 };
 
+  // Cada mensaje va con SU fecha real de envío (ts_canal). Sin esto el analista
+  // no puede resolver "el jueves" / "mañana" ni calcular qué venció — causa raíz
+  // de los errores de fecha.
+  const fechaMsg = (ts: string | null | undefined) => ts
+    ? new Date(ts).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })
+    : '????-??-??';
   const conversacion = msgs.map(m => {
     const quien = m.direccion === 'saliente' ? 'NEGOCIO' : 'CLIENTE';
     const t = m.texto || (m.metadata as any)?.ai_text || `[${m.tipo} sin texto]`;
-    return `${quien}: ${String(t).replace(/\n/g, ' ').trim()}`;
+    return `[${fechaMsg(m.ts_canal)}] ${quien}: ${String(t).replace(/\n/g, ' ').trim()}`;
   }).join('\n');
 
   const evts = (await sb.from('evento_pg')
@@ -245,7 +251,10 @@ síntesis describe el ESTADO del cliente, no la fecha en que la generaste.
 === HECHOS CONFIRMADOS POR JHON (VERDAD PRIORITARIA — manda sobre todo lo demás) ===
 ${bloqueCorrecciones}
 
-=== CONVERSACIÓN WHATSAPP ===
+=== CONVERSACIÓN WHATSAPP (cada línea: [fecha del mensaje aaaa-mm-dd] QUIÉN: texto) ===
+Usá la fecha de cada mensaje para resolver referencias relativas: "el jueves" / "mañana" /
+"la próxima semana" son relativas a la fecha DE ESE mensaje. Una vez resuelta la fecha
+absoluta del evento, compará contra HOY (${hoy}) para saber si ya venció.
 ${conversacion}
 
 === LO QUE DETECTARON LOS AGENTES ===
