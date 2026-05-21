@@ -3,7 +3,7 @@
 > **Documento de progreso vivo.** Se actualiza con cada fase completada o decisión nueva.
 > Si se va la luz: leer `README.md` (contexto, 5 min) → `VISION.md` (qué) → `ARQUITECTURA.md` (cómo) → este `MAPA.md` (dónde) → retomar.
 >
-> **Última actualización:** 2026-05-20 (FASE 4: Visor inteligente — módulos como síntesis)
+> **Última actualización:** 2026-05-20 (FASE 5: Junior conversacional + ciclo de aprendizaje)
 > **Owner:** Jhon Cubides
 
 ---
@@ -34,29 +34,40 @@
 ## ESTADO ACTUAL
 
 ### Fase activa
-**FASE 4 — Visor inteligente: módulos como síntesis** (2026-05-19 → 2026-05-20)
+**FASE 5 — Junior conversacional + datos estructurados** (2026-05-20)
 
-**Cambio de fondo del producto, decidido por Jhon.** El Visor deja de comportarse como un CRM de gestión manual. Cada módulo (M1-M7) debe entregar **UNA conclusión redactada por un agente analista** — síntesis + estado + próximo paso + alerta — no tablas de registros para aprobar. Frase de Jhon: "no quiero un CRM, quiero un visor totalmente inteligente; lo único manual son las capturas y el procesamiento de los chats".
+Junior cobra vida y la capa de síntesis se completa. Ya no solo redacta análisis: también **estructura los datos** en las tablas de cada módulo, y se cierra el **ciclo de aprendizaje** — el conocimiento de Jhon corrige al enjambre.
 
-- **F4.3 Capa de síntesis + integración al pipeline ✅ (2026-05-20, commit `4058c88`)**
-  - Migración `026`: tabla `modulo_sintesis` (una síntesis por cliente y módulo).
-  - `agentes/sintesis/analistas.ts`: **7 analistas especializados** (Cliente, Comercial, Financiero, Técnico, Operativo, Postventa, Evidencias). Leen todo lo que extrajeron los 31 agentes de un cliente y redactan la conclusión del dominio.
-  - `visor/src/panels/PanelSintesis.tsx`: panel reusable, integrado arriba de M1-M7. El detalle (sub-tabs) queda como soporte secundario.
-  - `worker_pipeline_v2`: re-sintetiza al cliente cuando el pipeline drena la cola. Acumula personas con actividad y sintetiza una vez al final del drenado (no por batch).
-  - Validado E2E: procesar el chat de Jorge dispara pipeline (31 agentes) + los 7 analistas automáticamente. Costo ~$0.026 por cliente reprocesado.
-  - **Arquitectura final:** 31 extractores (dato crudo por mensaje) → 7 analistas (síntesis por cliente/módulo) → Junior (visión global). Jerarquía por reportes, no por llamadas — cada nivel lee lo que el anterior dejó.
+- **F5.5 Novedades visibles + limpieza ✅ (2026-05-20, commits `a057d6f`, `69272e3`)**
+  - `PanelSintesis` muestra "📌 Novedades que registraste": las correcciones de Jhon documentadas en SU módulo, con fecha.
+  - Footer del sidebar: "Mockup con datos fake" → "Datos reales · en producción".
 
-- **F4.2 Modo B — sin buzón de aprobación rutinaria ✅ (2026-05-19, commit `4058c88`)**
-  - El buzón de validación dejó de ser paso obligatorio. `runner.ts`: solo `confianza=ALERTA` (contradicción / riesgo grave) va al buzón. `CONFIRMADO/INFERIDO/DUDOSO` escriben directo al módulo, visibles.
-  - 12 agentes: el `postProcesar` escribe `shadow = (confianza === 'ALERTA')`; antes hardcodeaba `shadow=true`. El dato del agente se ve sin pre-aprobación.
-  - Modelo nuevo: **corrección post-hoc** (Jhon edita en el módulo si algo sale mal), no pre-aprobación. Revierte la decisión fundacional del 2026-05-07 que ponía el buzón antes del CRM.
+- **F5.4 Ciclo de aprendizaje — correcciones de Jhon retroalimentan el enjambre ✅ (2026-05-20, commit `1308cbe`)**
+  - Flujo bidireccional: Jhon le dice algo a Junior → Junior detecta si es corrección/info nueva → la guarda en `correcciones_humanas` → re-sintetiza al cliente → los analistas la toman como **VERDAD PRIORITARIA** → el módulo se actualiza.
+  - Migración `028`: tabla `correcciones_humanas`. Junior **infiere las implicaciones lógicas** (1 mensaje de Jhon → varias correcciones en distintos módulos). Se le pasa la fecha de hoy para razonar vencimientos sin adivinar.
+  - Respeta la jerarquía: Jhon → Junior → analistas → módulos.
 
-- **F4.1 Diagnóstico del enjambre + reproceso de huérfanos ✅ (2026-05-19)**
-  - Diagnóstico profundo: de 225 eventos `mensaje_*` en estado PROCESADO, **206 eran huérfanos** — el worker los marcó procesados ANTES del rollout (2026-05-14), sin que ningún agente corriera. Por eso los módulos se veían vacíos.
-  - Reproceso: los 206 huérfanos reseteados a `IDENTIFICADO`; el enjambre actual los procesó. Costo del reproceso completo ~$2 USD.
+- **F5.3 Chat conversacional con Junior ✅ (2026-05-20, commit `2c40e48`)**
+  - Módulo "Junior" con chat. Migración `027`: tabla `junior_chat`. Junior ve todo el negocio (las síntesis de todos los clientes). El worker (ciclo cada 3s) atiende los mensajes — la API key nunca se expone al navegador.
+
+- **F5.2 Analistas M2-M6 estructuran sus tablas de dominio ✅ (2026-05-20, commits `28f4da3`, `c84e7d6`)**
+  - Cada analista, además del texto, devuelve los registros estructurados y los escribe en la tabla nativa: M2→cotizaciones, M3→abonos, M4→medidas, M5→tareas, M6→garantías/reclamos. Reemplazan las cáscaras de los agentes por-mensaje (A4_COTIZ etc. quedan jubilados). El análisis y las sub-tabs salen de la misma fuente → coinciden.
+
+- **F5.1 Junior — visión global del cliente ✅ (2026-05-20, commit `dbecf53`)**
+  - Junior (A10) lee las 7 síntesis de módulo de cada cliente y produce la visión global (`modulo='junior'`). La grilla de Clientes pasa a dashboard: cada tarjeta con el diagnóstico de Junior + semáforo.
+  - Cierra la jerarquía del enjambre: **31 extractores → 7 analistas → Junior**.
 
 ### Próxima fase
-**FASE 5 — Junior (visión global)** + endurecer los 7 analistas con datos de chats nuevos. Después M9 (Control y seguridad) → M10 (Gerencial / Centro de Control) → M11 (Núcleo crítico).
+**Endurecer con uso real** — Jhon usa el chat de Junior y los módulos con clientes nuevos, va corrigiendo, se afinan los analistas y Junior. Después M9 (Control y seguridad) → M10 (Gerencial / Centro de Control) → M11 (Núcleo crítico).
+
+### Fase anterior
+**FASE 4 — Visor inteligente: módulos como síntesis ✅ (2026-05-19 → 2026-05-20)**
+
+Cambio de fondo del producto, decidido por Jhon: el Visor deja de comportarse como un CRM de gestión manual. Cada módulo entrega una conclusión redactada por un agente analista, no tablas de registros para aprobar.
+
+- **F4.3 Capa de síntesis ✅ (`4058c88`)** — migración `026` tabla `modulo_sintesis`, 7 analistas (`agentes/sintesis/analistas.ts`), `PanelSintesis.tsx` integrado en M1-M7, worker re-sintetiza al cliente cuando el pipeline drena la cola.
+- **F4.2 Modo B — sin buzón de aprobación rutinaria ✅ (`4058c88`)** — solo `confianza=ALERTA` va al buzón; CONFIRMADO/INFERIDO/DUDOSO escriben directo al módulo, visibles. Modelo: corrección post-hoc, no pre-aprobación.
+- **F4.1 Diagnóstico + reproceso de huérfanos ✅** — 206 eventos `mensaje_*` quedaron PROCESADO sin que ningún agente corriera (pre-rollout). Reseteados a IDENTIFICADO y reprocesados por el enjambre actual (~$2 USD).
 
 ### Fase anterior
 **FASE 3+ — Hardening producción ✅ (2026-05-15 → 2026-05-18)**
@@ -378,13 +389,16 @@ Para detalle completo ver `ARQUITECTURA.md` sección 44.
 | 2026-05-19 | **MODO B — se elimina el buzón de aprobación rutinaria** (`4058c88`). Decisión de Jhon: "para qué quiero un buzón de 100 aprobaciones, los agentes están para trabajar por mí". `runner.ts` ahora manda al buzón SOLO `confianza=ALERTA` (contradicción/riesgo grave). Todo lo demás escribe directo al módulo, visible. 12 agentes: `shadow = (confianza===ALERTA)`. Modelo: corrección post-hoc, no pre-aprobación. **Revierte la decisión fundacional del 2026-05-07** (buzón antes del CRM) |
 | 2026-05-20 | **El Visor NO es un CRM — es un visor inteligente.** Decisión de Jhon: cada módulo entrega UNA síntesis redactada por agentes, no tablas de gestión manual. Nace la **capa de síntesis**: 7 analistas (`agentes/sintesis/analistas.ts`) sobre los 31 extractores. Migración `026` tabla `modulo_sintesis`. `PanelSintesis.tsx` en M1-M7. Worker re-sintetiza al cliente al drenar el pipeline (`4058c88`) |
 | 2026-05-20 | **Jerarquía del enjambre confirmada (organigrama).** 31 extractores (dato crudo por mensaje) → 7 analistas (síntesis por cliente/módulo) → Junior (visión global). "A cargo" = cada nivel LEE el reporte del de abajo; NO se llaman entre sí. Jerarquía por reportes para no re-acoplar como el visor viejo |
+| 2026-05-20 | **Junior — visión global** (`dbecf53`): A10 lee las 7 síntesis de módulo y produce la conclusión integral del cliente (`modulo='junior'`). La grilla de Clientes pasa a dashboard con semáforo + diagnóstico por tarjeta |
+| 2026-05-20 | **Los analistas estructuran datos, no solo texto** (`28f4da3`, `c84e7d6`): M2-M6 devuelven JSON con los registros de su dominio y pueblan las tablas nativas (cotizaciones, abonos, medidas, tareas, garantías, reclamos). Los agentes de dominio por-mensaje (A4_COTIZ, A5_ABONO, A6_MEDIDAS…) quedan jubilados — el analista que lee toda la conversación los reemplaza. Análisis y sub-tabs salen de la misma fuente |
+| 2026-05-20 | **Chat con Junior** (`2c40e48`): módulo Junior con chat. Migración `027` `junior_chat`. Junior ve todo el negocio. El worker atiende los mensajes (la API key no se expone al navegador) |
+| 2026-05-20 | **Ciclo de aprendizaje** (`1308cbe`): las correcciones que Jhon le da a Junior por chat se guardan (`correcciones_humanas`, migración `028`), re-sintetizan al cliente y los analistas las toman como VERDAD PRIORITARIA. Junior infiere las implicaciones lógicas (1 mensaje → varias correcciones). Documentadas visibles en el panel de cada módulo (`a057d6f`). Flujo bidireccional cerrado: el conocimiento de Jhon corrige al enjambre |
 
 ---
 
 ## PENDIENTES URGENTES
 
-- [ ] FASE 5: poner a **Junior** a leer las 7 síntesis y dar la visión global del cliente + responder preguntas transversales
-- [ ] Endurecer los 7 analistas a medida que entren chats reales nuevos (hoy generados sobre datos reprocesados)
+- [ ] Endurecer los analistas y Junior con uso real — Jhon usa el chat, corrige, se afinan
 - [ ] M9 Control y seguridad (próxima fase mayor)
 - [ ] Construir `Agente_Biblioteca_RAG` externo para liberar A6_BIBLIO del shadow
 
