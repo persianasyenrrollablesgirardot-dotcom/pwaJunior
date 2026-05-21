@@ -473,6 +473,27 @@ async function cicloJuniorChat(): Promise<void> {
         } as any);
         await sb.from('junior_chat').update({ estado: 'completo' }).eq('id', msg.id);
         console.log(`[V2/JUNIOR] respondió mensaje ${msg.id} · $${r.costo_usd.toFixed(4)}`);
+
+        // Ciclo de aprendizaje: si Jhon dio correcciones, guardarlas y
+        // re-sintetizar los clientes afectados (los analistas las toman como
+        // verdad prioritaria → el módulo queda actualizado).
+        if (r.correcciones.length > 0) {
+          const afectados = new Set<number>();
+          for (const c of r.correcciones) {
+            await sb.from('correcciones_humanas').insert({
+              persona_id: c.persona_id, modulo: c.modulo, hecho: c.hecho, origen: 'chat_junior',
+            } as any);
+            afectados.add(c.persona_id);
+          }
+          for (const pid of afectados) {
+            try {
+              await sintetizarPersona(sb, pid);
+              console.log(`[V2/JUNIOR] corrección aplicada → re-sintetizado cliente ${pid}`);
+            } catch (e: any) {
+              console.error(`[V2/JUNIOR] re-síntesis cliente ${pid}: ${e.message}`);
+            }
+          }
+        }
       } catch (e: any) {
         console.error(`[V2/JUNIOR] error en mensaje ${msg.id}: ${e.message}`);
         await sb.from('junior_chat').update({ estado: 'error' }).eq('id', msg.id);

@@ -225,7 +225,18 @@ export async function sintetizarPersona(
   });
   const datosAgentes = [...new Set(utiles.map(e => `[${e.agente_origen}] ${(e.payload as any)?.resumen}`))].join('\n');
 
-  const ctxComun = `=== CONVERSACIÓN WHATSAPP ===
+  // Correcciones de Jhon — verdad prioritaria. El humano manda sobre el agente.
+  const { data: correcciones } = await sb.from('correcciones_humanas')
+    .select('modulo,hecho').eq('persona_id', personaId).eq('vigente', true)
+    .order('created_at', { ascending: true });
+  const bloqueCorrecciones = (correcciones && correcciones.length > 0)
+    ? correcciones.map((c: any) => `- [${c.modulo ?? 'general'}] ${c.hecho}`).join('\n')
+    : '(ninguno)';
+
+  const ctxComun = `=== HECHOS CONFIRMADOS POR JHON (VERDAD PRIORITARIA — manda sobre todo lo demás) ===
+${bloqueCorrecciones}
+
+=== CONVERSACIÓN WHATSAPP ===
 ${conversacion}
 
 === LO QUE DETECTARON LOS AGENTES ===
