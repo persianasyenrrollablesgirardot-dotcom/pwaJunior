@@ -81,8 +81,8 @@ export function Sidebar({ modulos, activo, onChange }: SidebarProps) {
       </nav>
 
       <div style={{ padding: '12px 16px', borderTop: '1px solid #38383a', fontSize: 11, color: '#8e8e93' }}>
-        <div>v0.1 · MVP</div>
-        <div style={{ marginTop: 2 }}>Mockup con datos fake</div>
+        <div>v0.1 · Visor PG</div>
+        <div style={{ marginTop: 2 }}>Datos reales · en producción</div>
       </div>
     </aside>
   );
