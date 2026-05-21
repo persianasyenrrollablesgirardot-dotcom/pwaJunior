@@ -4,6 +4,9 @@
  * Jhon escribe → se inserta en `junior_chat` (estado='pendiente'). El worker lo
  * ve, arma el contexto con las síntesis de todos los clientes, y responde.
  * El componente hace polling cada 2s para mostrar la respuesta.
+ *
+ * Sesiones: cada conversación es independiente. Jhon puede abrir un chat nuevo
+ * o volver a uno viejo. El historial que ve Junior es el de la sesión activa.
  */
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
@@ -16,6 +19,12 @@ interface Mensaje {
   created_at: string;
 }
 
+interface Sesion {
+  id: number;
+  titulo: string | null;
+  ultima_actividad: string;
+}
+
 const SUGERENCIAS = [
   '¿Qué tengo que hacer hoy?',
   '¿Quién me debe plata?',
@@ -23,37 +32,96 @@ const SUGERENCIAS = [
   '¿Cómo va Walter Estancia?',
 ];
 
+const TITULO_DEFAULT = 'Conversación nueva';
+
 export function Junior() {
+  const [sesiones, setSesiones] = useState<Sesion[]>([]);
+  const [sesionActiva, setSesionActiva] = useState<number | null>(null);
   const [mensajes, setMensajes] = useState<Mensaje[]>([]);
   const [input, setInput] = useState('');
   const [enviando, setEnviando] = useState(false);
   const finRef = useRef<HTMLDivElement>(null);
 
-  async function cargar() {
+  /** Carga las sesiones; si no hay ninguna, crea una. Devuelve la más reciente. */
+  async function cargarSesiones(): Promise<number | null> {
+    const { data } = await supabase
+      .from('junior_sesiones')
+      .select('id,titulo,ultima_actividad')
+      .order('ultima_actividad', { ascending: false });
+    let lista = (data as Sesion[]) ?? [];
+    if (lista.length === 0) {
+      const { data: nueva } = await supabase
+        .from('junior_sesiones')
+        .insert({ titulo: TITULO_DEFAULT } as any)
+        .select('id,titulo,ultima_actividad')
+        .single();
+      if (nueva) lista = [nueva as Sesion];
+    }
+    setSesiones(lista);
+    return lista[0]?.id ?? null;
+  }
+
+  async function cargarMensajes(sid: number) {
     const { data } = await supabase
       .from('junior_chat')
       .select('id,rol,mensaje,estado,created_at')
+      .eq('sesion_id', sid)
       .order('created_at', { ascending: true });
     setMensajes((data as Mensaje[]) ?? []);
   }
 
-  useEffect(() => { cargar(); }, []);
   useEffect(() => {
-    const t = setInterval(cargar, 2000);
-    return () => clearInterval(t);
+    cargarSesiones().then(sid => { if (sid) setSesionActiva(sid); });
   }, []);
+
+  useEffect(() => {
+    if (sesionActiva == null) return;
+    cargarMensajes(sesionActiva);
+    const t = setInterval(() => cargarMensajes(sesionActiva), 2000);
+    return () => clearInterval(t);
+  }, [sesionActiva]);
+
   useEffect(() => { finRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [mensajes]);
 
   const esperando = mensajes.some(m => m.rol === 'usuario' && m.estado === 'pendiente');
 
+  async function nuevaConversacion() {
+    const { data: nueva } = await supabase
+      .from('junior_sesiones')
+      .insert({ titulo: TITULO_DEFAULT } as any)
+      .select('id,titulo,ultima_actividad')
+      .single();
+    if (nueva) {
+      setSesiones(s => [nueva as Sesion, ...s]);
+      setMensajes([]);
+      setSesionActiva((nueva as Sesion).id);
+    }
+  }
+
   async function enviar(texto?: string) {
     const t = (texto ?? input).trim();
-    if (!t || enviando || esperando) return;
+    if (!t || enviando || esperando || sesionActiva == null) return;
     setEnviando(true);
     setInput('');
-    await supabase.from('junior_chat').insert({ rol: 'usuario', mensaje: t, estado: 'pendiente' } as any);
-    await cargar();
+    await supabase.from('junior_chat').insert({
+      rol: 'usuario', mensaje: t, estado: 'pendiente', sesion_id: sesionActiva,
+    } as any);
+    // Auto-título: si la sesión todavía no tiene nombre propio, usar este mensaje.
+    const ses = sesiones.find(s => s.id === sesionActiva);
+    if (ses && (!ses.titulo || ses.titulo === TITULO_DEFAULT)) {
+      const titulo = t.length > 42 ? t.slice(0, 42) + '…' : t;
+      await supabase.from('junior_sesiones').update({ titulo } as any).eq('id', sesionActiva);
+      setSesiones(list => list.map(s => s.id === sesionActiva ? { ...s, titulo } : s));
+    }
+    await cargarMensajes(sesionActiva);
     setEnviando(false);
+  }
+
+  function etiquetaSesion(s: Sesion): string {
+    const fecha = new Date(s.ultima_actividad).toLocaleDateString('es-CO', {
+      day: '2-digit', month: '2-digit',
+    });
+    return `${s.titulo || TITULO_DEFAULT} · ${fecha}`;
   }
 
   return (
@@ -65,12 +133,37 @@ export function Junior() {
             width: 36, height: 36, borderRadius: '50%', background: 'var(--accent)',
             color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
           }}>🤖</div>
-          <div>
+          <div style={{ flex: 1 }}>
             <h1 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>Junior</h1>
             <p style={{ margin: 0, fontSize: 11, color: 'var(--text-muted)' }}>
               Tu asistente. Conoce el estado de todos tus clientes.
             </p>
           </div>
+
+          {/* Selector de sesiones + nueva conversación */}
+          <select
+            value={sesionActiva ?? ''}
+            onChange={e => setSesionActiva(Number(e.target.value))}
+            title="Conversaciones"
+            style={{
+              maxWidth: 220, padding: '6px 10px', fontSize: 12, borderRadius: 8,
+              border: '1px solid var(--border)', background: 'var(--bg-page)',
+              color: 'var(--text)', cursor: 'pointer', outline: 'none',
+            }}
+          >
+            {sesiones.map(s => (
+              <option key={s.id} value={s.id}>{etiquetaSesion(s)}</option>
+            ))}
+          </select>
+          <button
+            onClick={nuevaConversacion}
+            title="Nueva conversación"
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 8,
+              border: '1px solid var(--border)', background: 'var(--bg-panel)',
+              color: 'var(--text)', cursor: 'pointer', whiteSpace: 'nowrap',
+            }}
+          >+ Nueva</button>
         </div>
       </div>
 

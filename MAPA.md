@@ -3,7 +3,7 @@
 > **Documento de progreso vivo.** Se actualiza con cada fase completada o decisión nueva.
 > Si se va la luz: leer `README.md` (contexto, 5 min) → `VISION.md` (qué) → `ARQUITECTURA.md` (cómo) → este `MAPA.md` (dónde) → retomar.
 >
-> **Última actualización:** 2026-05-20 (FASE 5: Junior conversacional + ciclo de aprendizaje)
+> **Última actualización:** 2026-05-21 (FASE 6: Junior con sesiones y memoria persistente)
 > **Owner:** Jhon Cubides
 
 ---
@@ -34,6 +34,24 @@
 ## ESTADO ACTUAL
 
 ### Fase activa
+**FASE 6 — Junior con sesiones y memoria persistente** (2026-05-21)
+
+Tras evaluar las capacidades de Junior (conciencia, autoaprendizaje, memoria), se detectaron tres falencias críticas: solo veía los últimos 12 mensajes, no existían sesiones (hilo único infinito) y no aprendía sobre sí mismo. Esta fase ataca las dos primeras y la tercera.
+
+- **F6.1 Sesiones de chat ✅ (2026-05-21)**
+  - Migración `029`: tabla `junior_sesiones` + columna `sesion_id` en `junior_chat`. Cada conversación es independiente; el historial que ve Junior es solo el de la sesión activa.
+  - UI: selector de conversaciones + botón "+ Nueva" en el módulo Junior. Auto-título con el primer mensaje. El worker filtra el historial por `sesion_id`.
+
+- **F6.2 Memoria persistente ✅ (2026-05-21)**
+  - Migración `029`: tabla `junior_memoria`. Cuando Jhon le da una preferencia de comportamiento ("sé breve", "tratame de usted") o un dato general del negocio, Junior lo guarda con una línea `[MEMORIA]` (igual mecanismo que `[CORRECCION]`) y lo recuerda SIEMPRE, en cualquier sesión nueva.
+  - El `systemPrompt` inyecta las memorias vigentes en TODA respuesta. Verificado E2E: en un chat recién abierto Junior aplica una preferencia enseñada en otra sesión.
+
+- **F6.3 Compactación de conversación larga ✅ (2026-05-21)**
+  - Migración `030`: `junior_sesiones.resumen` + `resumen_msgs`. Cuando una sesión supera 20 mensajes, los viejos (todos menos los últimos 10) se resumen con el LLM en vez de descartarse. El resumen se guarda en la sesión y se reusa hasta que la conversación vuelve a crecer.
+  - Junior ya no olvida el principio de un chat largo. Verificado E2E: con 24 mensajes, recuerda un dato sembrado en el primer mensaje vía el resumen.
+
+---
+
 **FASE 5 — Junior conversacional + datos estructurados** (2026-05-20)
 
 Junior cobra vida y la capa de síntesis se completa. Ya no solo redacta análisis: también **estructura los datos** en las tablas de cada módulo, y se cierra el **ciclo de aprendizaje** — el conocimiento de Jhon corrige al enjambre.
@@ -393,6 +411,8 @@ Para detalle completo ver `ARQUITECTURA.md` sección 44.
 | 2026-05-20 | **Los analistas estructuran datos, no solo texto** (`28f4da3`, `c84e7d6`): M2-M6 devuelven JSON con los registros de su dominio y pueblan las tablas nativas (cotizaciones, abonos, medidas, tareas, garantías, reclamos). Los agentes de dominio por-mensaje (A4_COTIZ, A5_ABONO, A6_MEDIDAS…) quedan jubilados — el analista que lee toda la conversación los reemplaza. Análisis y sub-tabs salen de la misma fuente |
 | 2026-05-20 | **Chat con Junior** (`2c40e48`): módulo Junior con chat. Migración `027` `junior_chat`. Junior ve todo el negocio. El worker atiende los mensajes (la API key no se expone al navegador) |
 | 2026-05-20 | **Ciclo de aprendizaje** (`1308cbe`): las correcciones que Jhon le da a Junior por chat se guardan (`correcciones_humanas`, migración `028`), re-sintetizan al cliente y los analistas las toman como VERDAD PRIORITARIA. Junior infiere las implicaciones lógicas (1 mensaje → varias correcciones). Documentadas visibles en el panel de cada módulo (`a057d6f`). Flujo bidireccional cerrado: el conocimiento de Jhon corrige al enjambre |
+| 2026-05-21 | **Junior con sesiones y memoria persistente** (migración `029`): cada conversación es una sesión independiente (`junior_sesiones` + `sesion_id`); el historial que ve Junior es solo el de la sesión activa. Memoria propia (`junior_memoria`): Junior guarda preferencias de comportamiento y datos generales con líneas `[MEMORIA]` y los recuerda en cualquier chat nuevo. Verificado E2E. Resuelve las falencias de "memoria independiente" detectadas al evaluar a Junior |
+| 2026-05-21 | **Compactación de conversación larga** (migración `030`): superados los 20 mensajes de una sesión, los viejos se resumen con el LLM (`junior_sesiones.resumen` / `resumen_msgs`) en vez de truncarse. Junior deja de olvidar el principio de los chats largos. Cierra la FASE 6 |
 
 ---
 

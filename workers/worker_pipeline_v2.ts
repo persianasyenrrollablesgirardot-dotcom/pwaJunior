@@ -453,16 +453,18 @@ async function cicloJuniorChat(): Promise<void> {
   juniorChatEnCurso = true;
   try {
     const { data: pendientes } = await sb.from('junior_chat')
-      .select('id, mensaje')
+      .select('id, mensaje, sesion_id')
       .eq('rol', 'usuario').eq('estado', 'pendiente')
       .order('created_at', { ascending: true });
     if (!pendientes || pendientes.length === 0) return;
 
     for (const msg of pendientes) {
       try {
+        // Historial SOLO de la sesión activa — cada conversación es independiente.
         const { data: hist } = await sb.from('junior_chat')
           .select('rol, mensaje')
           .eq('estado', 'completo')
+          .eq('sesion_id', msg.sesion_id)
           .order('created_at', { ascending: true });
         // Descartar mensajes vacíos/basura — no aportan al hilo y contaminan
         // (Junior copiaría el patrón de respuesta vacía).
@@ -470,15 +472,31 @@ async function cicloJuniorChat(): Promise<void> {
           .filter((h: any) => h.mensaje && h.mensaje.trim().length > 0)
           .map((h: any) => ({ rol: h.rol, mensaje: h.mensaje }));
 
-        const r = await responderJunior(sb, msg.mensaje, historial);
+        const r = await responderJunior(sb, msg.mensaje, historial, msg.sesion_id);
         // Los fallback ("no pude armar la respuesta") se marcan 'error': se
         // muestran a Jhon pero NO entran al historial (lo contaminarían).
         await sb.from('junior_chat').insert({
           rol: 'junior', mensaje: r.respuesta, estado: r.ok ? 'completo' : 'error',
-          costo_usd: r.costo_usd, modelo: 'deepseek-chat',
+          costo_usd: r.costo_usd, modelo: 'deepseek-chat', sesion_id: msg.sesion_id,
         } as any);
         await sb.from('junior_chat').update({ estado: 'completo' }).eq('id', msg.id);
+        if (msg.sesion_id) {
+          await sb.from('junior_sesiones')
+            .update({ ultima_actividad: new Date().toISOString() })
+            .eq('id', msg.sesion_id);
+        }
         console.log(`[V2/JUNIOR] respondió mensaje ${msg.id} · $${r.costo_usd.toFixed(4)}`);
+
+        // Memoria persistente: lo que Junior debe recordar SIEMPRE (preferencias
+        // de comportamiento, datos generales). Sobrevive a sesiones nuevas.
+        if (r.memorias.length > 0) {
+          for (const mem of r.memorias) {
+            await sb.from('junior_memoria').insert({
+              tipo: mem.tipo, contenido: mem.contenido,
+            } as any);
+          }
+          console.log(`[V2/JUNIOR] ${r.memorias.length} memoria(s) persistente(s) guardada(s)`);
+        }
 
         // Ciclo de aprendizaje: si Jhon dio correcciones, guardarlas y
         // re-sintetizar los clientes afectados (los analistas las toman como
@@ -504,7 +522,7 @@ async function cicloJuniorChat(): Promise<void> {
         console.error(`[V2/JUNIOR] error en mensaje ${msg.id}: ${e.message}`);
         await sb.from('junior_chat').update({ estado: 'error' }).eq('id', msg.id);
         await sb.from('junior_chat').insert({
-          rol: 'junior', estado: 'completo',
+          rol: 'junior', estado: 'completo', sesion_id: msg.sesion_id,
           mensaje: 'Disculpá, tuve un problema procesando tu mensaje. Probá de nuevo.',
         } as any);
       }
