@@ -233,7 +233,16 @@ export async function sintetizarPersona(
     ? correcciones.map((c: any) => `- [${c.modulo ?? 'general'}] ${c.hecho}`).join('\n')
     : '(ninguno)';
 
-  const ctxComun = `=== HECHOS CONFIRMADOS POR JHON (VERDAD PRIORITARIA — manda sobre todo lo demás) ===
+  // Fecha de Colombia (America/Bogota), no UTC.
+  const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+  const ctxComun = `HOY ES: ${hoy} — usá esta fecha SOLO para razonar internamente (qué venció,
+qué falta). Toda fecha anterior a hoy ya VENCIÓ: si una instalación, tarea, pago o compromiso
+tiene fecha pasada, tratalo como vencido/atrasado, NUNCA como pendiente futuro. Para los
+eventos usá fechas absolutas (dd/mm/aaaa), nunca "el jueves" ni "esta semana".
+PROHIBIDO escribir "hoy es...", "hoy ${hoy}" o la fecha de hoy dentro de tu síntesis — la
+síntesis describe el ESTADO del cliente, no la fecha en que la generaste.
+
+=== HECHOS CONFIRMADOS POR JHON (VERDAD PRIORITARIA — manda sobre todo lo demás) ===
 ${bloqueCorrecciones}
 
 === CONVERSACIÓN WHATSAPP ===
@@ -400,7 +409,7 @@ async function poblarAbonos(sb: SupabaseClient, personaId: number, data: any): P
   await borrarDeAgente(sb, 'abonos', personaId);
   const hoy = new Date().toISOString().slice(0, 10);
   for (const a of abonos) {
-    if (typeof a.monto !== 'number') continue;
+    if (typeof a.monto !== 'number' || a.monto <= 0) continue;
     const { error } = await sb.from('abonos').insert({
       persona_id: personaId, monto: a.monto, fecha: a.fecha ?? hoy,
       metodo: METODOS_PAGO.has(a.metodo) ? a.metodo : 'transferencia',

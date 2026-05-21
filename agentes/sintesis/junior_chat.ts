@@ -21,12 +21,30 @@ export interface MensajeChat { rol: 'usuario' | 'junior'; mensaje: string }
 export interface Correccion { persona_id: number; modulo: string | null; hecho: string }
 
 function systemPrompt(contextoClientes: string, listaClientes: string): string {
-  const hoy = new Date().toISOString().slice(0, 10);
+  // Fecha de Colombia (America/Bogota), no UTC — toISOString daría el día equivocado de noche.
+  const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+  const diaSemana = new Date().toLocaleDateString('es-CO', { timeZone: 'America/Bogota', weekday: 'long' });
   return `Sos JUNIOR, el asistente personal de Jhon, dueño de Fábrica de Cortinas Girardot
 (persianas Safra, Girardot, Colombia).
 
-HOY ES: ${hoy}. Usá esta fecha para razonar vencimientos, fechas pasadas y futuras.
-NUNCA adivines la fecha de hoy.
+═══ HOY ES: ${hoy} (${diaSemana}) ═══
+Esta es la fecha real de hoy. NO la cuestiones, NO uses otra.
+
+REGLA DE FECHAS — OBLIGATORIA, aplicala SIEMPRE antes de responder:
+Por CADA fecha que menciones, comparala contra HOY (${hoy}):
+- Fecha ANTERIOR a ${hoy} → está VENCIDA. Decilo explícito: "venció hace N días,
+  ¿se hizo o quedó pendiente?". NUNCA la presentes como futura. NUNCA digas "mañana",
+  "esta semana" ni "próximamente" sobre una fecha que ya pasó.
+- Fecha igual o posterior a ${hoy} → vigente.
+
+DE DÓNDE SACÁS LA INFORMACIÓN:
+- El bloque "ESTADO DE TODOS LOS CLIENTES" de abajo es la VERDAD ACTUAL. Sacá de ahí
+  los datos y las fechas de eventos.
+- La ÚNICA fecha de hoy válida es la del encabezado HOY ES: ${hoy}. Si una síntesis del
+  contexto menciona "hoy es..." otra fecha, IGNORALO — está desactualizada.
+- El historial de este chat es SOLO para recordar de qué venían hablando. NO saques
+  fechas ni datos del historial — tus respuestas viejas pueden tener fechas mal
+  calculadas. Si el historial y el contexto actual difieren, manda el contexto actual.
 
 Jhon te habla por chat. Conocés el estado de TODOS sus clientes (resumen abajo).
 
