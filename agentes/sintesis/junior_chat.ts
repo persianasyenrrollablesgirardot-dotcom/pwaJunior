@@ -62,6 +62,10 @@ CÓMO RESPONDÉS:
 - Si NO tenés el dato que te piden (un teléfono, una dirección, etc.), respondelo
   EXPLÍCITAMENTE: "No tengo registrado el teléfono de X" / "Eso no figura en el sistema".
   "No lo sé" es una respuesta válida y útil. NUNCA inventes números ni hechos ni fechas.
+- EXCEPCIÓN: si un cliente figura con "⏳ análisis en generación", su chat se acaba de
+  capturar y los analistas todavía lo están procesando. NUNCA digas que no existe ni que
+  no tenés nada de él — decí que su análisis se está generando y que te pregunten de
+  nuevo en un minuto.
 - El campo "respuesta" NUNCA puede quedar vacío ni ser espacios en blanco. SIEMPRE
   tiene que tener texto real — aunque sea para decir que no tenés el dato.
 - Moneda: pesos colombianos (COP). Español, cercano pero profesional.
@@ -156,18 +160,24 @@ async function construirContextoClientes(sb: SupabaseClient): Promise<{ contexto
   const bloques: string[] = [];
   for (const p of personas) {
     const ss = porPersona.get(p.id) ?? [];
-    if (ss.length === 0) continue;
-    const orden = ['junior', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'];
-    ss.sort((a, b) => orden.indexOf(a.modulo) - orden.indexOf(b.modulo));
-    const lineas = ss.map(s =>
-      `  · ${MODULO_NOMBRE[s.modulo] ?? s.modulo}: ${s.sintesis ?? '—'}` +
-      (s.alerta ? ` [ALERTA: ${s.alerta}]` : ''));
     const contacto = [
       p.telefono_e164 ? `tel: ${p.telefono_e164}` : null,
       p.email ? `email: ${p.email}` : null,
       p.ciudad ? `ciudad: ${p.ciudad}` : null,
     ].filter(Boolean).join(' · ');
-    bloques.push(`▸ ${p.nombre} (id ${p.id})${contacto ? '\n  contacto → ' + contacto : ''}\n${lineas.join('\n')}`);
+    const encabezado = `▸ ${p.nombre} (id ${p.id})${contacto ? '\n  contacto → ' + contacto : ''}`;
+    if (ss.length === 0) {
+      // Cliente recién capturado: el chat existe pero los analistas todavía no
+      // generaron su síntesis. NO es un cliente vacío — su análisis está en cola.
+      bloques.push(`${encabezado}\n  ⏳ análisis en generación — el chat se capturó hace poco y los analistas todavía lo están procesando. NO digas que no existe ni que no hay datos: decí que su análisis se está generando y que pregunten de nuevo en un minuto.`);
+      continue;
+    }
+    const orden = ['junior', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'];
+    ss.sort((a, b) => orden.indexOf(a.modulo) - orden.indexOf(b.modulo));
+    const lineas = ss.map(s =>
+      `  · ${MODULO_NOMBRE[s.modulo] ?? s.modulo}: ${s.sintesis ?? '—'}` +
+      (s.alerta ? ` [ALERTA: ${s.alerta}]` : ''));
+    bloques.push(`${encabezado}\n${lineas.join('\n')}`);
   }
   return {
     contexto: bloques.join('\n\n'),
