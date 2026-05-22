@@ -72,6 +72,7 @@ export function JuniorChecklist() {
   const [filas, setFilas] = useState<Fila[]>([]);
   const [cargado, setCargado] = useState(false);
   const [abierto, setAbierto] = useState<number | null>(null);
+  const [filtro, setFiltro] = useState<Estado | 'todos'>('todos');
 
   async function cargar() {
     const { data } = await supabase
@@ -95,6 +96,7 @@ export function JuniorChecklist() {
   const conteo = (e: Estado) => filas.filter(f => f.estado === e).length;
   const teToca = filas.filter(f => TE_TOCA.includes(f.estado));
   const noTeToca = filas.filter(f => !TE_TOCA.includes(f.estado));
+  const filtradas = filtro === 'todos' ? [] : filas.filter(f => f.estado === filtro);
   const compromisos = filas.flatMap(f =>
     (f.compromisos ?? []).map(c => ({ cliente: nombreDe(f), ...c })));
 
@@ -103,6 +105,7 @@ export function JuniorChecklist() {
       <p style={{ margin: '0 0 14px', fontSize: 12, color: 'var(--text-muted)' }}>
         El estado de cada conversación: en qué chats <strong>te toca mover a vos</strong> y
         en cuáles no. Junior lo mantiene al día leyendo cada chat.
+        {' '}<em>Tocá un estado para filtrar.</em>
       </p>
 
       {cargado && filas.length === 0 && (
@@ -117,18 +120,15 @@ export function JuniorChecklist() {
 
       {filas.length > 0 && (
         <>
-          {/* Resumen — semáforo */}
+          {/* Filtro por estado — el semáforo es clickeable */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 18 }}>
+            <FiltroChip activo={filtro === 'todos'} onClick={() => setFiltro('todos')}
+              punto="" label="Todos" count={filas.length} color="var(--accent)" />
             {(Object.keys(ESTADO_META) as Estado[]).map(e => (
-              <div key={e} style={{
-                display: 'flex', alignItems: 'center', gap: 6, padding: '5px 11px',
-                borderRadius: 999, background: 'var(--bg-panel)',
-                border: '1px solid var(--border-soft)', fontSize: 12,
-              }}>
-                <span>{ESTADO_META[e].punto}</span>
-                <strong style={{ color: ESTADO_META[e].color }}>{conteo(e)}</strong>
-                <span style={{ color: 'var(--text-muted)' }}>{ESTADO_META[e].label}</span>
-              </div>
+              <FiltroChip key={e} activo={filtro === e}
+                onClick={() => setFiltro(filtro === e ? 'todos' : e)}
+                punto={ESTADO_META[e].punto} label={ESTADO_META[e].label}
+                count={conteo(e)} color={ESTADO_META[e].color} />
             ))}
           </div>
 
@@ -158,25 +158,44 @@ export function JuniorChecklist() {
             </>
           )}
 
-          {/* Chats donde te toca a vos */}
-          <SeccionTitulo icono="🎯" texto={`Te toca a vos (${teToca.length})`} color="#dc2626" />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 22 }}>
-            {teToca.length === 0 && <Vacio texto="Nada pendiente de tu lado. 👏" />}
-            {teToca.map(f => (
-              <ChatCard key={f.id} fila={f} expandido={abierto === f.id}
-                onToggle={() => setAbierto(abierto === f.id ? null : f.id)} />
-            ))}
-          </div>
+          {/* Con filtro activo: una sola lista del estado elegido */}
+          {filtro !== 'todos' && (
+            <>
+              <SeccionTitulo icono={ESTADO_META[filtro].punto}
+                texto={`${ESTADO_META[filtro].label} (${filtradas.length})`}
+                color={ESTADO_META[filtro].color} />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {filtradas.length === 0 && <Vacio texto="No hay chats en este estado." />}
+                {filtradas.map(f => (
+                  <ChatCard key={f.id} fila={f} expandido={abierto === f.id}
+                    onToggle={() => setAbierto(abierto === f.id ? null : f.id)} />
+                ))}
+              </div>
+            </>
+          )}
 
-          {/* Chats donde no te toca */}
-          <SeccionTitulo icono="✓" texto={`No te toca — esperando o cerradas (${noTeToca.length})`} color="#16a34a" />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {noTeToca.length === 0 && <Vacio texto="—" />}
-            {noTeToca.map(f => (
-              <ChatCard key={f.id} fila={f} expandido={abierto === f.id}
-                onToggle={() => setAbierto(abierto === f.id ? null : f.id)} />
-            ))}
-          </div>
+          {/* Sin filtro: los dos grupos — te toca a vos / no te toca */}
+          {filtro === 'todos' && (
+            <>
+              <SeccionTitulo icono="🎯" texto={`Te toca a vos (${teToca.length})`} color="#dc2626" />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 22 }}>
+                {teToca.length === 0 && <Vacio texto="Nada pendiente de tu lado. 👏" />}
+                {teToca.map(f => (
+                  <ChatCard key={f.id} fila={f} expandido={abierto === f.id}
+                    onToggle={() => setAbierto(abierto === f.id ? null : f.id)} />
+                ))}
+              </div>
+
+              <SeccionTitulo icono="✓" texto={`No te toca — esperando o cerradas (${noTeToca.length})`} color="#16a34a" />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {noTeToca.length === 0 && <Vacio texto="—" />}
+                {noTeToca.map(f => (
+                  <ChatCard key={f.id} fila={f} expandido={abierto === f.id}
+                    onToggle={() => setAbierto(abierto === f.id ? null : f.id)} />
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
     </div>
@@ -201,6 +220,23 @@ function Vacio({ texto }: { texto: string }) {
       padding: '14px', textAlign: 'center', fontSize: 12, color: 'var(--text-muted)',
       background: 'var(--bg-panel)', border: '1px dashed var(--border-soft)', borderRadius: 10,
     }}>{texto}</div>
+  );
+}
+
+function FiltroChip({ activo, onClick, punto, label, count, color }: {
+  activo: boolean; onClick: () => void; punto: string; label: string; count: number; color: string;
+}) {
+  return (
+    <button onClick={onClick} style={{
+      display: 'flex', alignItems: 'center', gap: 6, padding: '5px 11px',
+      borderRadius: 999, cursor: 'pointer', fontSize: 12,
+      background: activo ? color : 'var(--bg-panel)',
+      border: `1px solid ${activo ? color : 'var(--border-soft)'}`,
+    }}>
+      {punto && <span>{punto}</span>}
+      <strong style={{ color: activo ? 'white' : color }}>{count}</strong>
+      <span style={{ color: activo ? 'white' : 'var(--text-muted)' }}>{label}</span>
+    </button>
   );
 }
 
