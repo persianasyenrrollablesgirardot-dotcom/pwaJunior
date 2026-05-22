@@ -269,10 +269,42 @@ NO propongas fusión si solo coincide el nombre (homónimos son frecuentes).`,
     }
   },
 
-  async postProcesar(_sb: SupabaseClient, _out, _ctx) {
-    // A3_IDENTIDAD no escribe a tabla. Los candidatos de fusión van al buzón;
-    // la fusión real la dispara Jhon manualmente desde la UI (M1 Identidad
-    // tiene acción "Fusionar personas" con confirmación + log).
+  async postProcesar(sb: SupabaseClient, out, _ctx) {
+    // F7.3 — cada candidato de fusión (CONFIRMADO o INFERIDO) queda como
+    // 'pendiente' en duplicados_detectados. Junior lo plantea en el chat de
+    // Jhon y él decide fusionar o descartar. Los DUDOSO se ignoran (homónimo
+    // probable). La fusión real la dispara Jhon, nunca el agente.
+    const p = out.payload as any;
+    const actualId = p?.persona_actual_id as number;
+    const candidatos = (p?.candidatos_fusion ?? []) as Array<{
+      persona_id_candidata: number; score: number;
+      confianza_fusion: string; razon: string;
+    }>;
+    if (!actualId || candidatos.length === 0) return;
+
+    for (const c of candidatos) {
+      if (c.confianza_fusion !== 'CONFIRMADO' && c.confianza_fusion !== 'INFERIDO') continue;
+
+      // Dedup: no re-insertar la misma pareja si ya hay un registro pendiente
+      // (en cualquiera de los dos órdenes nueva/existente).
+      const { data: yaHay } = await sb.from('duplicados_detectados')
+        .select('id')
+        .eq('estado', 'pendiente')
+        .or(`and(persona_nueva_id.eq.${actualId},persona_existente_id.eq.${c.persona_id_candidata}),` +
+            `and(persona_nueva_id.eq.${c.persona_id_candidata},persona_existente_id.eq.${actualId})`)
+        .limit(1)
+        .maybeSingle();
+      if (yaHay) continue;
+
+      await sb.from('duplicados_detectados').insert({
+        persona_nueva_id: actualId,
+        persona_existente_id: c.persona_id_candidata,
+        motivo: c.razon,
+        score: c.score,
+        estado: 'pendiente',
+        detectado_por: 'A3_IDENTIDAD',
+      } as any);
+    }
     return;
   },
 };

@@ -21,6 +21,7 @@ export interface MensajeChat { rol: 'usuario' | 'junior'; mensaje: string }
 export interface Correccion { persona_id: number; modulo: string | null; hecho: string }
 export interface Memoria { tipo: 'preferencia' | 'dato'; contenido: string }
 export interface NuevoCliente { nombre: string; telefono: string | null; ciudad: string | null }
+export interface ResolucionDuplicado { duplicado_id: number; accion: 'fusionar' | 'descartar' }
 
 /** Parsea una cadena "clave=valor | clave=valor" en un objeto. */
 function parsearCampos(s: string): Record<string, string> {
@@ -34,6 +35,7 @@ function parsearCampos(s: string): Record<string, string> {
 
 function systemPrompt(
   contextoClientes: string, listaClientes: string, memorias: string, resumenConversacion: string,
+  duplicados: string,
 ): string {
   // Fecha de Colombia (America/Bogota), no UTC — toISOString daría el día equivocado de noche.
   const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
@@ -143,6 +145,7 @@ negocio que debas recordar (no de un cliente puntual), agregá una línea al fin
 Usá tipo=preferencia si es sobre tu forma de responder; tipo=dato si es un hecho
 general del negocio. Confirmale a Jhon que lo vas a recordar. NO uses [MEMORIA] para
 hechos de un cliente concreto — eso va en [CORRECCION].
+${duplicados}
 
 ${resumenConversacion ? `=== RESUMEN DE LO QUE YA HABLARON EN ESTE CHAT ===
 ${resumenConversacion}
@@ -230,6 +233,45 @@ async function construirContextoClientes(sb: SupabaseClient): Promise<{ contexto
 }
 
 /**
+ * F7.3 — arma el bloque de posibles clientes duplicados pendientes de que Jhon
+ * confirme. Devuelve '' si no hay ninguno. Incluye instrucciones + la lista.
+ */
+async function cargarDuplicadosPendientes(sb: SupabaseClient): Promise<string> {
+  const { data: dups } = await sb.from('duplicados_detectados')
+    .select('id, persona_nueva_id, persona_existente_id, motivo')
+    .eq('estado', 'pendiente')
+    .order('created_at', { ascending: true });
+  if (!dups || dups.length === 0) return '';
+
+  const ids = [...new Set(dups.flatMap(d => [d.persona_nueva_id, d.persona_existente_id]))];
+  const { data: pers } = await sb.from('personas').select('id, nombre, ciudad').in('id', ids);
+  const ref = (id: number) => {
+    const p = pers?.find(x => x.id === id);
+    return p ? `"${p.nombre ?? 'sin nombre'}" (id ${id}${p.ciudad ? ', ' + p.ciudad : ''})` : `id ${id}`;
+  };
+  const lineas = dups.map(d =>
+    `[duplicado #${d.id}] ${ref(d.persona_nueva_id)} podría ser la misma persona que ` +
+    `${ref(d.persona_existente_id)}.${d.motivo ? ' Motivo: ' + d.motivo : ''}`);
+
+  return `
+
+DUPLICADOS PENDIENTES — posibles clientes repetidos:
+El sistema detectó clientes que quizás son la misma persona registrada dos veces.
+Planteáselo a Jhon en tu respuesta: decile cuáles son y preguntale si son la misma
+persona o dos distintas. NO los fusiones por tu cuenta — esperá que Jhon decida.
+Cuando Jhon te responda sobre un duplicado concreto, agregá al final una línea con
+este formato EXACTO:
+[RESOLVER_DUPLICADO] id=<número del duplicado> | accion=fusionar
+  → cuando Jhon confirma que SON la misma persona (se unen en una sola ficha).
+[RESOLVER_DUPLICADO] id=<número del duplicado> | accion=descartar
+  → cuando Jhon dice que son personas DISTINTAS (se deja de avisar de ese par).
+Si Jhon no se pronuncia sobre un duplicado, no agregues la línea de ese.
+
+=== POSIBLES CLIENTES DUPLICADOS (pendientes de tu confirmación) ===
+${lineas.join('\n')}`;
+}
+
+/**
  * Genera la respuesta de Junior + extrae las correcciones que dio Jhon.
  * `historial` son los mensajes previos de la conversación (orden cronológico).
  */
@@ -238,8 +280,9 @@ export async function responderJunior(
   pregunta: string,
   historial: MensajeChat[],
   sesionId: number,
-): Promise<{ respuesta: string; correcciones: Correccion[]; memorias: Memoria[]; nuevosClientes: NuevoCliente[]; costo_usd: number; ok: boolean }> {
+): Promise<{ respuesta: string; correcciones: Correccion[]; memorias: Memoria[]; nuevosClientes: NuevoCliente[]; resoluciones: ResolucionDuplicado[]; costo_usd: number; ok: boolean }> {
   const { contexto, lista } = await construirContextoClientes(sb);
+  const duplicados = await cargarDuplicadosPendientes(sb);
 
   const { data: mems } = await sb.from('junior_memoria')
     .select('tipo,contenido').eq('vigente', true).order('created_at');
@@ -273,7 +316,7 @@ export async function responderJunior(
   }
 
   const messages: ChatMessage[] = [
-    { role: 'system', content: systemPrompt(contexto, lista, bloqueMemorias, resumenConversacion) },
+    { role: 'system', content: systemPrompt(contexto, lista, bloqueMemorias, resumenConversacion, duplicados) },
   ];
   for (const h of recientes) {
     messages.push({ role: h.rol === 'usuario' ? 'user' : 'assistant', content: h.mensaje });
@@ -286,11 +329,13 @@ export async function responderJunior(
   let correcciones: Correccion[] = [];
   let memorias: Memoria[] = [];
   let nuevosClientes: NuevoCliente[] = [];
+  let resoluciones: ResolucionDuplicado[] = [];
   let costo_usd = costoResumen;
 
   const reCorr = /^\s*\[CORRECCION\]\s*persona_id\s*=\s*(\d+)\s*\|\s*modulo\s*=\s*(m[1-7])\s*\|\s*hecho\s*=\s*(.+)$/i;
   const reMem = /^\s*\[MEMORIA\]\s*tipo\s*=\s*(preferencia|dato)\s*\|\s*contenido\s*=\s*(.+)$/i;
   const reNuevo = /^\s*\[NUEVO_CLIENTE\]\s*(.+)$/i;
+  const reResolver = /^\s*\[RESOLVER_DUPLICADO\]\s*id\s*=\s*(\d+)\s*\|\s*accion\s*=\s*(fusionar|descartar)\s*$/i;
 
   for (let intento = 1; intento <= 2; intento++) {
     const res = await deepseekChat({
@@ -305,10 +350,12 @@ export async function responderJunior(
     correcciones = [];
     memorias = [];
     nuevosClientes = [];
+    resoluciones = [];
     for (const linea of res.contenido.split('\n')) {
       const mc = linea.match(reCorr);
       const mm = linea.match(reMem);
       const mn = linea.match(reNuevo);
+      const mr = linea.match(reResolver);
       if (mc) correcciones.push({ persona_id: Number(mc[1]), modulo: mc[2].toLowerCase(), hecho: mc[3].trim() });
       else if (mm) memorias.push({ tipo: mm[1].toLowerCase() as 'preferencia' | 'dato', contenido: mm[2].trim() });
       else if (mn) {
@@ -317,6 +364,9 @@ export async function responderJunior(
           nombre: campos.nombre, telefono: campos.telefono || null, ciudad: campos.ciudad || null,
         });
       }
+      else if (mr) resoluciones.push({
+        duplicado_id: Number(mr[1]), accion: mr[2].toLowerCase() as 'fusionar' | 'descartar',
+      });
       else lineasResp.push(linea);
     }
     respuesta = lineasResp.join('\n').trim();
@@ -331,5 +381,5 @@ export async function responderJunior(
     ok = false;
   }
 
-  return { respuesta, correcciones, memorias, nuevosClientes, costo_usd, ok };
+  return { respuesta, correcciones, memorias, nuevosClientes, resoluciones, costo_usd, ok };
 }

@@ -55,6 +55,7 @@ import {
 import { registrarTodosLosAgentes } from '../agentes/registro_agentes.js';
 import { sintetizarPersona } from '../agentes/sintesis/analistas.js';
 import { responderJunior, type NuevoCliente } from '../agentes/sintesis/junior_chat.js';
+import { fusionarPersonas } from '../identidad/fusionar_personas.js';
 
 // ─── Config y env ─────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
@@ -590,6 +591,34 @@ async function cicloJuniorChat(): Promise<void> {
             console.log(`[V2/JUNIOR] re-sintetizado cliente ${pid}`);
           } catch (e: any) {
             console.error(`[V2/JUNIOR] re-síntesis cliente ${pid}: ${e.message}`);
+          }
+        }
+
+        // F7.3 — resoluciones de duplicados: Jhon confirmó por el chat si dos
+        // clientes son la misma persona (fusionar) o son distintos (descartar).
+        for (const res of r.resoluciones) {
+          try {
+            const { data: dup } = await sb.from('duplicados_detectados')
+              .select('id, persona_nueva_id, persona_existente_id, estado')
+              .eq('id', res.duplicado_id).maybeSingle();
+            if (!dup || dup.estado !== 'pendiente') {
+              console.warn(`[V2/JUNIOR] duplicado ${res.duplicado_id} inexistente o ya resuelto, se ignora`);
+              continue;
+            }
+            if (res.accion === 'descartar') {
+              await sb.from('duplicados_detectados')
+                .update({ estado: 'descartado', resuelto_at: new Date().toISOString() })
+                .eq('id', dup.id);
+              console.log(`[V2/JUNIOR] duplicado ${dup.id} descartado (son personas distintas)`);
+            } else {
+              // El cliente que ya existía sobrevive; el nuevo se fusiona en él.
+              await fusionarPersonas(sb, dup.persona_existente_id, dup.persona_nueva_id,
+                `Confirmado por Jhon en el chat de Junior (duplicado #${dup.id})`);
+              await sintetizarPersona(sb, dup.persona_existente_id);
+              console.log(`[V2/JUNIOR] duplicado ${dup.id} fusionado → persona ${dup.persona_existente_id}`);
+            }
+          } catch (e: any) {
+            console.error(`[V2/JUNIOR] resolver duplicado ${res.duplicado_id}: ${e.message}`);
           }
         }
       } catch (e: any) {

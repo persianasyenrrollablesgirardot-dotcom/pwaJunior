@@ -3,7 +3,7 @@
 > **Documento de progreso vivo.** Se actualiza con cada fase completada o decisión nueva.
 > Si se va la luz: leer `README.md` (contexto, 5 min) → `VISION.md` (qué) → `ARQUITECTURA.md` (cómo) → este `MAPA.md` (dónde) → retomar.
 >
-> **Última actualización:** 2026-05-22 (FASE 7: F7.2 cruce automático por teléfono)
+> **Última actualización:** 2026-05-22 (FASE 7 COMPLETA — F7.3 cruce asistido de duplicados)
 > **Owner:** Jhon Cubides
 
 ---
@@ -34,9 +34,9 @@
 ## ESTADO ACTUAL
 
 ### Fase activa
-**FASE 7 — Clientes manuales y cruce con WhatsApp** (2026-05-21, en progreso)
+**FASE 7 — Clientes manuales y cruce con WhatsApp** (2026-05-21 → 2026-05-22, ✅ COMPLETA)
 
-Junior puede registrar clientes que NO llegan por WhatsApp (vienen al local, llaman, contactan por otro medio). Plan de 3 partes; entregadas F7.1, F7.1b y F7.2, queda F7.3.
+Junior puede registrar clientes que NO llegan por WhatsApp (vienen al local, llaman, contactan por otro medio) y el sistema evita duplicarlos. Plan de 3 partes: F7.1, F7.1b, F7.2 y F7.3 entregadas — FASE 7 cerrada.
 
 - **F7.1 Junior crea clientes manuales ✅ (2026-05-21)**
   - Migración `031`: `personas.origen` (`'whatsapp'` / `'manual'`).
@@ -54,7 +54,11 @@ Junior puede registrar clientes que NO llegan por WhatsApp (vienen al local, lla
   - `matchExactoPersona` reporta si matcheó por `jid` o por `telefono`; `proyectoManualReutilizable` busca el proyecto `origen='manual'` abierto y sin chat para reusarlo.
   - Verificado E2E (`test_f72_cruce_telefono.ts`, 12/12): escenario de cruce + regresión de cliente nuevo sin registro previo.
 
-- **Pendiente F7.3** — cruce asistido: Junior detecta el posible duplicado (por nombre, vía A3_IDENTIDAD) y le pregunta a Jhon para confirmar la fusión.
+- **F7.3 Cruce asistido de duplicados ✅ (2026-05-22)**
+  - Parte A — al registrar a mano: si Jhon le dicta a Junior un cliente cuyo nombre ya aparece (igual o parecido) en la lista, Junior pregunta en el chat si es la misma persona antes de crearlo. Si es el mismo, ancla el pedido al existente; si es otro, lo registra. La sección CLIENTE NUEVO del prompt se reestructuró en 2 pasos (¿ya existe? → registrar).
+  - Parte B — desde WhatsApp: `A3_IDENTIDAD` escribe los duplicados que detecta (mismo nombre, distinto teléfono — lo que F7.2 no resuelve solo) en la tabla `duplicados_detectados` (migración `033`). Junior los plantea en sus respuestas; cuando Jhon confirma, emite `[RESOLVER_DUPLICADO]` y el worker fusiona o descarta. La fusión (`identidad/fusionar_personas.ts`) mueve todo a la persona sobreviviente, le hereda el `jid` y deja un único expediente.
+  - Verificado E2E: `test_f73_registro_manual.ts` (6/6) + `test_f73_whatsapp_fusion.ts` (10/10).
+  - Limitación conocida: la fusión no es transaccional (mueve tabla por tabla); un choque de constraint a mitad dejaría la fusión incompleta. Mismo comportamiento que la fusión de M1 Identidad. Mejora futura: función SQL con transacción.
 
 ---
 
@@ -441,6 +445,8 @@ Para detalle completo ver `ARQUITECTURA.md` sección 44.
 | 2026-05-21 | **F7.1 — Junior crea clientes manuales** (migración `031`): cliente que llega al local / por otro medio se registra dictándoselo a Junior. Línea `[NUEVO_CLIENTE]` + correcciones con `persona_id=0`. El worker crea la persona `origen='manual'` + proyecto; los analistas sintetizan clientes sin chat de WhatsApp. Primera parte del plan de 3 (clientes manuales + cruce con WhatsApp) |
 | 2026-05-21 | **F7.1b — Módulo Junior con pestañas** (migración `032`): el módulo Junior pasa a contenedor con pestañas `Chat` \| `Instrucciones por chat`. Tabla `junior_instrucciones` registra cada instrucción dada por chat (cliente nuevo, corrección, preferencia); la pestaña la muestra documentada. Base para futuras pestañas (checklist, tareas) |
 | 2026-05-22 | **F7.2 — Cruce automático por teléfono**: el cliente registrado a mano que luego escribe por WhatsApp se reconoce por `telefono_e164`; `matcher.ts` le asocia el `jid` y engancha el chat al proyecto manual existente en vez de duplicarlo → un único expediente por cliente. Verificado E2E (`test_f72_cruce_telefono.ts`, 12/12) |
+| 2026-05-22 | **F7.3 Parte A — Junior pregunta antes de duplicar un cliente**: si Jhon dicta un cliente cuyo nombre ya está (igual o parecido) en la lista, Junior pregunta en el chat si es la misma persona antes de registrarlo. Sección CLIENTE NUEVO del prompt reestructurada en 2 pasos. E2E 6/6 |
+| 2026-05-22 | **F7.3 Parte B — Duplicados de WhatsApp en el chat** (migración `033` `duplicados_detectados`): A3_IDENTIDAD registra los duplicados que detecta; Junior los plantea y, con la confirmación de Jhon (`[RESOLVER_DUPLICADO]`), el worker fusiona las personas (`identidad/fusionar_personas.ts`: mueve todo al sobreviviente + hereda el jid). Cierra la FASE 7. E2E 10/10 |
 
 ---
 
