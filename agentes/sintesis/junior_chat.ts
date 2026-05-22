@@ -20,6 +20,17 @@ const MODULO_NOMBRE: Record<string, string> = {
 export interface MensajeChat { rol: 'usuario' | 'junior'; mensaje: string }
 export interface Correccion { persona_id: number; modulo: string | null; hecho: string }
 export interface Memoria { tipo: 'preferencia' | 'dato'; contenido: string }
+export interface NuevoCliente { nombre: string; telefono: string | null; ciudad: string | null }
+
+/** Parsea una cadena "clave=valor | clave=valor" en un objeto. */
+function parsearCampos(s: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const parte of s.split('|')) {
+    const i = parte.indexOf('=');
+    if (i > 0) out[parte.slice(0, i).trim().toLowerCase()] = parte.slice(i + 1).trim();
+  }
+  return out;
+}
 
 function systemPrompt(
   contextoClientes: string, listaClientes: string, memorias: string, resumenConversacion: string,
@@ -90,6 +101,20 @@ formato EXACTO (una por renglón, al final):
 [CORRECCION] persona_id=<número> | modulo=<m1..m7> | hecho=<el hecho confirmado, redactado claro>
 
 Si el mensaje es solo una pregunta (sin info nueva), NO agregues ninguna línea [CORRECCION].
+
+CLIENTE NUEVO — cuando Jhon te cuenta de alguien que NO está en la lista de clientes:
+Si Jhon menciona un cliente que llegó al local, llamó, o contactó por otro medio —y
+NO figura en "CLIENTES (persona_id: nombre)" de abajo— registralo como cliente nuevo.
+Agregá una línea con este formato EXACTO:
+[NUEVO_CLIENTE] nombre=<nombre completo> | telefono=<número o vacío> | ciudad=<ciudad o vacío>
+El teléfono es IMPORTANTE: si Jhon no te lo dio, pedíselo en tu respuesta (sirve para
+reconocer al cliente cuando después escriba por WhatsApp). Igual registralo aunque falte.
+Para las medidas / novedades / pedidos de ese cliente nuevo, agregá líneas [CORRECCION]
+con persona_id=0 — el 0 significa "el cliente que estoy creando en este mismo mensaje".
+Ejemplo — Jhon dice "anotá un cliente, Pedro Gómez, vino al local, quiere blackout para 3 ventanas":
+[NUEVO_CLIENTE] nombre=Pedro Gómez | telefono= | ciudad=
+[CORRECCION] persona_id=0 | modulo=m4 | hecho=Quiere cortinas blackout para 3 ventanas
+[CORRECCION] persona_id=0 | modulo=m2 | hecho=Vino al local, interesado en cotización
 
 MEMORIA PERSISTENTE — cuándo guardar algo para siempre:
 Si Jhon te da una PREFERENCIA sobre cómo comportarte ("sé más breve", "tratame de
@@ -194,7 +219,7 @@ export async function responderJunior(
   pregunta: string,
   historial: MensajeChat[],
   sesionId: number,
-): Promise<{ respuesta: string; correcciones: Correccion[]; memorias: Memoria[]; costo_usd: number; ok: boolean }> {
+): Promise<{ respuesta: string; correcciones: Correccion[]; memorias: Memoria[]; nuevosClientes: NuevoCliente[]; costo_usd: number; ok: boolean }> {
   const { contexto, lista } = await construirContextoClientes(sb);
 
   const { data: mems } = await sb.from('junior_memoria')
@@ -241,10 +266,12 @@ export async function responderJunior(
   let respuesta = '';
   let correcciones: Correccion[] = [];
   let memorias: Memoria[] = [];
+  let nuevosClientes: NuevoCliente[] = [];
   let costo_usd = costoResumen;
 
   const reCorr = /^\s*\[CORRECCION\]\s*persona_id\s*=\s*(\d+)\s*\|\s*modulo\s*=\s*(m[1-7])\s*\|\s*hecho\s*=\s*(.+)$/i;
   const reMem = /^\s*\[MEMORIA\]\s*tipo\s*=\s*(preferencia|dato)\s*\|\s*contenido\s*=\s*(.+)$/i;
+  const reNuevo = /^\s*\[NUEVO_CLIENTE\]\s*(.+)$/i;
 
   for (let intento = 1; intento <= 2; intento++) {
     const res = await deepseekChat({
@@ -258,11 +285,19 @@ export async function responderJunior(
     const lineasResp: string[] = [];
     correcciones = [];
     memorias = [];
+    nuevosClientes = [];
     for (const linea of res.contenido.split('\n')) {
       const mc = linea.match(reCorr);
       const mm = linea.match(reMem);
+      const mn = linea.match(reNuevo);
       if (mc) correcciones.push({ persona_id: Number(mc[1]), modulo: mc[2].toLowerCase(), hecho: mc[3].trim() });
       else if (mm) memorias.push({ tipo: mm[1].toLowerCase() as 'preferencia' | 'dato', contenido: mm[2].trim() });
+      else if (mn) {
+        const campos = parsearCampos(mn[1]);
+        if (campos.nombre) nuevosClientes.push({
+          nombre: campos.nombre, telefono: campos.telefono || null, ciudad: campos.ciudad || null,
+        });
+      }
       else lineasResp.push(linea);
     }
     respuesta = lineasResp.join('\n').trim();
@@ -277,5 +312,5 @@ export async function responderJunior(
     ok = false;
   }
 
-  return { respuesta, correcciones, memorias, costo_usd, ok };
+  return { respuesta, correcciones, memorias, nuevosClientes, costo_usd, ok };
 }

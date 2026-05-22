@@ -3,7 +3,7 @@
 > **Documento de progreso vivo.** Se actualiza con cada fase completada o decisión nueva.
 > Si se va la luz: leer `README.md` (contexto, 5 min) → `VISION.md` (qué) → `ARQUITECTURA.md` (cómo) → este `MAPA.md` (dónde) → retomar.
 >
-> **Última actualización:** 2026-05-21 (FASE 6: Junior con sesiones y memoria persistente)
+> **Última actualización:** 2026-05-21 (FASE 7: clientes manuales + módulo Junior con pestañas)
 > **Owner:** Jhon Cubides
 
 ---
@@ -34,6 +34,26 @@
 ## ESTADO ACTUAL
 
 ### Fase activa
+**FASE 7 — Clientes manuales y cruce con WhatsApp** (2026-05-21, en progreso)
+
+Junior puede registrar clientes que NO llegan por WhatsApp (vienen al local, llaman, contactan por otro medio). Plan de 3 partes; esta entrega la parte 1.
+
+- **F7.1 Junior crea clientes manuales ✅ (2026-05-21)**
+  - Migración `031`: `personas.origen` (`'whatsapp'` / `'manual'`).
+  - Junior reconoce cuando Jhon le cuenta de un cliente que no está en la lista y emite una línea `[NUEVO_CLIENTE] nombre= | telefono= | ciudad=`. Las medidas/novedades se anclan con `[CORRECCION] persona_id=0` (0 = el cliente que se está creando en ese mensaje).
+  - El worker crea la persona (`origen='manual'`) + proyecto, normaliza el teléfono a E.164. Los analistas ahora sintetizan clientes sin chat de WhatsApp, usando solo lo que Jhon dictó (antes `sintetizarPersona` cortaba si no había mensajes).
+  - Verificado E2E: el cliente del local queda con ficha, correcciones ancladas y las 8 síntesis.
+
+- **F7.1b Módulo Junior con pestañas — "Instrucciones por chat" ✅ (2026-05-21)**
+  - El módulo Junior pasa de chat único a contenedor con pestañas: `Chat` | `Instrucciones por chat` (`Junior.tsx` contenedor, `JuniorChat.tsx`, `JuniorInstrucciones.tsx`). Preparado para sumar Checklist y Tareas.
+  - Migración `032`: tabla `junior_instrucciones`. El worker registra cada instrucción dada por chat (cliente nuevo, corrección, preferencia) con tipo, fecha, cliente afectado y vínculo al mensaje. La pestaña la muestra — como es un visor, lo dictado por chat queda documentado y visible.
+  - Verificado E2E: los 3 tipos de instrucción se registran.
+
+- **Pendiente F7.2** — cruce automático por teléfono: cuando el cliente escribe por WhatsApp, `matcher.ts` ya lo une si el teléfono coincide.
+- **Pendiente F7.3** — cruce asistido: Junior detecta el posible duplicado (por nombre, vía A3_IDENTIDAD) y le pregunta a Jhon para confirmar la fusión.
+
+---
+
 **FASE 6 — Junior con sesiones y memoria persistente** (2026-05-21)
 
 Tras evaluar las capacidades de Junior (conciencia, autoaprendizaje, memoria), se detectaron tres falencias críticas: solo veía los últimos 12 mensajes, no existían sesiones (hilo único infinito) y no aprendía sobre sí mismo. Esta fase ataca las dos primeras y la tercera.
@@ -414,6 +434,8 @@ Para detalle completo ver `ARQUITECTURA.md` sección 44.
 | 2026-05-21 | **Junior con sesiones y memoria persistente** (migración `029`): cada conversación es una sesión independiente (`junior_sesiones` + `sesion_id`); el historial que ve Junior es solo el de la sesión activa. Memoria propia (`junior_memoria`): Junior guarda preferencias de comportamiento y datos generales con líneas `[MEMORIA]` y los recuerda en cualquier chat nuevo. Verificado E2E. Resuelve las falencias de "memoria independiente" detectadas al evaluar a Junior |
 | 2026-05-21 | **Compactación de conversación larga** (migración `030`): superados los 20 mensajes de una sesión, los viejos se resumen con el LLM (`junior_sesiones.resumen` / `resumen_msgs`) en vez de truncarse. Junior deja de olvidar el principio de los chats largos. Cierra la FASE 6 |
 | 2026-05-21 | **Fix — Junior daba falso negativo con clientes recién capturados**: si una persona existía pero los analistas aún no habían generado su síntesis (ventana de ~3 min tras capturar el chat), Junior afirmaba que "no existe / no hay datos". Ahora `construirContextoClientes` incluye a esas personas con marca "⏳ análisis en generación" → Junior responde "su análisis se está generando, preguntá en un minuto". No era pérdida de datos: era una carrera entre captura y síntesis |
+| 2026-05-21 | **F7.1 — Junior crea clientes manuales** (migración `031`): cliente que llega al local / por otro medio se registra dictándoselo a Junior. Línea `[NUEVO_CLIENTE]` + correcciones con `persona_id=0`. El worker crea la persona `origen='manual'` + proyecto; los analistas sintetizan clientes sin chat de WhatsApp. Primera parte del plan de 3 (clientes manuales + cruce con WhatsApp) |
+| 2026-05-21 | **F7.1b — Módulo Junior con pestañas** (migración `032`): el módulo Junior pasa a contenedor con pestañas `Chat` \| `Instrucciones por chat`. Tabla `junior_instrucciones` registra cada instrucción dada por chat (cliente nuevo, corrección, preferencia); la pestaña la muestra documentada. Base para futuras pestañas (checklist, tareas) |
 
 ---
 

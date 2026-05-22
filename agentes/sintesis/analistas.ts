@@ -210,10 +210,19 @@ export async function sintetizarPersona(
         .in('chat_id', chatIds).is('deleted_at', null).order('ts_canal')).data ?? []
     : [];
 
-  if (msgs.length === 0) return { ok: 0, fallidos: 0, costo_usd: 0 };
+  // Correcciones de Jhon — verdad prioritaria. El humano manda sobre el agente.
+  const { data: correcciones } = await sb.from('correcciones_humanas')
+    .select('modulo,hecho').eq('persona_id', personaId).eq('vigente', true)
+    .order('created_at', { ascending: true });
+
+  // Sin chat de WhatsApp Y sin correcciones → no hay nada para analizar. Pero un
+  // cliente registrado a mano (sin chat) SÍ se sintetiza con lo que dictó Jhon.
+  if (msgs.length === 0 && (!correcciones || correcciones.length === 0)) {
+    return { ok: 0, fallidos: 0, costo_usd: 0 };
+  }
 
   // Extraer el teléfono del cliente de los mensajes / OCR de comprobantes.
-  await extraerTelefonoCliente(sb, personaId, msgs);
+  if (msgs.length > 0) await extraerTelefonoCliente(sb, personaId, msgs);
 
   // Cada mensaje va con SU fecha real de envío (ts_canal). Sin esto el analista
   // no puede resolver "el jueves" / "mañana" ni calcular qué venció — causa raíz
@@ -221,11 +230,13 @@ export async function sintetizarPersona(
   const fechaMsg = (ts: string | null | undefined) => ts
     ? new Date(ts).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })
     : '????-??-??';
-  const conversacion = msgs.map(m => {
-    const quien = m.direccion === 'saliente' ? 'NEGOCIO' : 'CLIENTE';
-    const t = m.texto || (m.metadata as any)?.ai_text || `[${m.tipo} sin texto]`;
-    return `[${fechaMsg(m.ts_canal)}] ${quien}: ${String(t).replace(/\n/g, ' ').trim()}`;
-  }).join('\n');
+  const conversacion = msgs.length === 0
+    ? '(este cliente todavía no tiene chat de WhatsApp — lo registró Jhon a mano; lo que se sabe de él está en los HECHOS CONFIRMADOS de abajo)'
+    : msgs.map(m => {
+        const quien = m.direccion === 'saliente' ? 'NEGOCIO' : 'CLIENTE';
+        const t = m.texto || (m.metadata as any)?.ai_text || `[${m.tipo} sin texto]`;
+        return `[${fechaMsg(m.ts_canal)}] ${quien}: ${String(t).replace(/\n/g, ' ').trim()}`;
+      }).join('\n');
 
   const evts = (await sb.from('evento_pg')
     .select('agente_origen,confianza,payload')
@@ -236,10 +247,6 @@ export async function sintetizarPersona(
   });
   const datosAgentes = [...new Set(utiles.map(e => `[${e.agente_origen}] ${(e.payload as any)?.resumen}`))].join('\n');
 
-  // Correcciones de Jhon — verdad prioritaria. El humano manda sobre el agente.
-  const { data: correcciones } = await sb.from('correcciones_humanas')
-    .select('modulo,hecho').eq('persona_id', personaId).eq('vigente', true)
-    .order('created_at', { ascending: true });
   const bloqueCorrecciones = (correcciones && correcciones.length > 0)
     ? correcciones.map((c: any) => `- [${c.modulo ?? 'general'}] ${c.hecho}`).join('\n')
     : '(ninguno)';

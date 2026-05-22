@@ -54,7 +54,7 @@ import {
 } from '../agentes/lib/pipeline.js';
 import { registrarTodosLosAgentes } from '../agentes/registro_agentes.js';
 import { sintetizarPersona } from '../agentes/sintesis/analistas.js';
-import { responderJunior } from '../agentes/sintesis/junior_chat.js';
+import { responderJunior, type NuevoCliente } from '../agentes/sintesis/junior_chat.js';
 
 // ─── Config y env ─────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
@@ -447,6 +447,54 @@ async function cicloPipeline(): Promise<number> {
 // Jhon escribe en junior_chat (rol='usuario', estado='pendiente'). Este ciclo
 // los toma, arma el contexto con las síntesis de todos los clientes, deja que
 // Junior responda, e inserta la respuesta (rol='junior').
+/** Normaliza un teléfono dictado a formato E.164 colombiano. */
+function normalizarTelefono(t: string | null): string | null {
+  if (!t) return null;
+  const limpio = t.replace(/[^\d+]/g, '');
+  if (!limpio) return null;
+  if (limpio.startsWith('+')) return limpio;
+  const d = limpio.replace(/\D/g, '');
+  if (d.length === 10) return '+57' + d;                        // celular colombiano
+  if (d.startsWith('57') && d.length === 12) return '+' + d;
+  return d ? '+' + d : null;
+}
+
+/** Crea una persona de origen manual (cliente del local / otro medio) + su proyecto. */
+async function crearPersonaManual(nc: NuevoCliente): Promise<number | null> {
+  const { data: persona, error } = await sb.from('personas').insert({
+    nombre: nc.nombre,
+    telefono_e164: normalizarTelefono(nc.telefono),
+    ciudad: nc.ciudad,
+    ambito_principal: 'comercial',
+    origen: 'manual',
+  } as any).select('id').single();
+  if (error || !persona) {
+    console.error(`[V2/JUNIOR] no se pudo crear persona manual "${nc.nombre}": ${error?.message}`);
+    return null;
+  }
+  await sb.from('proyectos').insert({
+    persona_id: persona.id, ambito: 'comercial',
+    nombre: 'Cliente registrado a mano', estado: 'abierto',
+    origen: 'manual', prioridad: 5,
+  } as any);
+  return persona.id;
+}
+
+/** Deja constancia de una instrucción que Jhon dio a Junior por chat directo. */
+async function registrarInstruccion(
+  tipo: 'nuevo_cliente' | 'correccion' | 'memoria',
+  resumen: string,
+  extra: { persona_id?: number | null; modulo?: string | null; sesion_id?: number | null; mensaje_chat_id?: number | null },
+): Promise<void> {
+  await sb.from('junior_instrucciones').insert({
+    tipo, resumen,
+    persona_id: extra.persona_id ?? null,
+    modulo: extra.modulo ?? null,
+    sesion_id: extra.sesion_id ?? null,
+    mensaje_chat_id: extra.mensaje_chat_id ?? null,
+  } as any);
+}
+
 let juniorChatEnCurso = false;
 async function cicloJuniorChat(): Promise<void> {
   if (juniorChatEnCurso) return;
@@ -494,28 +542,54 @@ async function cicloJuniorChat(): Promise<void> {
             await sb.from('junior_memoria').insert({
               tipo: mem.tipo, contenido: mem.contenido,
             } as any);
+            await registrarInstruccion('memoria', `Le enseñaste: "${mem.contenido}"`, {
+              sesion_id: msg.sesion_id, mensaje_chat_id: msg.id,
+            });
           }
           console.log(`[V2/JUNIOR] ${r.memorias.length} memoria(s) persistente(s) guardada(s)`);
         }
 
-        // Ciclo de aprendizaje: si Jhon dio correcciones, guardarlas y
-        // re-sintetizar los clientes afectados (los analistas las toman como
-        // verdad prioritaria → el módulo queda actualizado).
-        if (r.correcciones.length > 0) {
-          const afectados = new Set<number>();
-          for (const c of r.correcciones) {
-            await sb.from('correcciones_humanas').insert({
-              persona_id: c.persona_id, modulo: c.modulo, hecho: c.hecho, origen: 'chat_junior',
-            } as any);
-            afectados.add(c.persona_id);
+        // Clientes nuevos del local / otros medios que Junior registró.
+        let idClienteNuevo: number | null = null;
+        for (const nc of r.nuevosClientes) {
+          const nuevoId = await crearPersonaManual(nc);
+          if (nuevoId) {
+            idClienteNuevo = nuevoId;
+            console.log(`[V2/JUNIOR] cliente manual creado: ${nc.nombre} (id ${nuevoId})`);
+            await registrarInstruccion('nuevo_cliente', `Registraste el cliente ${nc.nombre}`, {
+              persona_id: nuevoId, sesion_id: msg.sesion_id, mensaje_chat_id: msg.id,
+            });
           }
-          for (const pid of afectados) {
-            try {
-              await sintetizarPersona(sb, pid);
-              console.log(`[V2/JUNIOR] corrección aplicada → re-sintetizado cliente ${pid}`);
-            } catch (e: any) {
-              console.error(`[V2/JUNIOR] re-síntesis cliente ${pid}: ${e.message}`);
+        }
+
+        // Ciclo de aprendizaje: correcciones de Jhon + re-síntesis de los
+        // clientes afectados (los analistas las toman como verdad prioritaria).
+        // persona_id=0 en una corrección apunta al cliente nuevo recién creado.
+        const afectados = new Set<number>();
+        if (idClienteNuevo != null) afectados.add(idClienteNuevo);
+        for (const c of r.correcciones) {
+          let pid = c.persona_id;
+          if (pid === 0) {
+            if (idClienteNuevo == null) {
+              console.warn('[V2/JUNIOR] corrección persona_id=0 sin cliente nuevo, descartada');
+              continue;
             }
+            pid = idClienteNuevo;
+          }
+          await sb.from('correcciones_humanas').insert({
+            persona_id: pid, modulo: c.modulo, hecho: c.hecho, origen: 'chat_junior',
+          } as any);
+          await registrarInstruccion('correccion', c.hecho, {
+            persona_id: pid, modulo: c.modulo, sesion_id: msg.sesion_id, mensaje_chat_id: msg.id,
+          });
+          afectados.add(pid);
+        }
+        for (const pid of afectados) {
+          try {
+            await sintetizarPersona(sb, pid);
+            console.log(`[V2/JUNIOR] re-sintetizado cliente ${pid}`);
+          } catch (e: any) {
+            console.error(`[V2/JUNIOR] re-síntesis cliente ${pid}: ${e.message}`);
           }
         }
       } catch (e: any) {
