@@ -113,6 +113,10 @@ chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => 
           sendResponse(await setKeysFromVisor(request));
           return;
 
+        case 'V3_SET_REALTIME':
+          sendResponse(await setRealtimeFlag(request.enabled));
+          return;
+
         default:
           sendResponse({ error: 'tipo desconocido: ' + t });
       }
@@ -762,6 +766,19 @@ async function setKeysFromVisor({ supabaseKey, openaiKey, deepseekKey }) {
     tiene_openai:   !!next.openaiKey,
     tiene_deepseek: !!next.deepseekKey,
   };
+}
+
+// ─── V3_SET_REALTIME — el Visor prende/apaga el modo IA tiempo real ───
+//
+// Cuando ON: la extensión procesa y sincroniza TODOS los chats no bloqueados
+// automáticamente, sin esperar el "Procesar" manual. El flag vive en
+// chrome.storage.local (key 'ws_v2_ia_realtime_enabled'), donde getIAState()
+// del background.v2.js ya lo lee. Persiste entre reinicios de Chrome.
+async function setRealtimeFlag(enabled) {
+  const on = !!enabled;
+  await chrome.storage.local.set({ ws_v2_ia_realtime_enabled: on });
+  console.log('[VPG-API] V3_SET_REALTIME:', on ? 'ON' : 'OFF');
+  return { ok: true, realtime: on };
 }
 
 console.log('[VPG-API] cargado v' + VISOR_API_VERSION);

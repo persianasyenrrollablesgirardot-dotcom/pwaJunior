@@ -109,6 +109,11 @@ export async function listarBloqueados(): Promise<string[]> {
   return r.data;
 }
 
+// Prende/apaga el modo IA tiempo real en la extensión (procesamiento automático).
+export async function setRealtimeExtension(enabled: boolean): Promise<{ ok: boolean; realtime: boolean }> {
+  return await send({ type: 'V3_SET_REALTIME', enabled });
+}
+
 // ─── Transcripción de media ──────────────────────────────────────
 
 export interface EstimadoMediaChat {

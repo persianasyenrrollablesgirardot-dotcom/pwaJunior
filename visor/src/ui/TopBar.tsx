@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useModo } from '../lib/modo';
 import { supabase, supabaseConfigured } from '../lib/supabase';
-import { fetchConfiguracion } from '../lib/queries';
+import { fetchConfiguracion, guardarConfiguracion } from '../lib/queries';
+import { setRealtimeExtension } from '../lib/extension';
 import { useContextoActivo } from '../lib/contexto_activo';
 
 export function TopBar() {
   const [modo, setModoExt] = useModo();
   const [iaModo, setIaModo] = useState<'OFF' | 'ON'>('OFF');
+  const [iaToggling, setIaToggling] = useState(false);
   const [topeDiario, setTopeDiario] = useState<number>(5);
   const [costoHoy, setCostoHoy] = useState<number>(0);
   const ctx = useContextoActivo();
@@ -18,8 +20,11 @@ export function TopBar() {
     }
     fetchConfiguracion(['ia_modo_global', 'ia_tope_diario_alerta_usd'])
       .then(cfg => {
-        setIaModo((cfg.ia_modo_global ?? 'OFF') === 'ON' ? 'ON' : 'OFF');
+        const on = (cfg.ia_modo_global ?? 'OFF') === 'ON';
+        setIaModo(on ? 'ON' : 'OFF');
         setTopeDiario(Number(cfg.ia_tope_diario_alerta_usd ?? 5));
+        // Sincronizar la extensión con el modo guardado (best-effort).
+        setRealtimeExtension(on).catch(() => {});
       })
       .catch(() => {});
     // Costo del día: suma costo_usd de hoy en evento_pg
@@ -35,6 +40,25 @@ export function TopBar() {
   }, [modo]);
 
   const costoColor = costoHoy < topeDiario * 0.5 ? 'var(--green)' : costoHoy < topeDiario ? 'var(--orange)' : 'var(--red)';
+
+  // Prende/apaga el procesamiento IA en tiempo real: guarda el modo en Supabase
+  // y se lo empuja a la extensión (que es la que captura).
+  async function toggleIA() {
+    if (modo !== 'real' || iaToggling) return;
+    const next: 'ON' | 'OFF' = iaModo === 'ON' ? 'OFF' : 'ON';
+    const prev = iaModo;
+    setIaToggling(true);
+    setIaModo(next);   // optimista
+    try {
+      await guardarConfiguracion('ia_modo_global', next);
+      // La extensión puede no estar conectada — el modo igual queda guardado.
+      await setRealtimeExtension(next === 'ON').catch(() => {});
+    } catch {
+      setIaModo(prev);  // revertir si falló el guardado
+    } finally {
+      setIaToggling(false);
+    }
+  }
 
   return (
     <header style={{
@@ -83,17 +107,21 @@ export function TopBar() {
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        {/* Toggle global Tiempo Real IA — sección 48 ARQUITECTURA */}
-        <div
-          title="Toggle global de procesamiento IA en tiempo real. Se activa en MÓDULO 2 cuando haya agentes IA implementados."
+        {/* Toggle global Tiempo Real IA — procesa todos los chats no bloqueados */}
+        <button
+          onClick={toggleIA}
+          disabled={modo !== 'real' || iaToggling}
+          title={modo !== 'real'
+            ? 'Disponible en modo Real'
+            : 'Procesamiento IA en tiempo real: captura y procesa todos los chats automáticamente. Los bloqueados quedan afuera.'}
           style={{
             display: 'flex', alignItems: 'center', gap: 6,
             padding: '4px 10px',
-            border: '1px solid var(--border)',
+            border: `1px solid ${iaModo === 'ON' ? 'var(--green)' : 'var(--border)'}`,
             borderRadius: 16,
             background: iaModo === 'ON' ? '#34c75922' : 'var(--bg-page)',
-            opacity: 0.7,
-            cursor: 'not-allowed',
+            cursor: modo === 'real' && !iaToggling ? 'pointer' : 'not-allowed',
+            opacity: modo === 'real' ? 1 : 0.5,
           }}
         >
           <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>IA Tiempo real</span>
@@ -101,10 +129,9 @@ export function TopBar() {
             fontSize: 11, fontWeight: 700,
             color: iaModo === 'ON' ? 'var(--green)' : 'var(--text-muted)',
           }}>
-            {iaModo === 'ON' ? '🟢 ON' : '⚫ OFF'}
+            {iaToggling ? '…' : (iaModo === 'ON' ? '🟢 ON' : '⚫ OFF')}
           </span>
-          <span style={{ fontSize: 9, color: 'var(--text-muted)', fontStyle: 'italic' }}>(M2)</span>
-        </div>
+        </button>
 
         {/* Costo del día */}
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>

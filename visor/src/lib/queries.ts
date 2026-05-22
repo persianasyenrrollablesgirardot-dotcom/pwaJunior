@@ -2513,6 +2513,14 @@ export async function fetchConfiguracion(claves: string[]): Promise<Record<strin
   return out;
 }
 
+// Guarda (upsert) una clave de configuración global.
+export async function guardarConfiguracion(clave: string, valor: any): Promise<void> {
+  const { error } = await supabase
+    .from('configuracion_sistema')
+    .upsert({ clave, valor, actualizado_at: new Date().toISOString() }, { onConflict: 'clave' });
+  if (error) throw error;
+}
+
 // Estimación de costo de procesamiento de un chat
 export async function estimarCostoChat(chatId: number): Promise<{ mensajes_total: number; mensajes_texto: number; mensajes_media: number; costo_estimado_usd: number }> {
   const { data: msgs } = await supabase
