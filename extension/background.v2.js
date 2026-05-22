@@ -74,6 +74,7 @@ const SUPABASE_BATCH_MAX = 200;
 
 const IA_FLAG_KEYS = [
   'ws_v2_ia_realtime_enabled',
+  'ws_v2_ia_realtime_since',
   'ws_v2_ia_chats_whitelist',
   'ws_v2_ia_daily_cap_usd',
   'ws_v2_ia_spend_daily',
@@ -84,6 +85,9 @@ async function getIAState() {
   const r = await chrome.storage.local.get(IA_FLAG_KEYS);
   return {
     realtimeEnabled: !!r.ws_v2_ia_realtime_enabled,
+    // Momento (ms) en que se prendió tiempo real. Solo se procesan los mensajes
+    // posteriores — el histórico viejo se sube con "Procesar", no se reprocesa solo.
+    realtimeSince:   typeof r.ws_v2_ia_realtime_since === 'number' ? r.ws_v2_ia_realtime_since : 0,
     whitelist:       Array.isArray(r.ws_v2_ia_chats_whitelist) ? r.ws_v2_ia_chats_whitelist : [],
     dailyCapUsd:     typeof r.ws_v2_ia_daily_cap_usd === 'number' ? r.ws_v2_ia_daily_cap_usd : 10,
     spendDaily:      r.ws_v2_ia_spend_daily   || { date: '',  usd: 0 },
@@ -295,6 +299,7 @@ async function saveMessages(batch) {
   let saved = 0, mediaQueued = 0, mediaSkipped = 0;
 
   const ia = await getIAState();
+  const bloqueados = await getBloqueadosCache();
 
   const db = await openDB();
   try {
@@ -354,12 +359,16 @@ async function saveMessages(batch) {
           continue;
         }
 
+        // Freno (Punto 3): chat bloqueado → nunca se procesa, ni con realtime ON.
+        if (bloqueados.has(msg.chat_id)) continue;
         const isWhitelisted = chatIsWhitelisted(msg.chat_id, ia.whitelist);
-        const isRealtime = ia.realtimeEnabled;
-        if (!isWhitelisted && !isRealtime) {
-          // Chat no autorizado y realtime OFF: NO encolar (el msg queda media_pending,
-          // listo para procesar cuando el usuario clickee "Procesar este chat" o
-          // active "Tiempo real").
+        // Realtime procesa de ahora en adelante: los mensajes anteriores al
+        // momento en que se prendió quedan para el "Procesar" manual.
+        const isRealtimeMsg = ia.realtimeEnabled && (msg.timestamp_ms || 0) >= (ia.realtimeSince || 0);
+        if (!isWhitelisted && !isRealtimeMsg) {
+          // Chat no autorizado y realtime OFF (o mensaje viejo): NO encolar (el msg
+          // queda media_pending, listo para cuando se clickee "Procesar" o se
+          // prenda "Tiempo real").
           continue;
         }
 
@@ -1750,7 +1759,10 @@ chrome.alarms.create(BACKFILL_TICK_NAME, { periodInMinutes: 0.5 });   // cada 30
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_NAME) {
     drainQueue();
-    // Visor PG v5.0+: NO sync automático. Solo drain de captura local.
+    // Tiempo real (Punto 2): syncToVisorPG se auto-regula — con realtime ON
+    // sube a Supabase los mensajes nuevos de todos los chats no bloqueados;
+    // con realtime OFF es no-op (el procesamiento manual lo hace procesarChat).
+    if (typeof syncToVisorPG === 'function') syncToVisorPG();
   }
   if (alarm.name === BACKFILL_TICK_NAME) {
     await fireBackfillTicks();
@@ -1782,6 +1794,6 @@ async function fireBackfillTicks() {
 }
 
 // ─── Init ─────────────────────────────────────────────────────────
-console.log('[WS-BG-V2] background.v2.js cargado · sync Supabase cada ' + SUPABASE_SYNC_INTERVAL_MS + 'ms');
+console.log('[WS-BG-V2] background.v2.js cargado · sync tiempo real vía alarm cada ' + ALARM_PERIOD_MIN + ' min');
 drainQueue();
-syncBatchToSupabase();
+syncToVisorPG();

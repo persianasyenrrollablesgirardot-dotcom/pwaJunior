@@ -776,7 +776,11 @@ async function setKeysFromVisor({ supabaseKey, openaiKey, deepseekKey }) {
 // del background.v2.js ya lo lee. Persiste entre reinicios de Chrome.
 async function setRealtimeFlag(enabled) {
   const on = !!enabled;
-  await chrome.storage.local.set({ ws_v2_ia_realtime_enabled: on });
+  const patch = { ws_v2_ia_realtime_enabled: on };
+  // Al prender, marcar el momento: solo se procesan los mensajes de ahora en
+  // adelante. El histórico viejo de un chat se sube con "Procesar".
+  if (on) patch.ws_v2_ia_realtime_since = Date.now();
+  await chrome.storage.local.set(patch);
   console.log('[VPG-API] V3_SET_REALTIME:', on ? 'ON' : 'OFF');
   return { ok: true, realtime: on };
 }

@@ -179,11 +179,20 @@ async function syncToVisorPG() {
       return;
     }
 
+    // syncToVisorPG es el MOTOR DE TIEMPO REAL: solo corre con realtime ON.
+    // El procesamiento manual de un chat lo hace procesarChat() (extension_api.js).
     const ia = await getIAState();
-    const whitelist = new Set(ia.whitelist || []);
-    if (whitelist.size === 0) return;   // nada autorizado → sync skip
+    if (!ia.realtimeEnabled) return;
+    const realtimeSince = ia.realtimeSince || 0;
+    const bloqueados = (typeof getBloqueadosCache === 'function')
+      ? await getBloqueadosCache()
+      : new Set();
+    const chatPermitido = (chatId) =>
+      !!chatId && !chatId.includes('status@broadcast') && !bloqueados.has(chatId);
 
-    // 1. Tomar mensajes ready_to_sync de chats autorizados
+    // 1. Tomar mensajes ready_to_sync — TODOS los chats no bloqueados (Punto 2),
+    //    pero solo los posteriores al momento en que se prendió tiempo real.
+    //    Un chat bloqueado deja de subir sus mensajes al instante (Punto 3).
     const ready = await tx('messages', 'readonly', async store => {
       const idx = store.index('by_state');
       const out = [];
@@ -192,7 +201,10 @@ async function syncToVisorPG() {
         cursor.onsuccess = (e) => {
           const cur = e.target.result;
           if (!cur || out.length >= 500) { res(); return; }
-          if (whitelist.has(cur.value.chat_id)) out.push(cur.value);
+          const m = cur.value;
+          if (chatPermitido(m.chat_id) && (m.timestamp_ms || 0) >= realtimeSince) {
+            out.push(m);
+          }
           cur.continue();
         };
         cursor.onerror = () => res();
