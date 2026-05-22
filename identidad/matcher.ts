@@ -95,10 +95,15 @@ export class IdentidadService {
       return null;
     }
 
-    let persona = await this.matchExactoPersona(personaJid);
+    const match = await this.matchExactoPersona(personaJid);
+    let persona: { id: number; nombre: string | null };
     let fueCreado = false;
+    let cruceTelefono = false;
 
-    if (!persona) {
+    if (match) {
+      persona = { id: match.id, nombre: match.nombre };
+      cruceTelefono = match.matchedBy === 'telefono';
+    } else {
       persona = await this.crearPersonaDesdeJid(personaJid, chat.titulo, chat.ambito);
       fueCreado = true;
     }
@@ -106,8 +111,22 @@ export class IdentidadService {
     // 3. Asegurar proyecto del chat
     let proyectoId = chat.proyecto_id;
     if (!proyectoId) {
-      proyectoId = await this.crearProyectoParaChat(persona.id, chat);
-      // Asociar el chat al proyecto creado
+      // F7.2 — cruce automático: si la persona ya tiene un proyecto que Jhon
+      // registró a mano por Junior y todavía sin chat, el chat de WhatsApp se
+      // engancha a ESE proyecto en vez de crear uno duplicado. Así el cliente
+      // del local conserva un único expediente al escribir luego por WhatsApp.
+      const proyManual = await this.proyectoManualReutilizable(persona.id);
+      if (proyManual) {
+        proyectoId = proyManual;
+        console.log(
+          `[IDENTIDAD] cruce automático — chat ${chat.id} enganchado al proyecto ` +
+          `manual ${proyManual} de la persona ${persona.id}` +
+          `${cruceTelefono ? ' (reconocida por teléfono)' : ''}`,
+        );
+      } else {
+        proyectoId = await this.crearProyectoParaChat(persona.id, chat);
+      }
+      // Asociar el chat al proyecto resuelto
       await this.sb.from('chats').update({ proyecto_id: proyectoId }).eq('id', chat.id);
     }
 
@@ -140,7 +159,9 @@ export class IdentidadService {
 
   // ─── Match exacto ──────────────────────────────────────────────────────
 
-  private async matchExactoPersona(jid: string): Promise<{ id: number; nombre: string | null } | null> {
+  private async matchExactoPersona(
+    jid: string,
+  ): Promise<{ id: number; nombre: string | null; matchedBy: 'jid' | 'telefono' } | null> {
     // 1. Match por jid
     const { data: porJid } = await this.sb
       .from('personas')
@@ -149,9 +170,12 @@ export class IdentidadService {
       .is('deleted_at', null)
       .limit(1)
       .maybeSingle();
-    if (porJid) return porJid;
+    if (porJid) return { ...porJid, matchedBy: 'jid' };
 
-    // 2. Match por telefono normalizado
+    // 2. Match por telefono normalizado — F7.2: este es el CRUCE automático.
+    // La persona la registró Jhon a mano por Junior (tiene telefono pero aún
+    // sin jid) y ahora escribe por WhatsApp → la reconocemos y la unimos en
+    // vez de crear un cliente duplicado.
     const tel = jidToTelefonoE164(jid);
     if (tel) {
       const { data: porTel } = await this.sb
@@ -164,10 +188,39 @@ export class IdentidadService {
       if (porTel) {
         // Encontramos por teléfono pero sin jid asociado → asociar para futuras búsquedas
         await this.sb.from('personas').update({ jid }).eq('id', porTel.id);
-        return porTel;
+        return { ...porTel, matchedBy: 'telefono' };
       }
     }
 
+    return null;
+  }
+
+  // ─── F7.2: reutilizar proyecto registrado a mano ───────────────────────
+
+  /**
+   * Busca un proyecto que Jhon registró a mano (origen='manual') para esta
+   * persona, que siga abierto y todavía sin ningún chat enganchado. Devuelve
+   * su id para reutilizarlo en el cruce automático, o null si no hay.
+   */
+  private async proyectoManualReutilizable(personaId: number): Promise<number | null> {
+    const { data: proys } = await this.sb
+      .from('proyectos')
+      .select('id')
+      .eq('persona_id', personaId)
+      .eq('origen', 'manual')
+      .in('estado', ['abierto', 'en_progreso'])
+      .is('deleted_at', null)
+      .order('fecha_apertura', { ascending: false });
+    if (!proys || proys.length === 0) return null;
+
+    for (const p of proys) {
+      const { count } = await this.sb
+        .from('chats')
+        .select('id', { count: 'exact', head: true })
+        .eq('proyecto_id', p.id)
+        .is('deleted_at', null);
+      if (!count) return p.id;          // proyecto manual sin chat → reutilizable
+    }
     return null;
   }
 

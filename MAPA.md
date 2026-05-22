@@ -3,7 +3,7 @@
 > **Documento de progreso vivo.** Se actualiza con cada fase completada o decisión nueva.
 > Si se va la luz: leer `README.md` (contexto, 5 min) → `VISION.md` (qué) → `ARQUITECTURA.md` (cómo) → este `MAPA.md` (dónde) → retomar.
 >
-> **Última actualización:** 2026-05-21 (FASE 7: clientes manuales + módulo Junior con pestañas)
+> **Última actualización:** 2026-05-22 (FASE 7: F7.2 cruce automático por teléfono)
 > **Owner:** Jhon Cubides
 
 ---
@@ -36,7 +36,7 @@
 ### Fase activa
 **FASE 7 — Clientes manuales y cruce con WhatsApp** (2026-05-21, en progreso)
 
-Junior puede registrar clientes que NO llegan por WhatsApp (vienen al local, llaman, contactan por otro medio). Plan de 3 partes; esta entrega la parte 1.
+Junior puede registrar clientes que NO llegan por WhatsApp (vienen al local, llaman, contactan por otro medio). Plan de 3 partes; entregadas F7.1, F7.1b y F7.2, queda F7.3.
 
 - **F7.1 Junior crea clientes manuales ✅ (2026-05-21)**
   - Migración `031`: `personas.origen` (`'whatsapp'` / `'manual'`).
@@ -49,7 +49,11 @@ Junior puede registrar clientes que NO llegan por WhatsApp (vienen al local, lla
   - Migración `032`: tabla `junior_instrucciones`. El worker registra cada instrucción dada por chat (cliente nuevo, corrección, preferencia) con tipo, fecha, cliente afectado y vínculo al mensaje. La pestaña la muestra — como es un visor, lo dictado por chat queda documentado y visible.
   - Verificado E2E: los 3 tipos de instrucción se registran.
 
-- **Pendiente F7.2** — cruce automático por teléfono: cuando el cliente escribe por WhatsApp, `matcher.ts` ya lo une si el teléfono coincide.
+- **F7.2 Cruce automático por teléfono ✅ (2026-05-22)**
+  - Cuando un cliente registrado a mano (F7.1) escribe luego por WhatsApp, `matcher.ts` lo reconoce por el teléfono (`telefono_e164`), le asocia el `jid` y —lo clave— engancha el chat de WhatsApp al proyecto manual existente en vez de crear uno duplicado. El cliente del local queda con un único expediente. La persona conserva `origen='manual'` como historial de cómo entró.
+  - `matchExactoPersona` reporta si matcheó por `jid` o por `telefono`; `proyectoManualReutilizable` busca el proyecto `origen='manual'` abierto y sin chat para reusarlo.
+  - Verificado E2E (`test_f72_cruce_telefono.ts`, 12/12): escenario de cruce + regresión de cliente nuevo sin registro previo.
+
 - **Pendiente F7.3** — cruce asistido: Junior detecta el posible duplicado (por nombre, vía A3_IDENTIDAD) y le pregunta a Jhon para confirmar la fusión.
 
 ---
@@ -436,6 +440,7 @@ Para detalle completo ver `ARQUITECTURA.md` sección 44.
 | 2026-05-21 | **Fix — Junior daba falso negativo con clientes recién capturados**: si una persona existía pero los analistas aún no habían generado su síntesis (ventana de ~3 min tras capturar el chat), Junior afirmaba que "no existe / no hay datos". Ahora `construirContextoClientes` incluye a esas personas con marca "⏳ análisis en generación" → Junior responde "su análisis se está generando, preguntá en un minuto". No era pérdida de datos: era una carrera entre captura y síntesis |
 | 2026-05-21 | **F7.1 — Junior crea clientes manuales** (migración `031`): cliente que llega al local / por otro medio se registra dictándoselo a Junior. Línea `[NUEVO_CLIENTE]` + correcciones con `persona_id=0`. El worker crea la persona `origen='manual'` + proyecto; los analistas sintetizan clientes sin chat de WhatsApp. Primera parte del plan de 3 (clientes manuales + cruce con WhatsApp) |
 | 2026-05-21 | **F7.1b — Módulo Junior con pestañas** (migración `032`): el módulo Junior pasa a contenedor con pestañas `Chat` \| `Instrucciones por chat`. Tabla `junior_instrucciones` registra cada instrucción dada por chat (cliente nuevo, corrección, preferencia); la pestaña la muestra documentada. Base para futuras pestañas (checklist, tareas) |
+| 2026-05-22 | **F7.2 — Cruce automático por teléfono**: el cliente registrado a mano que luego escribe por WhatsApp se reconoce por `telefono_e164`; `matcher.ts` le asocia el `jid` y engancha el chat al proyecto manual existente en vez de duplicarlo → un único expediente por cliente. Verificado E2E (`test_f72_cruce_telefono.ts`, 12/12) |
 
 ---
 
