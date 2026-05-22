@@ -4,17 +4,20 @@
  * Contenedor con pestañas de gestión:
  *  - Chat: la conversación con Junior.
  *  - Instrucciones por chat: registro visible de todo lo que Jhon le dictó.
- * Más adelante se suman otras (checklist, tareas) agregando pestañas acá.
+ *  - Checklist por chat: estado de cada conversación (quién tiene la pelota).
+ * Más adelante se suma Tareas agregando una pestaña acá.
  */
 import { useState } from 'react';
 import { JuniorChat } from './JuniorChat';
 import { JuniorInstrucciones } from './JuniorInstrucciones';
+import { JuniorChecklist } from './JuniorChecklist';
 
-type Tab = 'chat' | 'instrucciones';
+type Tab = 'chat' | 'instrucciones' | 'checklist';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'chat', label: '💬 Chat' },
   { id: 'instrucciones', label: '📋 Instrucciones por chat' },
+  { id: 'checklist', label: '✅ Checklist por chat' },
 ];
 
 export function Junior() {
@@ -59,7 +62,9 @@ export function Junior() {
 
       {/* Contenido de la pestaña activa */}
       <div style={{ flex: 1, overflow: 'hidden' }}>
-        {tab === 'chat' ? <JuniorChat /> : <JuniorInstrucciones />}
+        {tab === 'chat' && <JuniorChat />}
+        {tab === 'instrucciones' && <JuniorInstrucciones />}
+        {tab === 'checklist' && <JuniorChecklist />}
       </div>
     </div>
   );

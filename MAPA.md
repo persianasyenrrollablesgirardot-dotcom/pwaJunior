@@ -3,7 +3,7 @@
 > **Documento de progreso vivo.** Se actualiza con cada fase completada o decisión nueva.
 > Si se va la luz: leer `README.md` (contexto, 5 min) → `VISION.md` (qué) → `ARQUITECTURA.md` (cómo) → este `MAPA.md` (dónde) → retomar.
 >
-> **Última actualización:** 2026-05-22 (FASE 7 COMPLETA — F7.3 cruce asistido de duplicados)
+> **Última actualización:** 2026-05-22 (FASE 8 — Módulo Checklist por chat)
 > **Owner:** Jhon Cubides
 
 ---
@@ -34,6 +34,19 @@
 ## ESTADO ACTUAL
 
 ### Fase activa
+**FASE 8 — Módulo Checklist por chat** (2026-05-22, ✅ COMPLETA)
+
+Nueva pestaña en el módulo Junior (`Chat` | `Instrucciones por chat` | `Checklist por chat`). Tablero de "¿quién tiene la pelota?": el estado de cada conversación.
+
+- **Agente `A_CHECKLIST`** (`agentes/sintesis/checklist.ts`) — lee la conversación de un chat y produce: el tipo (venta / garantía / consulta) con su checklist de pasos secuencial, el estado (🔴 sin responder · 🟠 te toca · ⚪ frío · 🔵 esperando cliente · 🟢 cerrada), el próximo paso concreto y los compromisos que el negocio prometió y no cumplió.
+- **Tabla `chat_checklist`** (migración `034`) — una fila por chat, regenerada entera en cada corrida (síntesis, no gestión manual).
+- **Worker** `cicloChecklist` (cada 45 s) — analiza los chats con actividad nueva, máx 4 por ciclo para acotar costo.
+- **UI** `JuniorChecklist.tsx` — semáforo de conteos, sección de compromisos pendientes, y los chats en dos grupos: "Te toca a vos" / "No te toca". Cada tarjeta expande su checklist con el paso pendiente marcado TE TOCA / ESPERA AL CLIENTE.
+- Verificado E2E (`test_checklist.ts`, 10/10): clasificación de tipo, estado y detección de compromisos.
+- **Próximo:** el módulo de Tareas se alimenta de acá — cada paso pendiente de Jhon y cada compromiso incumplido es una tarea.
+
+---
+
 **FASE 7 — Clientes manuales y cruce con WhatsApp** (2026-05-21 → 2026-05-22, ✅ COMPLETA)
 
 Junior puede registrar clientes que NO llegan por WhatsApp (vienen al local, llaman, contactan por otro medio) y el sistema evita duplicarlos. Plan de 3 partes: F7.1, F7.1b, F7.2 y F7.3 entregadas — FASE 7 cerrada.
@@ -447,6 +460,7 @@ Para detalle completo ver `ARQUITECTURA.md` sección 44.
 | 2026-05-22 | **F7.2 — Cruce automático por teléfono**: el cliente registrado a mano que luego escribe por WhatsApp se reconoce por `telefono_e164`; `matcher.ts` le asocia el `jid` y engancha el chat al proyecto manual existente en vez de duplicarlo → un único expediente por cliente. Verificado E2E (`test_f72_cruce_telefono.ts`, 12/12) |
 | 2026-05-22 | **F7.3 Parte A — Junior pregunta antes de duplicar un cliente**: si Jhon dicta un cliente cuyo nombre ya está (igual o parecido) en la lista, Junior pregunta en el chat si es la misma persona antes de registrarlo. Sección CLIENTE NUEVO del prompt reestructurada en 2 pasos. E2E 6/6 |
 | 2026-05-22 | **F7.3 Parte B — Duplicados de WhatsApp en el chat** (migración `033` `duplicados_detectados`): A3_IDENTIDAD registra los duplicados que detecta; Junior los plantea y, con la confirmación de Jhon (`[RESOLVER_DUPLICADO]`), el worker fusiona las personas (`identidad/fusionar_personas.ts`: mueve todo al sobreviviente + hereda el jid). Cierra la FASE 7. E2E 10/10 |
+| 2026-05-22 | **FASE 8 — Módulo Checklist por chat** (migración `034` `chat_checklist`): nueva pestaña en Junior con el estado de cada conversación (sin responder / te toca / frío / esperando cliente / cerrada), checklist adaptativo por tipo (venta/garantía/consulta) y compromisos incumplidos. Agente `A_CHECKLIST` + `cicloChecklist` (45 s). Base del futuro módulo de Tareas. E2E 10/10 |
 
 ---
 

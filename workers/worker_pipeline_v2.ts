@@ -54,6 +54,7 @@ import {
 } from '../agentes/lib/pipeline.js';
 import { registrarTodosLosAgentes } from '../agentes/registro_agentes.js';
 import { sintetizarPersona } from '../agentes/sintesis/analistas.js';
+import { analizarChecklist } from '../agentes/sintesis/checklist.js';
 import { responderJunior, type NuevoCliente } from '../agentes/sintesis/junior_chat.js';
 import { fusionarPersonas } from '../identidad/fusionar_personas.js';
 
@@ -83,9 +84,11 @@ const AGENT_ONLY      = (ARGS.find(a => a.startsWith('--agent-only='))?.split('=
 const POLL_EXTRACTOR_MS   = 10_000;
 const POLL_IDENTIDAD_MS   = 5_000;
 const POLL_PIPELINE_MS    = 5_000;
+const POLL_CHECKLIST_MS   = 45_000;
 const BATCH_EXTRACTOR     = 200;
 const BATCH_IDENTIDAD     = 20;
 const BATCH_PIPELINE      = 20;
+const MAX_CHECKLIST_POR_CICLO = 4;
 const PARALLEL_CHATS      = 3;
 const STATS_INTERVAL_MS   = 30_000;
 const QUERY_TIMEOUT_MS    = 10_000;
@@ -635,6 +638,62 @@ async function cicloJuniorChat(): Promise<void> {
   }
 }
 
+// ═══ Ciclo Checklist — estado conversacional de cada chat ════════════════════
+// El agente A_CHECKLIST analiza los chats con actividad nueva: decide de quién
+// es la pelota, marca el flujo de pasos y detecta compromisos sin cumplir.
+let checklistEnCurso = false;
+async function cicloChecklist(): Promise<void> {
+  if (checklistEnCurso) return;
+  checklistEnCurso = true;
+  try {
+    const { data: chats } = await sb.from('chats')
+      .select('id').eq('tipo', 'individual').is('deleted_at', null);
+    if (!chats || chats.length === 0) return;
+
+    // Último mensaje por chat (de los más recientes de la BD).
+    const { data: recientes } = await sb.from('mensajes')
+      .select('chat_id, ts_canal').is('deleted_at', null)
+      .order('ts_canal', { ascending: false }).limit(1500);
+    const ultimoPorChat = new Map<number, string>();
+    for (const m of recientes ?? []) {
+      if (!ultimoPorChat.has(m.chat_id)) ultimoPorChat.set(m.chat_id, m.ts_canal as string);
+    }
+
+    // Estado ya analizado por chat.
+    const { data: cks } = await sb.from('chat_checklist').select('chat_id, ultimo_mensaje_ts');
+    const analizadoPorChat = new Map<number, string | null>();
+    for (const c of cks ?? []) analizadoPorChat.set(c.chat_id, c.ultimo_mensaje_ts);
+
+    // Chats con actividad nueva (mensaje más nuevo que el último analizado).
+    const necesitan: number[] = [];
+    for (const ch of chats) {
+      const ultimoMsg = ultimoPorChat.get(ch.id);
+      if (!ultimoMsg) continue;                        // chat sin mensajes
+      const analizado = analizadoPorChat.get(ch.id);
+      if (!analizadoPorChat.has(ch.id) || !analizado ||
+          new Date(ultimoMsg).getTime() > new Date(analizado).getTime()) {
+        necesitan.push(ch.id);
+      }
+      if (necesitan.length >= MAX_CHECKLIST_POR_CICLO) break;
+    }
+
+    let costo = 0;
+    for (const chatId of necesitan) {
+      try {
+        const r = await analizarChecklist(sb, chatId);
+        costo += r.costo_usd;
+      } catch (e: any) {
+        console.error(`[V2/CHK] chat ${chatId}: ${e.message}`);
+      }
+    }
+    if (necesitan.length > 0) {
+      console.log(`[V2/CHK] checklist actualizado para ${necesitan.length} chat(s) · $${costo.toFixed(4)}`);
+    }
+  } finally {
+    checklistEnCurso = false;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════
@@ -710,6 +769,7 @@ async function main() {
   if (!SKIP_IDENTIDAD) setInterval(() => { cicloIdentidad().catch(e => console.error('[V2/ID]', e?.message)); }, POLL_IDENTIDAD_MS);
   if (!SKIP_PIPELINE)  setInterval(() => { cicloPipeline().catch(e => console.error('[V2/PI]', e?.message)); }, POLL_PIPELINE_MS);
   setInterval(() => { cicloJuniorChat().catch(e => console.error('[V2/JUNIOR]', e?.message)); }, 3000);
+  setInterval(() => { cicloChecklist().catch(e => console.error('[V2/CHK]', e?.message)); }, POLL_CHECKLIST_MS);
 
   setInterval(() => console.log(`[V2] stats: ${JSON.stringify(stats)}`), STATS_INTERVAL_MS);
 
