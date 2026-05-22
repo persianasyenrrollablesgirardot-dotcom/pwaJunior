@@ -3,7 +3,7 @@
 > **Documento de progreso vivo.** Se actualiza con cada fase completada o decisión nueva.
 > Si se va la luz: leer `README.md` (contexto, 5 min) → `VISION.md` (qué) → `ARQUITECTURA.md` (cómo) → este `MAPA.md` (dónde) → retomar.
 >
-> **Última actualización:** 2026-05-22 (FASE 8 — Módulo Checklist por chat)
+> **Última actualización:** 2026-05-22 (FASE 9 — Procesamiento en tiempo real)
 > **Owner:** Jhon Cubides
 
 ---
@@ -34,6 +34,18 @@
 ## ESTADO ACTUAL
 
 ### Fase activa
+**FASE 9 — Procesamiento en tiempo real** (2026-05-22, ✅ COMPLETA — falta validación de Jhon)
+
+El botón "IA Tiempo real" del TopBar ahora funciona: con un toque, el sistema captura y procesa todos los chats automáticamente, sin el "Procesar" manual chat por chat. Plan de 3 puntos:
+
+- **Punto 1 — botón activado:** el toggle del TopBar dejó de ser placeholder muerto. Guarda `ia_modo_global` en `configuracion_sistema` y le empuja el flag a la extensión (handler nuevo `V3_SET_REALTIME`). Al cargar el Visor, sincroniza el modo guardado.
+- **Punto 2 — captura opt-out:** la extensión deja de ser lista blanca. Con realtime ON, `syncToVisorPG` sube a Supabase los mensajes nuevos de TODOS los chats. Se cableó `syncToVisorPG` al `alarm` (cada 30 s) y al arranque — antes no corría ningún sync automático al esquema nuevo (el comentario "no se conecta" estaba desactualizado, pero el cableado faltaba).
+- **Punto 3 — bloqueo = freno:** los chats en `chats_bloqueados` quedan fuera del sync (`syncToVisorPG`) y del encolado de media (`saveMessages`). Bloquear un chat detiene su procesamiento al instante.
+- Procesa **de ahora en adelante** (`ws_v2_ia_realtime_since` marca el encendido): el histórico viejo se sigue subiendo con "Procesar". El tope de $5/día sigue como red de seguridad.
+- ⚠ **Requiere recargar la extensión** en `chrome://extensions/` (paso manual de Jhon). La validación E2E es Jhon usando WhatsApp real con el modo prendido.
+
+---
+
 **FASE 8 — Módulo Checklist por chat** (2026-05-22, ✅ COMPLETA)
 
 Nueva pestaña en el módulo Junior (`Chat` | `Instrucciones por chat` | `Checklist por chat`). Tablero de "¿quién tiene la pelota?": el estado de cada conversación.
@@ -461,6 +473,7 @@ Para detalle completo ver `ARQUITECTURA.md` sección 44.
 | 2026-05-22 | **F7.3 Parte A — Junior pregunta antes de duplicar un cliente**: si Jhon dicta un cliente cuyo nombre ya está (igual o parecido) en la lista, Junior pregunta en el chat si es la misma persona antes de registrarlo. Sección CLIENTE NUEVO del prompt reestructurada en 2 pasos. E2E 6/6 |
 | 2026-05-22 | **F7.3 Parte B — Duplicados de WhatsApp en el chat** (migración `033` `duplicados_detectados`): A3_IDENTIDAD registra los duplicados que detecta; Junior los plantea y, con la confirmación de Jhon (`[RESOLVER_DUPLICADO]`), el worker fusiona las personas (`identidad/fusionar_personas.ts`: mueve todo al sobreviviente + hereda el jid). Cierra la FASE 7. E2E 10/10 |
 | 2026-05-22 | **FASE 8 — Módulo Checklist por chat** (migración `034` `chat_checklist`): nueva pestaña en Junior con el estado de cada conversación (sin responder / te toca / frío / esperando cliente / cerrada), checklist adaptativo por tipo (venta/garantía/consulta) y compromisos incumplidos. Agente `A_CHECKLIST` + `cicloChecklist` (45 s). Base del futuro módulo de Tareas. E2E 10/10 |
+| 2026-05-22 | **FASE 9 — Procesamiento en tiempo real**: el botón "IA Tiempo real" del TopBar funciona. Captura opt-out (todos los chats menos los bloqueados), `syncToVisorPG` cableado al alarm de la extensión (antes no corría sync automático), bloqueo como freno instantáneo. Procesa de ahora en adelante (`ws_v2_ia_realtime_since`). Requiere recargar la extensión en Chrome |
 
 ---
 
