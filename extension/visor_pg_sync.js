@@ -65,6 +65,220 @@ function jidToTelefono(jid) {
   return null;
 }
 
+// ─── Título de respaldo y corrector de nombres @lid (FASE 9 fix) ──────
+// Placeholder visible para un chat @lid cuyo nombre humano aún no llegó.
+const TITULO_PENDIENTE = '⏳ Identificando…';
+
+// Título de respaldo cuando la metadata todavía no trae el nombre humano.
+// Para @c.us el número ES el teléfono real y sí identifica al cliente.
+// Para @lid el número es un identificador opaco e inútil como nombre →
+// usamos un placeholder; reconciliarContactos lo reemplaza al llegar el
+// nombre, así el cliente nunca aparece como un número largo sin sentido.
+function tituloFallback(jid) {
+  if (!jid) return 'desconocido';
+  if (jid.endsWith('@lid'))  return TITULO_PENDIENTE;
+  if (jid.endsWith('@g.us')) return 'Grupo sin nombre';
+  return jid.replace(/@.*$/, '') || 'desconocido';
+}
+self.tituloFallback = tituloFallback;
+
+// ¿El valor es un nombre PROVISIONAL (identificador crudo / placeholder) y
+// no un nombre humano real? Garantiza que el corrector nunca pise un nombre
+// bueno: un nombre real ("Nancy Bermúdez") o un teléfono ("+57…") no matchea.
+function esTituloProvisional(valor, jid) {
+  if (!valor) return true;
+  const crudo = String(jid || '').replace(/@.*$/, '');
+  return valor === crudo
+      || valor === jid
+      || valor === TITULO_PENDIENTE
+      || valor === 'desconocido'
+      || /^\d{6,}$/.test(valor);
+}
+
+// Corrector universal de contactos (reemplaza al corrector @lid parcial).
+//
+// Repasa cada 20 s (desde saveChatMetadata) lo que la extensión SÍ sabe de
+// WhatsApp Web vs lo que quedó guardado en Supabase, y reconcilia:
+//   - chats.titulo          cuando es provisional (número crudo, jid, placeholder…)
+//   - personas.nombre       cuando es provisional
+//   - personas.telefono_e164 cuando está null y la metadata tiene phoneNumber
+//
+// Cubre AMBOS tipos de JID (@c.us y @lid) sin discriminar — el filtro es por
+// VALOR del campo, no por forma del JID. Marca personas.sintesis_pendiente
+// para que el worker re-analice al toque.
+//
+// Garantías "sin romper nada":
+//   - esTituloProvisional() solo reconoce valores provisionales conocidos.
+//     Un nombre real ("Maritza Jhon", "Casa 64 Claudia", teléfono "+57…")
+//     NUNCA matchea → no se toca.
+//   - PATCH con filtro doble &col=eq.<valorExactoLeído>: si entre el GET y
+//     el PATCH el valor cambió (corrección manual paralela), no afecta filas.
+//   - Teléfono: filtro &telefono_e164=is.null → jamás pisa un teléfono manual.
+async function reconciliarContactos(metadataList, supabaseKey) {
+  if (!supabaseKey) return { nombres: 0, telefonos: 0 };
+
+  // Mapa jid → { name?, phoneNumber? } con valores VÁLIDOS solamente.
+  const mapa = new Map();
+  for (const md of metadataList || []) {
+    if (!md?.jid) continue;
+    const entry = {};
+    const nombre = String(md.name || md.verifiedName || '').trim();
+    if (nombre && !esTituloProvisional(nombre, md.jid)) entry.name = nombre;
+    const raw = typeof md.phoneNumber === 'string' ? md.phoneNumber.trim() : '';
+    if (/^[+]?\d{8,}$/.test(raw)) {
+      entry.phoneNumber = raw.startsWith('+') ? raw : '+' + raw;
+    }
+    if (entry.name || entry.phoneNumber) mapa.set(md.jid, entry);
+  }
+  if (mapa.size === 0) return { nombres: 0, telefonos: 0 };
+
+  const headers = { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` };
+  const patchHeaders = { ...headers, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' };
+
+  // PATCH idempotente: filtra por el valor EXACTO leído. Si cambió, no afecta.
+  async function patchExacto(tabla, idCol, idVal, valCol, valActual, valNuevo) {
+    const url = `${SUPABASE_URL}/rest/v1/${tabla}`
+      + `?${idCol}=eq.${encodeURIComponent(idVal)}`
+      + `&${valCol}=eq.${encodeURIComponent(valActual)}`;
+    const res = await fetch(url, {
+      method: 'PATCH', headers: patchHeaders,
+      body: JSON.stringify({ [valCol]: valNuevo }),
+    });
+    return res.ok;
+  }
+  // Teléfono: solo escribe si el actual es null (doble garantía en el server).
+  async function patchTelefono(jid, telefono) {
+    const url = `${SUPABASE_URL}/rest/v1/personas`
+      + `?jid=eq.${encodeURIComponent(jid)}&telefono_e164=is.null`;
+    const res = await fetch(url, {
+      method: 'PATCH', headers: patchHeaders,
+      body: JSON.stringify({ telefono_e164: telefono }),
+    });
+    return res.ok;
+  }
+
+  let nombresOK = 0, telefonosOK = 0;
+  const personasAfectadas = new Set();
+
+  // 1. chats.titulo — para CUALQUIER tipo de JID (sin discriminar @c.us/@lid).
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/chats?select=canal_chat_id,titulo&canal=eq.whatsapp`,
+      { headers });
+    if (res.ok) {
+      for (const c of await res.json()) {
+        const ent = mapa.get(c.canal_chat_id);
+        if (!ent?.name || ent.name === c.titulo) continue;
+        if (!esTituloProvisional(c.titulo, c.canal_chat_id)) continue;
+        if (await patchExacto('chats', 'canal_chat_id', c.canal_chat_id, 'titulo', c.titulo, ent.name)) {
+          nombresOK++;
+        }
+      }
+    }
+  } catch (e) { console.warn('[VPG-SYNC] reconciliar chats.titulo:', e.message); }
+
+  // 2. personas — nombre Y teléfono en una sola pasada.
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/personas?select=id,jid,nombre,telefono_e164`,
+      { headers });
+    if (res.ok) {
+      for (const p of await res.json()) {
+        const ent = mapa.get(p.jid);
+        if (!ent) continue;
+        let cambio = false;
+        // 2.a Nombre — solo si el actual es provisional.
+        if (ent.name && ent.name !== p.nombre && esTituloProvisional(p.nombre, p.jid)) {
+          if (await patchExacto('personas', 'jid', p.jid, 'nombre', p.nombre, ent.name)) {
+            nombresOK++;
+            cambio = true;
+          }
+        }
+        // 2.b Teléfono — solo si el actual es null.
+        if (ent.phoneNumber && p.telefono_e164 == null) {
+          if (await patchTelefono(p.jid, ent.phoneNumber)) {
+            telefonosOK++;
+            cambio = true;
+          }
+        }
+        if (cambio) personasAfectadas.add(p.id);
+      }
+    }
+  } catch (e) { console.warn('[VPG-SYNC] reconciliar personas:', e.message); }
+
+  // 3. Marcar sintesis_pendiente para que el worker re-sintetice al toque.
+  if (personasAfectadas.size > 0) {
+    try {
+      const ids = [...personasAfectadas].join(',');
+      await fetch(
+        `${SUPABASE_URL}/rest/v1/personas?id=in.(${ids})`,
+        { method: 'PATCH', headers: patchHeaders, body: JSON.stringify({ sintesis_pendiente: true }) },
+      );
+    } catch (e) { console.warn('[VPG-SYNC] marcar sintesis_pendiente:', e.message); }
+  }
+
+  return { nombres: nombresOK, telefonos: telefonosOK };
+}
+self.reconciliarContactos = reconciliarContactos;
+
+// Resucita un chat "eliminado" (soft-delete de eliminarChatProcesado): chat +
+// mensajes + evento_pg + proyecto + persona + inmueble. Los eventos vuelven a
+// estado='NUEVO' para que el worker los re-procese por el pipeline desde cero.
+// Idempotente: si ya están vivos, los PATCH son inocuos.
+async function resucitarChatSoftDeleted(supabaseKey, chatId, proyectoId) {
+  const h = {
+    'Content-Type':  'application/json',
+    'apikey':        supabaseKey,
+    'Authorization': `Bearer ${supabaseKey}`,
+    'Prefer':        'return=minimal',
+  };
+  const hGet = { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` };
+
+  // 1. Chat: resucitar + resetear ia_historico_procesado (el flujo lo marca true al final).
+  await fetch(`${SUPABASE_URL}/rest/v1/chats?id=eq.${chatId}`, {
+    method: 'PATCH', headers: h,
+    body: JSON.stringify({ deleted_at: null, ia_historico_procesado: false }),
+  });
+  // 2. Mensajes del chat.
+  await fetch(`${SUPABASE_URL}/rest/v1/mensajes?chat_id=eq.${chatId}`, {
+    method: 'PATCH', headers: h, body: JSON.stringify({ deleted_at: null }),
+  });
+  // 3. Eventos: revivir + resetear estado a NUEVO para re-procesar por el pipeline.
+  await fetch(`${SUPABASE_URL}/rest/v1/evento_pg?chat_id=eq.${chatId}`, {
+    method: 'PATCH', headers: h,
+    body: JSON.stringify({ deleted_at: null, estado: 'NUEVO', procesando_por: null, procesando_hasta: null }),
+  });
+
+  // 4. Proyecto/persona/inmueble que arrastró el soft-delete en cascada.
+  if (proyectoId) {
+    let personaId = null, inmuebleId = null;
+    try {
+      const r = await fetch(
+        `${SUPABASE_URL}/rest/v1/proyectos?id=eq.${proyectoId}&select=persona_id,inmueble_id`,
+        { headers: hGet });
+      if (r.ok) {
+        const [p] = await r.json();
+        personaId  = p?.persona_id  ?? null;
+        inmuebleId = p?.inmueble_id ?? null;
+      }
+    } catch (_) {}
+    await fetch(`${SUPABASE_URL}/rest/v1/proyectos?id=eq.${proyectoId}`, {
+      method: 'PATCH', headers: h, body: JSON.stringify({ deleted_at: null }),
+    });
+    if (personaId != null) {
+      await fetch(`${SUPABASE_URL}/rest/v1/personas?id=eq.${personaId}`, {
+        method: 'PATCH', headers: h, body: JSON.stringify({ deleted_at: null }),
+      });
+    }
+    if (inmuebleId != null) {
+      await fetch(`${SUPABASE_URL}/rest/v1/inmuebles?id=eq.${inmuebleId}`, {
+        method: 'PATCH', headers: h, body: JSON.stringify({ deleted_at: null }),
+      });
+    }
+  }
+}
+self.resucitarChatSoftDeleted = resucitarChatSoftDeleted;
+
 // UPSERT chat. Retorna chat_id_db.
 async function upsertChat({ supabaseKey, jid, titulo, isGroup }) {
   if (chatIdCache.has(jid)) return chatIdCache.get(jid);
@@ -125,6 +339,8 @@ function canonicalToMensajeRow(m, chatIdDb) {
       quoted_message_id:  m.quoted_message_id || null,
       quoted_sender_jid:  m.quoted_sender_jid || null,
       type_original:      m.type,
+      subtype:            m.subtype || null,
+      sys_raw:            m.sys_raw || null,
     },
     ts_canal:       tsCanal,
   };
@@ -151,6 +367,7 @@ function canonicalToEventoRow(m, chatIdDb) {
     payload:          {
       preview,
       tipo_canonical: m.type,
+      subtype:        m.subtype || null,
       tiene_media:    !!m.mimetype,
       autor_jid:      m.is_owner ? null : (m.sender_jid || m.chat_id || null),
     },
@@ -253,8 +470,7 @@ async function syncToVisorPG() {
         const titulo = md?.name
                     || md?.verifiedName
                     || md?.phoneNumber
-                    || (g.jid || '').replace(/@.*$/, '')
-                    || 'desconocido';
+                    || tituloFallback(g.jid);
         const isGroup = !!md?.isGroup || g.jid?.endsWith('@g.us');
 
         const chatIdDb = await upsertChat({ supabaseKey, jid: g.jid, titulo, isGroup });

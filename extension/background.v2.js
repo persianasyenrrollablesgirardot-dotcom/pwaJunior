@@ -328,6 +328,14 @@ async function saveMessages(batch) {
 
         if (msg.media) {
           msg.processing_state = msg.processing_state || prevState || 'media_pending';
+        } else if (msg.is_owner) {
+          // OUTGOING (vos lo escribiste): no hay nada que esperar a descifrar
+          // de la contraparte. Siempre ready_to_sync — el evento del mensaje
+          // saliente llega a Supabase de inmediato y los agentes (Junior,
+          // Checklist) saben que respondiste. Si el texto vino vacío porque
+          // la cache no tenía el plaintext y row.body tampoco, llega como
+          // evento sin texto — preferible perder el texto que perder el evento.
+          msg.processing_state = 'ready_to_sync';
         } else if (requiresText && !decOk && !hasText) {
           msg.processing_state = 'pending_decryption';
         } else if (prevState === 'pending_decryption' && (decOk || hasText)) {
@@ -1287,6 +1295,22 @@ async function saveChatMetadata(metadataList) {
   } finally {
     db.close();
   }
+
+  // Corrector universal de contactos: en cada refresh de metadata reconcilia
+  // chats.titulo + personas.nombre + personas.telefono_e164 para cualquier
+  // tipo de JID (@c.us / @lid). Definido en visor_pg_sync.js. Si falla, no
+  // interrumpe el guardado de metadata.
+  try {
+    const { supabaseKey } = await getSettings();
+    if (supabaseKey && typeof self.reconciliarContactos === 'function') {
+      const r = await self.reconciliarContactos(metadataList, supabaseKey);
+      const total = (r?.nombres || 0) + (r?.telefonos || 0);
+      if (total > 0) console.log(`[WS-BG-V2] corrector contactos: ${r.nombres} nombre(s) + ${r.telefonos} teléfono(s)`);
+    }
+  } catch (e) {
+    console.warn('[WS-BG-V2] corrector contactos falló:', e.message);
+  }
+
   return saved;
 }
 

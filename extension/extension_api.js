@@ -186,7 +186,7 @@ async function listarChats() {
     const s = stats.get(md.jid) || null;
     const isGroup = !!md.isGroup || md.jid.endsWith('@g.us');
     const isStatus = md.jid === 'status@broadcast';
-    const titulo = md.name || md.verifiedName || md.phoneNumber || md.jid.replace(/@.*$/, '');
+    const titulo = md.name || md.verifiedName || md.phoneNumber || tituloFallback(md.jid);
     const noCliente = s ? detectarNoCliente(s.textoConcatenado) : { tags: [], score: 0 };
 
     out.push({
@@ -263,20 +263,30 @@ async function procesarChat(jid) {
   const bloqueados = await getBloqueadosCache();
   if (bloqueados.has(jid)) return { error: 'chat bloqueado, desbloquéalo primero' };
 
-  // F1.22 fix I8: chequear si ya está procesado para evitar duplicate-key errors en logs
-  // y dejar al usuario claro que tiene que eliminar primero si quiere reprocesar.
+  // Chequeo del chat en BD — incluye soft-deleted para soportar "Eliminar y re-procesar".
+  //   - Vivo + ia_historico_procesado=true → ya procesado, hay que eliminar primero.
+  //   - Soft-deleted (post Eliminar) → resucitar antes de seguir: si no, los UPSERTs
+  //     e INSERTs con ignore-duplicates no des-eliminan nada y el chat nunca reaparece.
+  //   - No existe → caso normal, el flujo lo crea.
+  let chatPrevio = null;
   try {
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/chats?canal=eq.whatsapp&canal_chat_id=eq.${encodeURIComponent(jid)}&deleted_at=is.null&select=id,ia_historico_procesado`,
+      `${SUPABASE_URL}/rest/v1/chats?canal=eq.whatsapp&canal_chat_id=eq.${encodeURIComponent(jid)}&select=id,deleted_at,ia_historico_procesado,proyecto_id`,
       { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } },
     );
-    if (r.ok) {
-      const rows = await r.json();
-      if (rows?.[0]?.ia_historico_procesado === true) {
-        return { error: 'chat ya procesado anteriormente. Andá al módulo Captura y usá "🗑 Eliminar y re-procesar" si querés volver a subirlo.' };
-      }
+    if (r.ok) chatPrevio = (await r.json())[0] ?? null;
+  } catch (_) {}
+  if (chatPrevio && !chatPrevio.deleted_at && chatPrevio.ia_historico_procesado === true) {
+    return { error: 'chat ya procesado anteriormente. Andá al módulo Captura y usá "🗑 Eliminar y re-procesar" si querés volver a subirlo.' };
+  }
+  if (chatPrevio?.deleted_at && typeof self.resucitarChatSoftDeleted === 'function') {
+    try {
+      await self.resucitarChatSoftDeleted(supabaseKey, chatPrevio.id, chatPrevio.proyecto_id);
+      console.log(`[VPG-API] chat ${chatPrevio.id} (${jid}) resucitado tras eliminación previa`);
+    } catch (e) {
+      console.warn('[VPG-API] resucitar chat soft-deleted falló:', e?.message);
     }
-  } catch (_) {} // si falla el chequeo, no es crítico — seguimos con el flujo
+  }
 
   // 2. Cargar metadata + mensajes locales
   const meta = await tx('chat_metadata', 'readonly', async store => {
@@ -287,7 +297,7 @@ async function procesarChat(jid) {
   const mensajesLocal = await obtenerMensajes(jid, 100000);
   if (mensajesLocal.length === 0) return { error: 'chat sin mensajes capturados todavía' };
 
-  const titulo = meta.name || meta.verifiedName || meta.phoneNumber || jid.replace(/@.*$/, '');
+  const titulo = meta.name || meta.verifiedName || meta.phoneNumber || tituloFallback(jid);
   const isGroup = !!meta.isGroup || jid.endsWith('@g.us');
 
   // 3. Upsert chat → obtiene chat_id_db (función ya definida en visor_pg_sync.js)
@@ -537,7 +547,7 @@ async function transcribirMediaChat(jid) {
 
   // Resolver chat_id_db (cache o upsert)
   const meta = await tx('chat_metadata', 'readonly', s => reqAsync(s.get(jid)));
-  const titulo = meta?.name || meta?.verifiedName || meta?.phoneNumber || jid.replace(/@.*$/, '');
+  const titulo = meta?.name || meta?.verifiedName || meta?.phoneNumber || tituloFallback(jid);
   const isGroup = !!meta?.isGroup || jid.endsWith('@g.us');
   const chat_id_db = await upsertChat({ supabaseKey, jid, titulo, isGroup });
 

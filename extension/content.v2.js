@@ -214,6 +214,14 @@
   }
 
   // ─── Hydration: row de IndexedDB → CanonicalMessage ───────────────
+
+  // Tipos de mensaje con contenido humano. El resto se consideran de
+  // sistema (notificaciones, llamadas, cambios de grupo…).
+  const TIPOS_CONTENIDO = new Set([
+    'text', 'chat', 'extendedText', 'image', 'album', 'video',
+    'audio', 'ptt', 'document', 'location', 'live_location', 'vcard', 'sticker',
+  ]);
+
   async function hydrate(row) {
     if (!row || !row.id) return null;
 
@@ -239,6 +247,7 @@
       is_owner:     isOwnerMessage(row),
 
       type:         String(row.type || 'unknown'),
+      subtype:      row.subtype != null ? String(row.subtype) : null,
       text:         null,
       caption:      null,
       file_name:    null,
@@ -298,6 +307,21 @@
       msg.decryption_status = 'no_text';
     }
 
+    // ─ Fallback A: row.body en claro (solo tipos texto) ──────────────
+    // WhatsApp Web a veces guarda el texto del mensaje en `row.body` SIN
+    // pasar por el cifrado de la extensión — es lo común para outgoing
+    // (vos lo escribiste, está en claro localmente).
+    //
+    // ⚠ SOLO aplicar a tipos PURAMENTE de texto. Para image/video/document
+    // /location/etc., `row.body` puede traer el thumbnail en base64 (header
+    // JPEG '/9j/4AAQ…') y ensuciaría el campo texto. Esa fue la primera
+    // versión de este fix y metió ~40 filas con base64 en texto.
+    const esTipoTextoPuro = msg.type === 'chat' || msg.type === 'text' || msg.type === 'extendedText';
+    if (esTipoTextoPuro && !msg.text && typeof row.body === 'string' && row.body.trim()) {
+      msg.text = row.body;
+      if (msg.decryption_status !== 'success') msg.decryption_status = 'from_body';
+    }
+
     // ─ Media: si tiene mediaKey + directPath, guardamos metadata ────
     if (row.mediaKey && row.directPath) {
       // WA guarda duration como string ("59"). Forzamos a number — sin esto,
@@ -323,6 +347,21 @@
         download_status: 'pending',   // 'pending' | 'downloaded' | 'expired' | 'failed'
         ai_status:       'pending',   // 'pending' | 'processed' | 'skipped' | 'failed'
       };
+    }
+
+    // ─ Sistema: guardar el row crudo liviano para identificar la notificación ─
+    // Los mensajes de sistema (notification_template, call_log, gp2, e2e…) no
+    // tienen texto. El `type` genérico no distingue "llamada perdida" de
+    // "saliente" ni el motivo de un aviso. Guardamos una copia liviana del row
+    // crudo de WhatsApp (sin binarios) para poder describirlos con precisión.
+    if (!TIPOS_CONTENIDO.has(msg.type)) {
+      try {
+        msg.sys_raw = JSON.parse(JSON.stringify(row, (k, v) => {
+          if (v instanceof ArrayBuffer || ArrayBuffer.isView(v)) return undefined;
+          if (k === 'msgRowOpaqueData' || k === 'mediaKey' || k === '_data') return undefined;
+          return v;
+        }));
+      } catch (_) { /* row no serializable — sin sys_raw */ }
     }
 
     return msg;
