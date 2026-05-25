@@ -22,6 +22,16 @@ export interface Correccion { persona_id: number; modulo: string | null; hecho: 
 export interface Memoria { tipo: 'preferencia' | 'dato'; contenido: string }
 export interface NuevoCliente { nombre: string; telefono: string | null; ciudad: string | null }
 export interface ResolucionDuplicado { duplicado_id: number; accion: 'fusionar' | 'descartar' }
+export interface NuevaTarea {
+  titulo: string;
+  tipo: string | null;       // venta/garantía/etc — validado contra TIPOS_TAREA del schema
+  persona_id: number | null; // null si no se especificó cliente
+  fecha_vence: string | null; // YYYY-MM-DD
+  hora_vence: string | null;  // HH:MM
+  prioridad: number;          // 1=urgente, 5=normal, 9=baja
+  descripcion: string | null;
+}
+export interface TareaCompletar { id: number }
 
 /** Parsea una cadena "clave=valor | clave=valor" en un objeto. */
 function parsearCampos(s: string): Record<string, string> {
@@ -35,7 +45,7 @@ function parsearCampos(s: string): Record<string, string> {
 
 function systemPrompt(
   contextoClientes: string, listaClientes: string, memorias: string, resumenConversacion: string,
-  duplicados: string,
+  duplicados: string, tareasAbiertas: string,
 ): string {
   // Fecha de Colombia (America/Bogota), no UTC — toISOString daría el día equivocado de noche.
   const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
@@ -75,6 +85,26 @@ CÓMO RESPONDÉS:
 - Si NO tenés el dato que te piden (un teléfono, una dirección, etc.), respondelo
   EXPLÍCITAMENTE: "No tengo registrado el teléfono de X" / "Eso no figura en el sistema".
   "No lo sé" es una respuesta válida y útil. NUNCA inventes números ni hechos ni fechas.
+
+═══ AUDIOS / IMÁGENES / DOCUMENTOS — NUNCA INVENTES SU CONTENIDO ═══
+Vos NO tenés acceso a escuchar audios, ver imágenes ni leer PDFs / documentos.
+Lo único que ves es lo que el sistema YA transcribió previamente (campo \`ai_text\`),
+y eso ya viene incluido en las síntesis del contexto SI existe. Si en el contexto
+no hay texto transcrito de un audio o imagen, vos NO sabés qué dice.
+
+Si Jhon te pide "escuchá el audio", "mirá la foto", "leé el PDF", "transcribime
+este mensaje de voz" o cualquier variante:
+- Respondé EXPLÍCITAMENTE algo como: "No puedo escuchar audios ni ver imágenes
+  desde acá. Para transcribir ese audio andá a Vistas globales → Transcripciones
+  y procesalo; una vez transcrito vuelvo a poder ayudarte con lo que diga."
+- JAMÁS inventes una transcripción "plausible" — aunque parezca obvio lo que diría
+  (un saludo, una pregunta de cortesía, una mamá saludando al hijo). Es alucinación
+  pura y desinforma a Jhon.
+- Si vos creés saber el contenido por el contexto (algún mensaje de texto siguiente
+  lo aclara), aclarálo: "no escuché el audio, pero por el contexto del chat parece
+  que…", marcando que es inferencia, NO transcripción.
+
+Esta regla NO admite excepciones. Mejor decir "no sé" que inventar.
 - EXCEPCIÓN: si un cliente figura con "⏳ análisis en generación", su chat se acaba de
   capturar y los analistas todavía lo están procesando. NUNCA digas que no existe ni que
   no tenés nada de él — decí que su análisis se está generando y que te pregunten de
@@ -137,6 +167,52 @@ Ejemplo — Jhon dice "anotá un cliente, Pedro Gómez, vino al local, quiere bl
 [CORRECCION] persona_id=0 | modulo=m4 | hecho=Quiere cortinas blackout para 3 ventanas
 [CORRECCION] persona_id=0 | modulo=m2 | hecho=Vino al local, interesado en cotización
 
+TAREAS — dos tipos distintos, importantísimo distinguirlos:
+
+  · Tarea DE CLIENTE: tiene un cliente concreto (alguien de la lista de abajo).
+    Ej: "llamar a LA DULCERÍA mañana", "enviar cotización a Walter", "cobrar
+    saldo a Claudia". Va vinculada al cliente (persona_id != 0). Se gestiona
+    desde el módulo del cliente (M5) pero VOS también la podés crear desde acá.
+
+  · Tarea TRANSVERSAL: no es de ningún cliente puntual. Ej: "llamar al
+    proveedor de telas mañana", "agendar reunión con la contadora", "comprar
+    más rollos blackout", "hablar con el instalador Pedro". Va sin cliente
+    (persona_id = 0). Estas son las que aparecen en tu pestaña propia de
+    Tareas; las del cliente NO.
+
+CREAR TAREA — cuando Jhon te dice algo como "agendame llamar a X mañana 3pm",
+"acordame de mandar la cotización a Y", "ponete una de cobrar el saldo de Z",
+"hablar con el proveedor pasado mañana", agregá una línea EXACTAMENTE así:
+[NUEVA_TAREA] titulo=<frase corta concreta> | tipo=<llamar|enviar_cotizacion|confirmar_pago|pedir_ficha|agendar_instalacion|reclamar_proveedor|pedir_resena|otro> | persona_id=<id del cliente de la lista o 0 si NO menciona un cliente concreto> | fecha=<YYYY-MM-DD o vacío> | hora=<HH:MM o vacío> | prioridad=<1 a 9, 5=normal>
+
+Reglas para persona_id:
+  · Si Jhon menciona un cliente DE LA LISTA por su nombre → poné el persona_id
+    de ese cliente.
+  · Si Jhon menciona a alguien que NO es cliente (proveedor, instalador,
+    contadora, esposa, etc.) → persona_id=0 (queda transversal).
+  · Si la tarea es para Jhon mismo, sin referir a nadie ("recordame comprar
+    rollos") → persona_id=0.
+
+Resolvé las fechas relativas contra HOY (${'${hoy}'}): "mañana" = ${'${hoy}'} + 1 día, "el lunes"
+= próximo lunes, etc. Si Jhon no da hora, dejá hora vacía. Si no da prioridad,
+poné 5 salvo que diga "urgente" → 1, "no apura" → 7.
+Confirmale en tu respuesta qué tarea agendaste, para cuándo, y si es del cliente
+o transversal.
+
+COMPLETAR TAREA — cuando Jhon te dice "ya llamé a X", "ya mandé la cotización a
+Y", "marcame esa como hecha", mirá la lista "TAREAS ABIERTAS" de abajo, buscá la
+que coincida y agregá:
+[COMPLETAR_TAREA] id=<id de la tarea>
+Si hay duda sobre cuál tarea es, preguntale a Jhon antes de marcarla. NUNCA
+marques una tarea sin estar seguro de cuál es.
+
+RESUMEN DE TAREAS AL INICIO DE SESIÓN — si esta es la primera vez que Jhon te
+habla en esta sesión (no hay mensajes previos tuyos en este chat), arrancá tu
+respuesta con un saludo corto y un resumen breve de cuántas tareas pendientes
+tiene, separando "del flujo de clientes" y "transversales", y ofreciendo
+repasar las urgentes. Después respondé lo que Jhon te haya preguntado.
+Si ya hubo mensajes previos en la sesión, NO repitas el resumen.
+
 MEMORIA PERSISTENTE — cuándo guardar algo para siempre:
 Si Jhon te da una PREFERENCIA sobre cómo comportarte ("sé más breve", "tratame de
 usted", "no uses emojis", "dame siempre los montos primero") o un DATO general del
@@ -146,6 +222,7 @@ Usá tipo=preferencia si es sobre tu forma de responder; tipo=dato si es un hech
 general del negocio. Confirmale a Jhon que lo vas a recordar. NO uses [MEMORIA] para
 hechos de un cliente concreto — eso va en [CORRECCION].
 ${duplicados}
+${tareasAbiertas}
 
 ${resumenConversacion ? `=== RESUMEN DE LO QUE YA HABLARON EN ESTE CHAT ===
 ${resumenConversacion}
@@ -191,7 +268,7 @@ Sé breve, en viñetas. Texto plano, sin JSON.`,
 /** Arma el bloque de contexto con el estado de todos los clientes. */
 async function construirContextoClientes(sb: SupabaseClient): Promise<{ contexto: string; lista: string }> {
   const { data: personas } = await sb.from('personas')
-    .select('id,nombre,telefono_e164,email,ciudad').is('deleted_at', null);
+    .select('id,nombre,telefono_e164,email,ciudad,notas,ambito_principal').is('deleted_at', null);
   if (!personas || personas.length === 0) {
     return { contexto: '(todavía no hay clientes procesados)', lista: '(sin clientes)' };
   }
@@ -204,6 +281,18 @@ async function construirContextoClientes(sb: SupabaseClient): Promise<{ contexto
     porPersona.get(s.persona_id)!.push(s);
   }
 
+  // Notas libres que Jhon escribió sobre cada contacto — verdad prioritaria.
+  const { data: notasRows } = await sb.from('notas_libres')
+    .select('persona_id,contenido')
+    .in('persona_id', personas.map(p => p.id))
+    .is('deleted_at', null);
+  const notasPorPersona = new Map<number, string[]>();
+  for (const n of notasRows ?? []) {
+    if (n.persona_id == null) continue;
+    if (!notasPorPersona.has(n.persona_id)) notasPorPersona.set(n.persona_id, []);
+    notasPorPersona.get(n.persona_id)!.push(n.contenido);
+  }
+
   const bloques: string[] = [];
   for (const p of personas) {
     const ss = porPersona.get(p.id) ?? [];
@@ -212,7 +301,14 @@ async function construirContextoClientes(sb: SupabaseClient): Promise<{ contexto
       p.email ? `email: ${p.email}` : null,
       p.ciudad ? `ciudad: ${p.ciudad}` : null,
     ].filter(Boolean).join(' · ');
-    const encabezado = `▸ ${p.nombre} (id ${p.id})${contacto ? '\n  contacto → ' + contacto : ''}`;
+    const notasP = [p.notas, ...(notasPorPersona.get(p.id) ?? [])].filter(Boolean);
+    const ambitoLinea = p.ambito_principal && p.ambito_principal !== 'comercial'
+      ? `\n  ⚠ ÁMBITO: ${p.ambito_principal} — NO es un cliente comercial; no lo trates como comprador de persianas.`
+      : '';
+    const notasLinea = notasP.length > 0
+      ? `\n  📝 NOTAS DE JHON (verdad prioritaria): ${notasP.join(' · ')}`
+      : '';
+    const encabezado = `▸ ${p.nombre} (id ${p.id})${contacto ? '\n  contacto → ' + contacto : ''}${ambitoLinea}${notasLinea}`;
     if (ss.length === 0) {
       // Cliente recién capturado: el chat existe pero los analistas todavía no
       // generaron su síntesis. NO es un cliente vacío — su análisis está en cola.
@@ -272,6 +368,51 @@ ${lineas.join('\n')}`;
 }
 
 /**
+ * Lista de tareas abiertas (no completadas) para que Junior pueda referenciarlas
+ * por id cuando Jhon le pida marcar una como hecha. Devuelve '' si no hay.
+ */
+async function cargarTareasAbiertas(sb: SupabaseClient): Promise<string> {
+  const { data: tareas } = await sb.from('tareas')
+    .select('id, titulo, tipo, fecha_vence, persona_id')
+    .eq('completada', false).eq('shadow', false).is('deleted_at', null)
+    .order('fecha_vence', { ascending: true, nullsFirst: false })
+    .limit(50);
+  if (!tareas || tareas.length === 0) return '';
+
+  const ids = [...new Set(tareas.map(t => t.persona_id).filter((x): x is number => x != null))];
+  const { data: pers } = ids.length
+    ? await sb.from('personas').select('id, nombre').in('id', ids)
+    : { data: [] as { id: number; nombre: string | null }[] };
+  const nombrePorId = new Map<number, string>();
+  for (const p of pers ?? []) nombrePorId.set(p.id, p.nombre ?? `persona ${p.id}`);
+
+  // Separar para que Junior pueda contar fácil cuántas son del flujo (cliente)
+  // y cuántas transversales — necesario para el resumen de inicio de sesión.
+  const lineasCliente: string[] = [];
+  const lineasTransv: string[] = [];
+  for (const t of tareas) {
+    const vence = t.fecha_vence ? ` · vence ${t.fecha_vence}` : '';
+    if (t.persona_id) {
+      const nombre = nombrePorId.get(t.persona_id) ?? `persona ${t.persona_id}`;
+      lineasCliente.push(`[#${t.id}] ${t.titulo} (${t.tipo})${vence} · cliente: ${nombre}`);
+    } else {
+      lineasTransv.push(`[#${t.id}] ${t.titulo} (${t.tipo})${vence}`);
+    }
+  }
+
+  const bloqueCliente = lineasCliente.length > 0
+    ? `\n--- DEL FLUJO DE CLIENTES (${lineasCliente.length}) — viven en M5 del cliente ---\n${lineasCliente.join('\n')}`
+    : '\n(sin tareas pendientes de clientes)';
+  const bloqueTransv = lineasTransv.length > 0
+    ? `\n--- TRANSVERSALES / TUYAS (${lineasTransv.length}) — viven en tu pestaña Tareas ---\n${lineasTransv.join('\n')}`
+    : '\n(sin tareas transversales)';
+
+  return `
+
+=== TAREAS ABIERTAS (${tareas.length} total · úsalas para [COMPLETAR_TAREA]) ===${bloqueCliente}${bloqueTransv}`;
+}
+
+/**
  * Genera la respuesta de Junior + extrae las correcciones que dio Jhon.
  * `historial` son los mensajes previos de la conversación (orden cronológico).
  */
@@ -280,9 +421,20 @@ export async function responderJunior(
   pregunta: string,
   historial: MensajeChat[],
   sesionId: number,
-): Promise<{ respuesta: string; correcciones: Correccion[]; memorias: Memoria[]; nuevosClientes: NuevoCliente[]; resoluciones: ResolucionDuplicado[]; costo_usd: number; ok: boolean }> {
+): Promise<{
+  respuesta: string;
+  correcciones: Correccion[];
+  memorias: Memoria[];
+  nuevosClientes: NuevoCliente[];
+  resoluciones: ResolucionDuplicado[];
+  nuevasTareas: NuevaTarea[];
+  tareasCompletar: TareaCompletar[];
+  costo_usd: number;
+  ok: boolean;
+}> {
   const { contexto, lista } = await construirContextoClientes(sb);
   const duplicados = await cargarDuplicadosPendientes(sb);
+  const tareasAbiertas = await cargarTareasAbiertas(sb);
 
   const { data: mems } = await sb.from('junior_memoria')
     .select('tipo,contenido').eq('vigente', true).order('created_at');
@@ -316,7 +468,7 @@ export async function responderJunior(
   }
 
   const messages: ChatMessage[] = [
-    { role: 'system', content: systemPrompt(contexto, lista, bloqueMemorias, resumenConversacion, duplicados) },
+    { role: 'system', content: systemPrompt(contexto, lista, bloqueMemorias, resumenConversacion, duplicados, tareasAbiertas) },
   ];
   for (const h of recientes) {
     messages.push({ role: h.rol === 'usuario' ? 'user' : 'assistant', content: h.mensaje });
@@ -330,12 +482,16 @@ export async function responderJunior(
   let memorias: Memoria[] = [];
   let nuevosClientes: NuevoCliente[] = [];
   let resoluciones: ResolucionDuplicado[] = [];
+  let nuevasTareas: NuevaTarea[] = [];
+  let tareasCompletar: TareaCompletar[] = [];
   let costo_usd = costoResumen;
 
   const reCorr = /^\s*\[CORRECCION\]\s*persona_id\s*=\s*(\d+)\s*\|\s*modulo\s*=\s*(m[1-7])\s*\|\s*hecho\s*=\s*(.+)$/i;
   const reMem = /^\s*\[MEMORIA\]\s*tipo\s*=\s*(preferencia|dato)\s*\|\s*contenido\s*=\s*(.+)$/i;
   const reNuevo = /^\s*\[NUEVO_CLIENTE\]\s*(.+)$/i;
   const reResolver = /^\s*\[RESOLVER_DUPLICADO\]\s*id\s*=\s*(\d+)\s*\|\s*accion\s*=\s*(fusionar|descartar)\s*$/i;
+  const reNuevaTarea = /^\s*\[NUEVA_TAREA\]\s*(.+)$/i;
+  const reCompletarTarea = /^\s*\[COMPLETAR_TAREA\]\s*id\s*=\s*(\d+)\s*$/i;
 
   for (let intento = 1; intento <= 2; intento++) {
     const res = await deepseekChat({
@@ -351,11 +507,15 @@ export async function responderJunior(
     memorias = [];
     nuevosClientes = [];
     resoluciones = [];
+    nuevasTareas = [];
+    tareasCompletar = [];
     for (const linea of res.contenido.split('\n')) {
       const mc = linea.match(reCorr);
       const mm = linea.match(reMem);
       const mn = linea.match(reNuevo);
       const mr = linea.match(reResolver);
+      const mnt = linea.match(reNuevaTarea);
+      const mct = linea.match(reCompletarTarea);
       if (mc) correcciones.push({ persona_id: Number(mc[1]), modulo: mc[2].toLowerCase(), hecho: mc[3].trim() });
       else if (mm) memorias.push({ tipo: mm[1].toLowerCase() as 'preferencia' | 'dato', contenido: mm[2].trim() });
       else if (mn) {
@@ -367,6 +527,22 @@ export async function responderJunior(
       else if (mr) resoluciones.push({
         duplicado_id: Number(mr[1]), accion: mr[2].toLowerCase() as 'fusionar' | 'descartar',
       });
+      else if (mnt) {
+        const campos = parsearCampos(mnt[1]);
+        if (campos.titulo) {
+          const pid = campos.persona_id ? Number(campos.persona_id) : 0;
+          nuevasTareas.push({
+            titulo: campos.titulo,
+            tipo: campos.tipo || null,
+            persona_id: pid > 0 ? pid : null,
+            fecha_vence: campos.fecha || null,
+            hora_vence: campos.hora || null,
+            prioridad: campos.prioridad ? Number(campos.prioridad) : 5,
+            descripcion: null,
+          });
+        }
+      }
+      else if (mct) tareasCompletar.push({ id: Number(mct[1]) });
       else lineasResp.push(linea);
     }
     respuesta = lineasResp.join('\n').trim();
@@ -381,5 +557,5 @@ export async function responderJunior(
     ok = false;
   }
 
-  return { respuesta, correcciones, memorias, nuevosClientes, resoluciones, costo_usd, ok };
+  return { respuesta, correcciones, memorias, nuevosClientes, resoluciones, nuevasTareas, tareasCompletar, costo_usd, ok };
 }

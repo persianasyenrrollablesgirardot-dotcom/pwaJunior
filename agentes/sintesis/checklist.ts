@@ -12,7 +12,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { deepseekChat } from '../lib/llm.js';
 
-/** El flujo de pasos de cada tipo de conversación. Secuencial. */
+/** El flujo de pasos de cada tipo de conversación. Secuencial.
+ * `no_aplica` se usa cuando el contacto NO es un cliente comercial
+ * (proveedor, contacto personal, equipo interno): sin pasos, cerrado. */
 export const PLANTILLAS: Record<string, string[]> = {
   venta: [
     'Hizo contacto', 'Atendido', 'Necesidad entendida', 'Medidas',
@@ -23,6 +25,7 @@ export const PLANTILLAS: Record<string, string[]> = {
     'Solución aplicada', 'Confirmado por el cliente',
   ],
   consulta: ['Pregunta recibida', 'Respondida', 'Cerrada'],
+  no_aplica: [],
 };
 
 export interface ResultadoChecklist { ok: boolean; costo_usd: number }
@@ -34,7 +37,17 @@ WhatsApp con un cliente y decir en qué estado está.
 
 HOY ES: ${hoy}. Usá esta fecha para calcular cuántos días pasaron desde el último mensaje.
 
-PASO 1 — TIPO de conversación, elegí uno:
+PASO 0 — ¿APLICA gestión comercial?
+SI te llega un bloque "QUÉ ES ESTE CONTACTO" indicando que NO es un cliente
+comercial (es PROVEEDOR, contacto PERSONAL, EQUIPO INTERNO) → devolvé:
+  tipo="no_aplica", estado="cerrada", pasos_completados=0,
+  responsable_proximo=null, proximo_paso=null, compromisos=[],
+  motivo_cierre="No es cliente comercial — no aplica gestión de venta/garantía/consulta".
+NO inventes pasos de venta para un contacto que no es comprador.
+Igual mirá las NOTAS DEL HUMANO y las CORRECCIONES: si dicen que es proveedor,
+familiar, mecánico, contadora, instalador, amigo, etc. → tipo="no_aplica".
+
+PASO 1 — TIPO de conversación (solo si APLICA, sino salteá al output):
 - "venta": el cliente quiere comprar o cotizar cortinas.
 - "garantia": el cliente reclama algo que YA compró (falla, daño, mal funcionamiento).
 - "consulta": una pregunta suelta, sin intención de compra clara todavía.
@@ -69,7 +82,7 @@ promesa ya se cumplió en un mensaje posterior, NO la incluyas. Si no hay, array
 
 Devolvé EXCLUSIVAMENTE este JSON (nada de texto fuera):
 {
-  "tipo": "venta|garantia|consulta",
+  "tipo": "venta|garantia|consulta|no_aplica",
   "estado": "sin_responder|te_toca|frio|esperando_cliente|cerrada",
   "pasos_completados": <entero>,
   "responsable_proximo": "jhon|cliente|null",
@@ -101,6 +114,40 @@ export async function analizarChecklist(
     personaId = proy?.persona_id ?? null;
   }
 
+  // 2.b Contexto humano: ámbito + notas libres + correcciones de Junior.
+  // El agente debe saber si este contacto NO es cliente comercial para no
+  // inventar checklist de venta. Mismo patrón que sintetizarPersona.
+  let ambitoPersona: string | null = null;
+  let notasContacto: string[] = [];
+  let correccionesContacto: string[] = [];
+  if (personaId) {
+    const { data: persona } = await sb.from('personas')
+      .select('notas,ambito_principal').eq('id', personaId).maybeSingle();
+    ambitoPersona = (persona?.ambito_principal as string) ?? null;
+    if (persona?.notas) notasContacto.push(persona.notas as string);
+    const { data: notas } = await sb.from('notas_libres')
+      .select('contenido').eq('persona_id', personaId).is('deleted_at', null)
+      .order('ts_creado', { ascending: true });
+    for (const n of notas ?? []) if (n.contenido) notasContacto.push(n.contenido as string);
+    const { data: corr } = await sb.from('correcciones_humanas')
+      .select('modulo,hecho').eq('persona_id', personaId).eq('vigente', true)
+      .order('created_at', { ascending: true });
+    for (const c of corr ?? []) correccionesContacto.push(`[${c.modulo ?? 'general'}] ${c.hecho}`);
+  }
+  const AMBITO_DESC: Record<string, string> = {
+    comercial:        'CLIENTE del negocio (cotiza / compra persianas).',
+    proveedor:        'PROVEEDOR — NO es cliente. Le vende o le presta un servicio al negocio.',
+    personal_familia: 'CONTACTO PERSONAL (familia) — NO es cliente.',
+    personal_amigos:  'CONTACTO PERSONAL (amigo) — NO es cliente.',
+    personal_otros:   'Contacto personal sin clasificar — probablemente NO es cliente.',
+    interno_equipo:   'EQUIPO INTERNO (instalador / técnico / contadora) — NO es cliente.',
+  };
+  const ambitoCtx = AMBITO_DESC[ambitoPersona ?? ''] ?? 'Sin clasificar (asumir cliente comercial salvo evidencia en notas).';
+  const bloqueNotas = notasContacto.length > 0
+    ? notasContacto.map(n => `- ${n}`).join('\n') : '(ninguna)';
+  const bloqueCorrecciones = correccionesContacto.length > 0
+    ? correccionesContacto.map(c => `- ${c}`).join('\n') : '(ninguna)';
+
   // 3. Transcripción — cada mensaje con su fecha real (para resolver "el jueves").
   const fechaMsg = (ts: string | null) => ts
     ? new Date(ts).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })
@@ -124,9 +171,13 @@ export async function analizarChecklist(
       { role: 'system', content: promptSistema(hoy) },
       {
         role: 'user',
-        content: `=== CONVERSACIÓN (cada línea: [fecha aaaa-mm-dd] QUIÉN: texto) ===\n${conversacion}\n\n` +
+        content:
+          `=== QUÉ ES ESTE CONTACTO (ámbito) ===\n${ambitoCtx}\n\n` +
+          `=== NOTAS DEL HUMANO SOBRE ESTE CONTACTO (verdad prioritaria — las escribió Jhon) ===\n${bloqueNotas}\n\n` +
+          `=== CORRECCIONES DE JHON A JUNIOR (verdad prioritaria) ===\n${bloqueCorrecciones}\n\n` +
+          `=== CONVERSACIÓN (cada línea: [fecha aaaa-mm-dd] QUIÉN: texto) ===\n${conversacion}\n\n` +
           `El ÚLTIMO mensaje lo mandó: ${ultimo.direccion === 'saliente' ? 'EL NEGOCIO' : 'EL CLIENTE'}.\n\n` +
-          `Generá el JSON con el estado de este chat.`,
+          `Generá el JSON con el estado de este chat. Si el ámbito o las notas dicen que NO es cliente comercial, devolvé tipo="no_aplica".`,
       },
     ],
   });
@@ -136,9 +187,21 @@ export async function analizarChecklist(
   try { p = JSON.parse(res.contenido); }
   catch { console.error(`[A_CHECKLIST] chat ${chatId}: JSON inválido`); return { ok: false, costo_usd: res.costo_usd }; }
 
-  const tipo = ['venta', 'garantia', 'consulta'].includes(p?.tipo) ? p.tipo : 'consulta';
-  const estado = ['sin_responder', 'te_toca', 'frio', 'esperando_cliente', 'cerrada'].includes(p?.estado)
+  let tipo = ['venta', 'garantia', 'consulta', 'no_aplica'].includes(p?.tipo) ? p.tipo : 'consulta';
+  let estado = ['sin_responder', 'te_toca', 'frio', 'esperando_cliente', 'cerrada'].includes(p?.estado)
     ? p.estado : 'te_toca';
+  let motivoCierreForzado: string | null = null;
+
+  // Guard rail: si el ámbito del contacto es claramente NO comercial
+  // (proveedor / personal / equipo interno) forzamos no_aplica + cerrada,
+  // sin importar lo que el LLM haya decidido. Defensa dura contra el
+  // PASO 0 del prompt cuando el LLM no lo obedece.
+  if (ambitoPersona && ambitoPersona !== 'comercial' && tipo !== 'no_aplica') {
+    console.log(`[A_CHECKLIST] chat ${chatId}: ámbito=${ambitoPersona} → forzando tipo='no_aplica' (LLM había dicho '${tipo}')`);
+    tipo = 'no_aplica';
+    estado = 'cerrada';
+    motivoCierreForzado = 'No es cliente comercial — no aplica gestión de venta/garantía/consulta';
+  }
   const labels = PLANTILLAS[tipo];
   const completados = Math.max(0, Math.min(labels.length, Math.round(Number(p?.pasos_completados) || 0)));
   const respProx = ['jhon', 'cliente'].includes(p?.responsable_proximo) ? p.responsable_proximo : null;
@@ -154,11 +217,17 @@ export async function analizarChecklist(
     : [];
 
   // 6. Upsert — una fila por chat, regenerada entera.
+  const proxFinal = tipo === 'no_aplica'
+    ? null
+    : (typeof p?.proximo_paso === 'string' ? p.proximo_paso.trim() : null);
+  const motivoFinal = motivoCierreForzado
+    ?? (estado === 'cerrada' && typeof p?.motivo_cierre === 'string' ? p.motivo_cierre.trim() : null);
   const { error } = await sb.from('chat_checklist').upsert({
     chat_id: chatId, persona_id: personaId, tipo, estado,
-    proximo_paso: typeof p?.proximo_paso === 'string' ? p.proximo_paso.trim() : null,
-    motivo_cierre: estado === 'cerrada' && typeof p?.motivo_cierre === 'string' ? p.motivo_cierre.trim() : null,
-    pasos, compromisos,
+    proximo_paso: proxFinal,
+    motivo_cierre: motivoFinal,
+    pasos,
+    compromisos: tipo === 'no_aplica' ? [] : compromisos,
     ultimo_mensaje_ts: ultimoTs,
     generado_por: 'A_CHECKLIST', modelo: res.modelo, costo_usd: res.costo_usd,
     actualizado_at: new Date().toISOString(),

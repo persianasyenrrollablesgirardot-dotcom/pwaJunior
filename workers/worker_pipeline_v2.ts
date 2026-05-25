@@ -396,6 +396,57 @@ async function drenarSintesis(): Promise<void> {
   }
 }
 
+// Re-síntesis bajo demanda: el Visor marca `personas.sintesis_pendiente` (ej.
+// al reclasificar el ámbito de un contacto en el módulo Clientes). Este ciclo
+// las recoge, las re-sintetiza al toque y baja el flag.
+let sintesisPendienteEnCurso = false;
+async function cicloSintesisPendiente(): Promise<void> {
+  if (sintesisPendienteEnCurso) return;
+  sintesisPendienteEnCurso = true;
+  try {
+    const { data } = await sb.from('personas')
+      .select('id').eq('sintesis_pendiente', true).is('deleted_at', null).limit(10);
+    for (const p of data ?? []) {
+      try {
+        const r = await sintetizarPersona(sb, p.id);
+        stats.pi_costo_usd += r.costo_usd;
+        console.log(`[V2/SINT-MANUAL] persona ${p.id}: ${r.ok}/7 módulos · $${r.costo_usd.toFixed(4)}`);
+      } catch (e: any) {
+        console.error(`[V2/SINT-MANUAL] persona ${p.id}: ${e.message}`);
+      }
+      // Re-checklist de TODOS los chats de la persona — un cambio de
+      // ámbito/nota/corrección puede convertir un chat de "venta" en "no_aplica"
+      // (proveedor, contacto personal). El checklist tiene que reflejarlo.
+      try {
+        const { data: proys } = await sb.from('proyectos')
+          .select('id').eq('persona_id', p.id).is('deleted_at', null);
+        const proyIds = (proys ?? []).map(x => x.id);
+        if (proyIds.length > 0) {
+          const { data: chatsP } = await sb.from('chats')
+            .select('id').in('proyecto_id', proyIds).is('deleted_at', null);
+          for (const cP of chatsP ?? []) {
+            try {
+              const rc = await analizarChecklist(sb, cP.id);
+              stats.pi_costo_usd += rc.costo_usd;
+            } catch (e: any) {
+              console.error(`[V2/SINT-MANUAL] chat ${cP.id} checklist: ${e.message}`);
+            }
+          }
+        }
+      } catch (e: any) {
+        console.error('[V2/SINT-MANUAL] re-checklist persona ' + p.id + ':', e?.message);
+      }
+      // Bajar el flag siempre — aunque la síntesis falle — para no re-procesar
+      // en bucle. Si hace falta reintentar, Jhon reclasifica de nuevo.
+      await sb.from('personas').update({ sintesis_pendiente: false }).eq('id', p.id);
+    }
+  } catch (e: any) {
+    console.error('[V2/SINT-MANUAL]', e?.message);
+  } finally {
+    sintesisPendienteEnCurso = false;
+  }
+}
+
 async function cicloPipeline(): Promise<number> {
   if (pipelineEnCurso) return 0;
   pipelineEnCurso = true;
@@ -624,6 +675,42 @@ async function cicloJuniorChat(): Promise<void> {
             console.error(`[V2/JUNIOR] resolver duplicado ${res.duplicado_id}: ${e.message}`);
           }
         }
+
+        // Tareas que Jhon le dictó por chat: crear nuevas + marcar hechas las que dijo que ya cumplió.
+        for (const nt of r.nuevasTareas) {
+          try {
+            let pid = nt.persona_id;
+            if (pid === 0 && idClienteNuevo != null) pid = idClienteNuevo;
+            const tiposValidos = ['llamar','enviar_cotizacion','confirmar_pago','pedir_ficha','agendar_instalacion','reclamar_proveedor','pedir_resena','otro'];
+            const tipo = nt.tipo && tiposValidos.includes(nt.tipo) ? nt.tipo : 'otro';
+            const { data: nuevaT, error } = await sb.from('tareas').insert({
+              titulo: nt.titulo, descripcion: nt.descripcion,
+              tipo, persona_id: pid, fecha_vence: nt.fecha_vence, hora_vence: nt.hora_vence,
+              prioridad: nt.prioridad, asignado_a: 'jhon', origen: 'chat',
+            } as any).select('id').single();
+            if (error) {
+              console.error(`[V2/JUNIOR] crear tarea "${nt.titulo}": ${error.message}`);
+              continue;
+            }
+            console.log(`[V2/JUNIOR] tarea creada #${nuevaT.id}: ${nt.titulo}`);
+          } catch (e: any) {
+            console.error(`[V2/JUNIOR] tarea "${nt.titulo}": ${e.message}`);
+          }
+        }
+        for (const ct of r.tareasCompletar) {
+          try {
+            const { error } = await sb.from('tareas')
+              .update({ completada: true, completada_at: new Date().toISOString() })
+              .eq('id', ct.id).eq('completada', false);
+            if (error) {
+              console.error(`[V2/JUNIOR] completar tarea ${ct.id}: ${error.message}`);
+              continue;
+            }
+            console.log(`[V2/JUNIOR] tarea ${ct.id} marcada como hecha`);
+          } catch (e: any) {
+            console.error(`[V2/JUNIOR] completar tarea ${ct.id}: ${e.message}`);
+          }
+        }
       } catch (e: any) {
         console.error(`[V2/JUNIOR] error en mensaje ${msg.id}: ${e.message}`);
         await sb.from('junior_chat').update({ estado: 'error' }).eq('id', msg.id);
@@ -770,6 +857,7 @@ async function main() {
   if (!SKIP_PIPELINE)  setInterval(() => { cicloPipeline().catch(e => console.error('[V2/PI]', e?.message)); }, POLL_PIPELINE_MS);
   setInterval(() => { cicloJuniorChat().catch(e => console.error('[V2/JUNIOR]', e?.message)); }, 3000);
   setInterval(() => { cicloChecklist().catch(e => console.error('[V2/CHK]', e?.message)); }, POLL_CHECKLIST_MS);
+  setInterval(() => { cicloSintesisPendiente().catch(e => console.error('[V2/SINT-MANUAL]', e?.message)); }, 4000);
 
   setInterval(() => console.log(`[V2] stats: ${JSON.stringify(stats)}`), STATS_INTERVAL_MS);
 

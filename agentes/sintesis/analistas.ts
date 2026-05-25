@@ -196,7 +196,7 @@ export async function sintetizarPersona(
   sb: SupabaseClient,
   personaId: number,
 ): Promise<{ ok: number; fallidos: number; costo_usd: number }> {
-  const persona = (await sb.from('personas').select('nombre').eq('id', personaId).maybeSingle()).data;
+  const persona = (await sb.from('personas').select('nombre,notas,ambito_principal').eq('id', personaId).maybeSingle()).data;
   if (!persona) return { ok: 0, fallidos: 0, costo_usd: 0 };
 
   const proys = (await sb.from('proyectos').select('id').eq('persona_id', personaId)).data ?? [];
@@ -215,9 +215,16 @@ export async function sintetizarPersona(
     .select('modulo,hecho').eq('persona_id', personaId).eq('vigente', true)
     .order('created_at', { ascending: true });
 
-  // Sin chat de WhatsApp Y sin correcciones → no hay nada para analizar. Pero un
-  // cliente registrado a mano (sin chat) SÍ se sintetiza con lo que dictó Jhon.
-  if (msgs.length === 0 && (!correcciones || correcciones.length === 0)) {
+  // Notas libres que Jhon escribió sobre este contacto. La UI promete que
+  // "los agentes las leen antes de inferir" — acá se cumple. Verdad prioritaria.
+  const { data: notasLibres } = await sb.from('notas_libres')
+    .select('contenido').eq('persona_id', personaId)
+    .is('deleted_at', null).order('ts_creado', { ascending: true });
+
+  // Sin chat de WhatsApp Y sin correcciones Y sin notas → no hay nada para
+  // analizar. Un contacto registrado a mano SÍ se sintetiza con lo que dictó Jhon.
+  if (msgs.length === 0 && (!correcciones || correcciones.length === 0)
+      && (!notasLibres || notasLibres.length === 0) && !persona.notas) {
     return { ok: 0, fallidos: 0, costo_usd: 0 };
   }
 
@@ -251,6 +258,22 @@ export async function sintetizarPersona(
     ? correcciones.map((c: any) => `- [${c.modulo ?? 'general'}] ${c.hecho}`).join('\n')
     : '(ninguno)';
 
+  const lineasNotas = [
+    persona.notas ? `- ${persona.notas}` : null,
+    ...((notasLibres ?? []).map((n: any) => `- ${n.contenido}`)),
+  ].filter(Boolean);
+  const bloqueNotas = lineasNotas.length > 0 ? lineasNotas.join('\n') : '(ninguna)';
+
+  const AMBITO_DESC: Record<string, string> = {
+    comercial:        'CLIENTE del negocio (cotiza / compra persianas).',
+    proveedor:        'PROVEEDOR — NO es cliente. Le vende o le presta un servicio al negocio.',
+    personal_familia: 'CONTACTO PERSONAL (familia) — NO es cliente.',
+    personal_amigos:  'CONTACTO PERSONAL (amigo) — NO es cliente.',
+    personal_otros:   'Contacto personal sin clasificar — probablemente NO es cliente.',
+    interno_equipo:   'EQUIPO INTERNO (instalador / técnico / contadora) — NO es cliente.',
+  };
+  const ambitoCtx = AMBITO_DESC[(persona.ambito_principal as string) ?? ''] ?? 'Sin clasificar.';
+
   // Fecha de Colombia (America/Bogota), no UTC.
   const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
   const ctxComun = `HOY ES: ${hoy} — usá esta fecha SOLO para razonar internamente (qué venció,
@@ -259,6 +282,15 @@ tiene fecha pasada, tratalo como vencido/atrasado, NUNCA como pendiente futuro. 
 eventos usá fechas absolutas (dd/mm/aaaa), nunca "el jueves" ni "esta semana".
 PROHIBIDO escribir "hoy es...", "hoy ${hoy}" o la fecha de hoy dentro de tu síntesis — la
 síntesis describe el ESTADO del cliente, no la fecha en que la generaste.
+
+=== QUÉ ES ESTE CONTACTO (ámbito) ===
+${ambitoCtx}
+Si este contacto NO es un cliente comercial, NO lo analices como comprador de persianas:
+no inventes cotizaciones, abonos ni medidas. Ajustá tu síntesis a lo que realmente es y,
+en los módulos comerciales que no apliquen, decí explícitamente que no corresponde.
+
+=== NOTAS DEL HUMANO SOBRE ESTE CONTACTO (verdad prioritaria — las escribió Jhon a mano) ===
+${bloqueNotas}
 
 === HECHOS CONFIRMADOS POR JHON (VERDAD PRIORITARIA — manda sobre todo lo demás) ===
 ${bloqueCorrecciones}
