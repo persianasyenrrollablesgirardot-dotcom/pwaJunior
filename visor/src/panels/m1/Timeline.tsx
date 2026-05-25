@@ -95,11 +95,6 @@ export function Timeline({ eventos, proyectos, personas }: Props) {
                   <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>{formatTs(e.ts_canal)}</span>
                 </div>
                 <div style={{ fontSize: 13 }}>{e.payload_resumen}</div>
-                {e.evidencia_msg_ids.length > 0 && (
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 6 }}>
-                    Evidencia: {e.evidencia_msg_ids.map(id => `msg #${id}`).join(', ')}
-                  </div>
-                )}
               </div>
             </div>
           ))}

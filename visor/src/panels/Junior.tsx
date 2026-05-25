@@ -11,13 +11,15 @@ import { useState } from 'react';
 import { JuniorChat } from './JuniorChat';
 import { JuniorInstrucciones } from './JuniorInstrucciones';
 import { JuniorChecklist } from './JuniorChecklist';
+import { JuniorTareas } from './JuniorTareas';
 
-type Tab = 'chat' | 'instrucciones' | 'checklist';
+type Tab = 'chat' | 'instrucciones' | 'checklist' | 'tareas';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'chat', label: '💬 Chat' },
   { id: 'instrucciones', label: '📋 Instrucciones por chat' },
   { id: 'checklist', label: '✅ Checklist por chat' },
+  { id: 'tareas', label: '📋 Tareas' },
 ];
 
 export function Junior() {
@@ -65,6 +67,7 @@ export function Junior() {
         {tab === 'chat' && <JuniorChat />}
         {tab === 'instrucciones' && <JuniorInstrucciones />}
         {tab === 'checklist' && <JuniorChecklist />}
+        {tab === 'tareas' && <JuniorTareas />}
       </div>
     </div>
   );

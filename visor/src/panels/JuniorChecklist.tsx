@@ -13,7 +13,7 @@ import { supabase } from '../lib/supabase';
 
 // ─── Tipos ──────────────────────────────────────────────────────────────────
 type Estado = 'sin_responder' | 'te_toca' | 'frio' | 'esperando_cliente' | 'cerrada';
-type TipoConv = 'venta' | 'garantia' | 'consulta';
+type TipoConv = 'venta' | 'garantia' | 'consulta' | 'no_aplica';
 
 interface Paso { label: string; hecho: boolean; responsable: 'jhon' | 'cliente' | null }
 interface Compromiso { texto: string; prometido_at: string | null }
@@ -40,9 +40,10 @@ const ESTADO_META: Record<Estado, { label: string; punto: string; color: string;
   cerrada:           { label: 'Cerrada',              punto: '🟢', color: '#16a34a', orden: 5 },
 };
 const TIPO_META: Record<TipoConv, { label: string; color: string }> = {
-  venta:    { label: 'Venta',    color: '#2563eb' },
-  garantia: { label: 'Garantía', color: '#d97706' },
-  consulta: { label: 'Consulta', color: '#7c3aed' },
+  venta:     { label: 'Venta',     color: '#2563eb' },
+  garantia:  { label: 'Garantía',  color: '#d97706' },
+  consulta:  { label: 'Consulta',  color: '#7c3aed' },
+  no_aplica: { label: 'No aplica', color: '#6b7280' },
 };
 // "Te toca a vos" (abierto) vs "No te toca" (cerrado), según la visión de Jhon.
 const TE_TOCA: Estado[] = ['sin_responder', 'te_toca', 'frio'];

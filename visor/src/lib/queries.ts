@@ -136,6 +136,46 @@ export async function previewEliminarChat(chatId: number): Promise<PreviewElimin
   };
 }
 
+/**
+ * Re-clasifica el ámbito de un contacto (p.ej. cliente → proveedor).
+ * Actualiza las 3 columnas de ámbito de forma coherente: chats.ambito (lo que
+ * filtra el módulo Clientes), proyectos.ambito y personas.ambito_principal.
+ * Registra el cambio en chat_ambito_historial (auditoría, best-effort).
+ */
+export async function reclasificarAmbito(args: {
+  chatId: number;
+  proyectoId: number | null;
+  personaId: number | null;
+  ambitoAnterior: string;
+  ambitoNuevo: string;
+}): Promise<void> {
+  const { chatId, proyectoId, personaId, ambitoAnterior, ambitoNuevo } = args;
+
+  const { error: e1 } = await supabase.from('chats')
+    .update({ ambito: ambitoNuevo, ambito_confirmado: true }).eq('id', chatId);
+  if (e1) throw new Error(`chats: ${e1.message}`);
+
+  if (proyectoId != null) {
+    const { error } = await supabase.from('proyectos')
+      .update({ ambito: ambitoNuevo }).eq('id', proyectoId);
+    if (error) throw new Error(`proyectos: ${error.message}`);
+  }
+  if (personaId != null) {
+    // sintesis_pendiente=true → el worker re-sintetiza el contacto al toque,
+    // así su análisis refleja el ámbito nuevo sin esperar actividad del chat.
+    const { error } = await supabase.from('personas')
+      .update({ ambito_principal: ambitoNuevo, sintesis_pendiente: true }).eq('id', personaId);
+    if (error) throw new Error(`personas: ${error.message}`);
+  }
+  // Auditoría — best-effort: si falla no revierte el cambio ya aplicado.
+  await supabase.from('chat_ambito_historial').insert({
+    chat_id: chatId,
+    ambito_anterior: ambitoAnterior,
+    ambito_nuevo: ambitoNuevo,
+    motivo: 'Reclasificado manualmente desde el módulo Clientes',
+  });
+}
+
 export interface ResultadoEliminarChat {
   ok: true;
   mensajes_borrados: number;
@@ -295,7 +335,10 @@ export async function actualizarPersona(id: number, cambios: Partial<{
   contacto_alterno_nombre: string | null;
   contacto_alterno_telefono: string | null;
 }>): Promise<void> {
-  const { error } = await supabase.from('personas').update({ ...cambios, actualizado_por: 1 }).eq('id', id);
+  // Cualquier edición de la ficha (nombre, ámbito, notas, contacto, ciudad…)
+  // dispara re-síntesis: los analistas y Junior leen casi todos esos campos.
+  const { error } = await supabase.from('personas')
+    .update({ ...cambios, actualizado_por: 1, sintesis_pendiente: true }).eq('id', id);
   if (error) throw error;
 }
 
@@ -346,14 +389,30 @@ export async function agregarNota(data: {
     creado_por: 1,
   });
   if (error) throw error;
+
+  // Cada nota nueva debe disparar re-síntesis del contacto: los analistas y
+  // Junior leen las notas como verdad prioritaria, así que el análisis
+  // guardado quedó desactualizado en cuanto Jhon escribió la nota.
+  if (data.persona_id != null) {
+    await supabase.from('personas')
+      .update({ sintesis_pendiente: true }).eq('id', data.persona_id);
+  }
 }
 
 export async function eliminarNota(notaId: number): Promise<void> {
+  // Conocer la persona ANTES del soft-delete: sacar una nota cambia lo que
+  // los analistas ven y la síntesis tiene que refrescarse igual que al agregar.
+  const { data: nota } = await supabase
+    .from('notas_libres').select('persona_id').eq('id', notaId).maybeSingle();
   const { error } = await supabase
     .from('notas_libres')
     .update({ deleted_at: new Date().toISOString() })
     .eq('id', notaId);
   if (error) throw error;
+  if (nota?.persona_id != null) {
+    await supabase.from('personas')
+      .update({ sintesis_pendiente: true }).eq('id', nota.persona_id);
+  }
 }
 
 // ─── Cambiar ámbito de chat ──────────────────────────────────────────
@@ -1675,6 +1734,44 @@ export async function fetchTareasGlobal(incluirCompletadas = false): Promise<Tar
   return (data ?? []) as Tarea[];
 }
 
+export interface TareaConPersona extends Tarea {
+  persona: { id: number; nombre: string | null } | null;
+}
+
+/** Igual que fetchTareasGlobal pero embebe la persona vinculada (nombre, id).
+ * Usado en visualizaciones cross-cliente cuando hace falta el nombre. */
+export async function fetchTareasGlobalConPersona(incluirCompletadas = false): Promise<TareaConPersona[]> {
+  let q = supabase.from('tareas')
+    .select('*, persona:personas(id, nombre)')
+    .eq('shadow', false).is('deleted_at', null);
+  if (!incluirCompletadas) q = q.eq('completada', false);
+  const { data, error } = await q.order('fecha_vence', { ascending: true, nullsFirst: false }).limit(500);
+  if (error) throw error;
+  return (data ?? []) as TareaConPersona[];
+}
+
+/** Tareas TRANSVERSALES (sin cliente vinculado): persona_id IS NULL.
+ * Son las que nacen en el chat con Junior o que Jhon crea como acciones
+ * personales / cross-cliente / con terceros (proveedores, instaladores, etc.).
+ * Las tareas DE cliente (persona_id != null) viven en M5 del cliente, no acá. */
+export async function fetchTareasTransversales(incluirCompletadas = false): Promise<Tarea[]> {
+  let q = supabase.from('tareas')
+    .select('*').is('persona_id', null)
+    .eq('shadow', false).is('deleted_at', null);
+  if (!incluirCompletadas) q = q.eq('completada', false);
+  const { data, error } = await q.order('fecha_vence', { ascending: true, nullsFirst: false }).limit(500);
+  if (error) throw error;
+  return (data ?? []) as Tarea[];
+}
+
+/** Lista mínima de personas con id+nombre para el selector del modal de tareas. */
+export async function fetchPersonasMinimo(): Promise<{ id: number; nombre: string | null }[]> {
+  const { data, error } = await supabase.from('personas')
+    .select('id, nombre').is('deleted_at', null).order('nombre');
+  if (error) throw error;
+  return (data ?? []) as { id: number; nombre: string | null }[];
+}
+
 export interface CrearTareaInput {
   persona_id?: number | null;
   cotizacion_id?: number | null;
@@ -2634,6 +2731,51 @@ export async function fetchProyectos(): Promise<Proyecto[]> {
   }));
 }
 
+// Texto legible para un evento del timeline. Si el mensaje no trae texto
+// (notificaciones de sistema, llamadas, media sin caption, mensaje sin
+// descifrar), describe QUÉ es usando el tipo + subtipo del mensaje, en vez
+// de dejar el resumen vacío o mostrar el ID crudo.
+function resumenEvento(payload: any, tipoEvento: string): string {
+  const preview = typeof payload?.preview === 'string' ? payload.preview.trim() : '';
+  if (preview) return preview;
+  if (tipoEvento === 'mensaje_entrante' || tipoEvento === 'mensaje_saliente') {
+    const tc  = (payload?.tipo_canonical ?? '') as string;
+    const sub = String(payload?.subtype ?? '');
+    const saliente = tipoEvento === 'mensaje_saliente';
+
+    // Llamadas
+    if (tc === 'call_log') {
+      if (/miss|reject|fail|timeout|no_answer|unavailable/i.test(sub)) return '📞 Llamada perdida';
+      return saliente ? '📞 Llamada saliente' : '📞 Llamada recibida';
+    }
+    // Cambios de grupo
+    if (tc === 'gp2') {
+      const GP2: Record<string, string> = {
+        create: '👥 Grupo creado',                 add: '👥 Alguien se unió al grupo',
+        remove: '👥 Alguien salió del grupo',      leave: '👥 Alguien dejó el grupo',
+        subject: '👥 Cambió el nombre del grupo',  description: '👥 Cambió la descripción del grupo',
+        picture: '👥 Cambió la foto del grupo',    announcement: '👥 Cambió la configuración del grupo',
+      };
+      return GP2[sub] || '👥 Cambio en el grupo';
+    }
+    // Cifrado / protocolo / borrados
+    if (tc === 'e2e_notification') return '🔒 Aviso de cifrado de extremo a extremo';
+    if (tc === 'ciphertext')       return '⏳ Mensaje aún sin descifrar';
+    if (tc === 'protocol')         return '⚙️ Mensaje de protocolo de WhatsApp';
+    if (tc === 'revoked')          return '🚫 Mensaje eliminado por el remitente';
+    // Notificaciones con plantilla (sistema / cuentas de negocio)
+    if (tc === 'notification_template' || tc === 'notification') {
+      return sub ? `🔔 Notificación de WhatsApp · ${sub}` : '🔔 Notificación de WhatsApp';
+    }
+    // Media sin texto / fallback
+    if (payload?.tiene_media) return '📎 Archivo multimedia (sin texto)';
+    return sub ? `💬 Mensaje de sistema · ${sub}` : '💬 Mensaje sin texto capturado';
+  }
+  // Eventos no-mensaje (inferencia, medida, tarea…) sin preview: se conserva
+  // el fallback previo para no perder información de esos eventos.
+  return JSON.stringify(payload ?? {}).slice(0, 100);
+}
+
 export async function fetchEventos(filtros?: { personaId?: number; proyectoId?: number; chatId?: number }): Promise<EventoPG[]> {
   let q = supabase
     .from('evento_pg')
@@ -2653,7 +2795,7 @@ export async function fetchEventos(filtros?: { personaId?: number; proyectoId?: 
     ambito: e.ambito as Ambito,
     persona_id: e.persona_id ?? undefined,
     proyecto_id: e.proyecto_id ?? undefined,
-    payload_resumen: e.payload?.preview ?? JSON.stringify(e.payload).slice(0, 100),
+    payload_resumen: resumenEvento(e.payload, e.tipo_evento),
     evidencia_msg_ids: e.evidencia_ids?.msg_ids ?? [],
     agente_origen: e.agente_origen ?? undefined,
     confianza: e.confianza ?? undefined,
