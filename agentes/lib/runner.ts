@@ -162,24 +162,24 @@ export async function ejecutarAgente<TDatos = any>(
       .maybeSingle();
     intentosPrevios = Number(row?.intentos_agente ?? 0);
   } else {
-  const procesandoHasta = new Date(Date.now() + LEASE_SEGUNDOS * 1000).toISOString();
-  const procesandoPor = `${agente.codigo}@${process.pid}`;
-  const { data: lockData, error: lockErr } = await sb
-    .from('evento_pg')
-    .update({ procesando_por: procesandoPor, procesando_hasta: procesandoHasta })
-    .eq('id', params.evento_id)
-    .or(`procesando_hasta.is.null,procesando_hasta.lt.${new Date().toISOString()}`)
-    .select('id, intentos_agente')
-    .maybeSingle();
+    const procesandoHasta = new Date(Date.now() + LEASE_SEGUNDOS * 1000).toISOString();
+    const procesandoPor = `${agente.codigo}@${process.pid}`;
+    const { data: lockData, error: lockErr } = await sb
+      .from('evento_pg')
+      .update({ procesando_por: procesandoPor, procesando_hasta: procesandoHasta })
+      .eq('id', params.evento_id)
+      .or(`procesando_hasta.is.null,procesando_hasta.lt.${new Date().toISOString()}`)
+      .select('id, intentos_agente')
+      .maybeSingle();
 
-  if (lockErr) {
-    console.error(`[${tag}] lock error:`, lockErr.message);
-  } else if (!lockData) {
-    console.log(`[${tag}] evento ya tomado por otro worker — skip`);
-    return { ok: false, error: 'lock-busy', costo_usd: 0, latencia_ms: Date.now() - t0, shadow: agente.shadow, fue_al_buzon: false, motivo_skip: 'lock' };
-  } else {
-    intentosPrevios = Number(lockData.intentos_agente ?? 0);
-  }
+    if (lockErr) {
+      console.error(`[${tag}] lock error:`, lockErr.message);
+    } else if (!lockData) {
+      console.log(`[${tag}] evento ya tomado por otro worker — skip`);
+      return { ok: false, error: 'lock-busy', costo_usd: 0, latencia_ms: Date.now() - t0, shadow: agente.shadow, fue_al_buzon: false, motivo_skip: 'lock' };
+    } else {
+      intentosPrevios = Number(lockData.intentos_agente ?? 0);
+    }
   } // fin del else (lock path)
 
   // ─── 2. CHECK DEAD LETTER + 3. INCREMENTAR INTENTOS ───────────────

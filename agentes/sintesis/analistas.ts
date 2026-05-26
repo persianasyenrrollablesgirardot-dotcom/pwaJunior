@@ -121,19 +121,9 @@ jsonPrompt(
 `Incluí solo medidas EXPLÍCITAS en la conversación (ej: "2.40 x 1.80"). NO inventes dimensiones.
 Rango razonable: 0.3m a 8m.`) },
 
-  m5: { titulo: 'Análisis Operativo', poblar: poblarTareas, system:
-jsonPrompt(
+  m5: { titulo: 'Análisis Operativo', system:
 `Sos el ANALISTA OPERATIVO de Fábrica de Cortinas Girardot. Analizá qué hay que HACER y CUÁNDO
-Y estructurá las tareas pendientes del cliente.`,
-  'tareas',
-`    {
-      "titulo": "qué hacer, corto (ej: Agendar instalación)",
-      "descripcion": "detalle o null",
-      "tipo": "llamar|enviar_cotizacion|confirmar_pago|pedir_ficha|agendar_instalacion|reclamar_proveedor|pedir_resena|otro",
-      "fecha_vence": "YYYY-MM-DD o null",
-      "prioridad": número entero 1 (baja) a 10 (urgente)
-    }`,
-`Incluí solo tareas REALES y accionables. NO dupliques la misma tarea. Consolidá.`) },
+en términos operativos (visitas, instalaciones, mantenimientos). Dejá las tareas concretas para que el asistente principal (Junior) las asigne con el humano.` + FORMATO },
 
   m6: { titulo: 'Análisis de Postventa', poblar: poblarPostventa, system:
 jsonPrompt(
@@ -305,6 +295,7 @@ ${conversacion}
 ${datosAgentes || '(nada relevante)'}`;
 
   let ok = 0, fallidos = 0, costo_usd = 0;
+  const propuestas: Record<string, any> = {};
 
   for (const [modulo, cfg] of Object.entries(ANALISTAS)) {
     // Analistas estructurados (M2-M6): JSON + pueblan su tabla de dominio.
@@ -312,7 +303,7 @@ ${datosAgentes || '(nada relevante)'}`;
       try {
         const r = await sintetizarEstructurado(sb, personaId, persona.nombre as string, ctxComun, modulo, cfg);
         costo_usd += r.costo_usd;
-        if (r.ok) ok++; else fallidos++;
+        if (r.ok) { ok++; propuestas[modulo] = r.data; } else fallidos++;
       } catch (e: any) { fallidos++; console.error(`[A_SINTESIS_${modulo}] ${e.message}`); }
       continue;
     }
@@ -344,6 +335,18 @@ ${datosAgentes || '(nada relevante)'}`;
     }
   }
 
+  // Pasa las propuestas a Junior Auditor para que apruebe/rechace antes de poblar.
+  const propuestasValidas = await auditarPropuestas(sb, personaId, persona.nombre as string, propuestas, bloqueCorrecciones);
+  costo_usd += propuestasValidas.costo_usd;
+
+  // Ejecutar poblado SOLO con propuestas válidas
+  for (const [modulo, cfg] of Object.entries(ANALISTAS)) {
+    if (cfg.poblar && propuestasValidas.data[modulo]) {
+      try { await cfg.poblar(sb, personaId, propuestasValidas.data[modulo]); }
+      catch (e: any) { console.error(`[A_SINTESIS_${modulo.toUpperCase()}] poblar: ${e.message}`); }
+    }
+  }
+
   // Junior cierra: lee las 7 síntesis recién generadas y da la visión global.
   try {
     const j = await sintetizarJunior(sb, personaId);
@@ -368,7 +371,7 @@ async function sintetizarEstructurado(
   ctxComun: string,
   modulo: string,
   cfg: Analista,
-): Promise<{ ok: boolean; costo_usd: number }> {
+): Promise<{ ok: boolean; costo_usd: number; data?: any }> {
   const tag = `A_SINTESIS_${modulo.toUpperCase()}`;
   const res = await deepseekChat({
     agente: tag,
@@ -403,11 +406,7 @@ async function sintetizarEstructurado(
   } as any, { onConflict: 'persona_id,modulo' });
   if (error) { console.error(`[${tag}] upsert sintesis: ${error.message}`); return { ok: false, costo_usd: res.costo_usd }; }
 
-  if (cfg.poblar) {
-    try { await cfg.poblar(sb, personaId, data); }
-    catch (e: any) { console.error(`[${tag}] poblar: ${e.message}`); }
-  }
-  return { ok: true, costo_usd: res.costo_usd };
+  return { ok: true, costo_usd: res.costo_usd, data };
 }
 
 // ── Funciones de poblado: reemplazan los registros de agente del cliente ────
@@ -490,24 +489,7 @@ async function poblarMedidas(sb: SupabaseClient, personaId: number, data: any): 
   }
 }
 
-async function poblarTareas(sb: SupabaseClient, personaId: number, data: any): Promise<void> {
-  const tareas = Array.isArray(data.tareas) ? data.tareas : [];
-  const proy = (await sb.from('proyectos').select('id').eq('persona_id', personaId).limit(1)).data?.[0];
-  await borrarDeAgente(sb, 'tareas', personaId);
-  for (const t of tareas) {
-    if (!t.titulo) continue;
-    const prioridad = typeof t.prioridad === 'number'
-      ? Math.max(1, Math.min(10, Math.round(t.prioridad))) : 5;
-    const { error } = await sb.from('tareas').insert({
-      persona_id: personaId, proyecto_id: proy?.id ?? null,
-      titulo: String(t.titulo), descripcion: t.descripcion ?? null,
-      tipo: TIPOS_TAREA.has(t.tipo) ? t.tipo : 'otro', fecha_vence: t.fecha_vence ?? null,
-      prioridad, asignado_a: 'jhon', origen: 'agente',
-      agente_origen: 'A_SINTESIS_M5', shadow: false,
-    } as any);
-    if (error) console.error(`[A_SINTESIS_M5] insert tarea: ${error.message}`);
-  }
-}
+
 
 async function poblarPostventa(sb: SupabaseClient, personaId: number, data: any): Promise<void> {
   const garantias = Array.isArray(data.garantias) ? data.garantias : [];
@@ -627,4 +609,59 @@ Estado: ${s.estado ?? '—'}${s.proximo_paso ? `\nPróximo paso: ${s.proximo_pas
   } as any, { onConflict: 'persona_id,modulo' });
   if (error) { console.error(`[A10_JUNIOR] upsert: ${error.message}`); return { ok: false, costo_usd: res.costo_usd }; }
   return { ok: true, costo_usd: res.costo_usd };
+}
+
+
+async function auditarPropuestas(
+  sb: SupabaseClient,
+  personaId: number,
+  nombre: string,
+  propuestas: Record<string, any>,
+  bloqueCorrecciones: string
+): Promise<{ costo_usd: number; data: Record<string, any> }> {
+  if (Object.keys(propuestas).length === 0) return { costo_usd: 0, data: {} };
+
+  const system = `Sos JUNIOR AUDITOR, el supervisor estricto de Fábrica de Cortinas Girardot.
+Tu trabajo es revisar las propuestas generadas por los agentes analistas y FILTRAR todo lo que viole
+las reglas de negocio o el sentido común, basándote en las instrucciones explícitas de Jhon.
+
+=== HECHOS CONFIRMADOS POR JHON (VERDAD PRIORITARIA) ===
+${bloqueCorrecciones}
+
+REGLAS DE AUDITORÍA:
+1. Si una cotización, tarea, medida, abono o garantía contradice la Verdad Prioritaria (ej. Jhon dice que X es proveedor y un analista le hizo una cotización de venta), ELIMÍNALA del JSON de respuesta.
+2. Si los datos son imposibles (ej. medida de 15 metros), ELIMÍNALOS del JSON de respuesta.
+3. Devuelve estrictamente un JSON con la misma estructura original, pero solo con los elementos APROBADOS.
+Si todo un módulo está mal, devuélvelo vacío. Si hay errores críticos, anótalos en una propiedad "alertas_auditoria" (array de strings).`;
+
+  const user = `CLIENTE: ${nombre}\n\nPROPUESTAS DE LOS ANALISTAS:\n${JSON.stringify(propuestas, null, 2)}\n\nDevuelve el JSON filtrado.`;
+
+  const res = await deepseekChat({
+    agente: 'JUNIOR_AUDITOR',
+    temperature: 0.1,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ]
+  });
+
+  let data = propuestas;
+  try {
+    const parsed = JSON.parse(res.contenido);
+    if (parsed) data = parsed;
+    if (data.alertas_auditoria && Array.isArray(data.alertas_auditoria) && data.alertas_auditoria.length > 0) {
+      console.log(`[JUNIOR_AUDITOR] Alertas detectadas para ${nombre}: `, data.alertas_auditoria);
+      await sb.from('modulo_sintesis').upsert({
+        persona_id: personaId, modulo: 'junior',
+        alerta: data.alertas_auditoria.join(' | '),
+        generado_por: 'JUNIOR_AUDITOR', modelo: res.modelo,
+        generado_at: new Date().toISOString()
+      } as any, { onConflict: 'persona_id,modulo' });
+    }
+  } catch (e) {
+    console.error(`[JUNIOR_AUDITOR] Error parseando respuesta: ${e}`);
+  }
+
+  return { costo_usd: res.costo_usd, data };
 }
