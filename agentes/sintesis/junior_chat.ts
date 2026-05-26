@@ -47,6 +47,7 @@ export interface NuevaTarea {
 }
 export interface TareaCompletar { id: number }
 export interface NotaPersona { persona_id: number; nota: string; tipo: 'pendiente_verificacion' | 'no_comercial' | 'saltear' | 'otro' }
+export interface CierreChecklist { chat_id: number; motivo: string }
 
 export function systemPrompt(
   contextoClientes: string, listaClientes: string, memorias: string, resumenConversacion: string,
@@ -191,6 +192,9 @@ NADA fuera del JSON. Nada de texto antes ni después. Nada de markdown ni de \`\
   ],
   "notasPersona": [
     { "persona_id": <id>, "tipo": "<pendiente_verificacion|no_comercial|saltear|otro>", "nota": "<descripción>" }
+  ],
+  "cierresChecklist": [
+    { "chat_id": <id del chat — sacalo de la lista CHECKLISTS ACTIVOS>, "motivo": "<por qué se cierra: caso terminado, pagado, instalado, etc.>" }
   ]
 }
 
@@ -284,6 +288,38 @@ antes de marcarla.
 → Al agregar a "tareasCompletar", el sistema cancela AUTOMÁTICAMENTE el agendamiento del
   calendario con el mismo título y cliente. No lo dupliques en "agendamientosCancelar".
 → "agendamientosCancelar" solo borra el evento del calendario — la tarea sigue.
+
+═══ CERRAR CHECKLIST MANUALMENTE — protocolo "cierresChecklist" ═══
+Hay dos formas en que un chat sale del módulo "Checklist por chat":
+
+(a) AUTOMÁTICA por cambio de ámbito: si emitís notasPersona tipo='no_comercial',
+    el sistema cambia personas.ambito_principal y la próxima corrida del agente
+    A_CHECKLIST marca el checklist como tipo='no_aplica' solo. Para contactos
+    que NO son clientes comerciales esto es lo correcto.
+
+(b) MANUAL para clientes comerciales reales con CASO TERMINADO: cuando Jhon te
+    dice "ya terminamos con Rocio Romero", "ya está cerrado y pagado el caso
+    de Julio Martinez", "La Dulcería ya quedó cerrada e instalada" → emití un
+    objeto en "cierresChecklist" con el chat_id (de la lista CHECKLISTS ACTIVOS
+    de abajo) y el motivo. El sistema cierra el chat_checklist con tipo='no_aplica'
+    estado='cerrada' Y marca cerrado_manual=true para que A_CHECKLIST NO lo
+    regenere en su próximo ciclo. Sin esto, los chats de clientes con caso
+    terminado VUELVEN A APARECER como "venta esperando_cliente" cada vez que
+    hay actividad nueva en el chat.
+
+NO uses cierresChecklist para no comerciales — eso va por notasPersona, que es
+auto-curativo y cambia el ámbito en BD. cierresChecklist es solo para CASOS
+COMERCIALES REALES YA TERMINADOS (vendido, instalado, cobrado o perdido).
+
+Ejemplo — Jhon dice "ya terminé con LA DULCERÍA, instalación y pago completos":
+{
+  "respuesta": "Listo, cierro el checklist de LA DULCERÍA. Queda como caso terminado y no aparece más en activos.",
+  "cierresChecklist": [{ "chat_id": 25, "motivo": "Instalación y pago completados. Caso cerrado." }],
+  "correcciones": [{ "persona_id": 12, "modulo": "m5", "hecho": "Caso cerrado: instalación y pago completos" }],
+  "memorias": [], "nuevosClientes": [], "resoluciones": [],
+  "nuevasTareas": [], "tareasCompletar": [],
+  "nuevosAgendamientos": [], "agendamientosCancelar": [], "notasPersona": []
+}
 
 ═══ CONCIENCIA DE CASCADA — CHECKLIST → TAREAS → AGENDA ═══
 Cuando algo cierra, se cierra en todos lados:
@@ -721,6 +757,7 @@ export async function responderJunior(
   nuevosAgendamientos: NuevoAgendamiento[];
   agendamientosCancelar: AgendamientoCancelar[];
   notasPersona: NotaPersona[];
+  cierresChecklist: CierreChecklist[];
   costo_usd: number;
   ok: boolean;
 }> {
@@ -782,6 +819,7 @@ export async function responderJunior(
   let nuevosAgendamientos: NuevoAgendamiento[] = [];
   let agendamientosCancelar: AgendamientoCancelar[] = [];
   let notasPersona: NotaPersona[] = [];
+  let cierresChecklist: CierreChecklist[] = [];
   let costo_usd = costoResumen;
 
   for (let intento = 1; intento <= 2; intento++) {
@@ -824,6 +862,7 @@ export async function responderJunior(
       nuevosAgendamientos = Array.isArray(parsed.nuevosAgendamientos) ? parsed.nuevosAgendamientos : [];
       agendamientosCancelar = Array.isArray(parsed.agendamientosCancelar) ? parsed.agendamientosCancelar : [];
       notasPersona = Array.isArray(parsed.notasPersona) ? parsed.notasPersona : [];
+      cierresChecklist = Array.isArray(parsed.cierresChecklist) ? parsed.cierresChecklist : [];
       if (respuesta.length > 0) break;
     }
   }
@@ -834,5 +873,5 @@ export async function responderJunior(
     ok = false;
   }
 
-  return { respuesta, correcciones, memorias, nuevosClientes, resoluciones, nuevasTareas, tareasCompletar, nuevosAgendamientos, agendamientosCancelar, notasPersona, costo_usd, ok };
+  return { respuesta, correcciones, memorias, nuevosClientes, resoluciones, nuevasTareas, tareasCompletar, nuevosAgendamientos, agendamientosCancelar, notasPersona, cierresChecklist, costo_usd, ok };
 }

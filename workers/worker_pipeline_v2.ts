@@ -417,6 +417,8 @@ async function cicloSintesisPendiente(): Promise<void> {
       // Re-checklist de TODOS los chats de la persona — un cambio de
       // ámbito/nota/corrección puede convertir un chat de "venta" en "no_aplica"
       // (proveedor, contacto personal). El checklist tiene que reflejarlo.
+      // EXCEPCIÓN: si el chat está cerrado_manual=true (Jhon lo cerró desde el
+      // chat de Junior), respetamos la decisión humana y NO regeneramos.
       try {
         const { data: proys } = await sb.from('proyectos')
           .select('id').eq('persona_id', p.id).is('deleted_at', null);
@@ -424,7 +426,13 @@ async function cicloSintesisPendiente(): Promise<void> {
         if (proyIds.length > 0) {
           const { data: chatsP } = await sb.from('chats')
             .select('id').in('proyecto_id', proyIds).is('deleted_at', null);
+          const chatIds = (chatsP ?? []).map(x => x.id);
+          const { data: cerrados } = chatIds.length
+            ? await sb.from('chat_checklist').select('chat_id').in('chat_id', chatIds).eq('cerrado_manual', true)
+            : { data: [] as { chat_id: number }[] };
+          const setCerrados = new Set((cerrados ?? []).map(x => x.chat_id));
           for (const cP of chatsP ?? []) {
+            if (setCerrados.has(cP.id)) continue;       // cerrado por Jhon → respetar
             try {
               const rc = await analizarChecklist(sb, cP.id);
               stats.pi_costo_usd += rc.costo_usd;
@@ -826,6 +834,37 @@ async function cicloJuniorChat(): Promise<void> {
           }
         }
 
+        // Cierre manual de checklists — Jhon dijo "caso terminado" para un cliente
+        // comercial real. Marcamos cerrado_manual=true para que A_CHECKLIST no lo
+        // regenere en su próximo ciclo. Diferente a notasPersona: acá la persona
+        // SÍ es comercial (cliente real, no proveedor/familiar) pero el caso se
+        // cerró (vendido+instalado+pagado, o perdido).
+        for (const cc of r.cierresChecklist ?? []) {
+          try {
+            const motivo = (cc.motivo ?? '').trim() || 'Cerrado manualmente por Jhon';
+            const { error, data } = await sb.from('chat_checklist')
+              .update({
+                tipo: 'no_aplica',
+                estado: 'cerrada',
+                proximo_paso: null,
+                motivo_cierre: motivo,
+                cerrado_manual: true,
+                actualizado_at: new Date().toISOString(),
+              } as any)
+              .eq('chat_id', cc.chat_id)
+              .select('chat_id').maybeSingle();
+            if (error) {
+              console.error(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: ${error.message}`);
+            } else if (!data) {
+              console.warn(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: no había fila en chat_checklist (skip)`);
+            } else {
+              console.log(`[V2/JUNIOR] checklist chat ${cc.chat_id} cerrado manualmente: "${motivo.slice(0, 60)}"`);
+            }
+          } catch (e: any) {
+            console.error(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: ${e.message}`);
+          }
+        }
+
       } catch (e: any) {
         console.error(`[V2/JUNIOR] error en mensaje ${msg.id}: ${e.message}`);
         await sb.from('junior_chat').update({ estado: 'error' }).eq('id', msg.id);
@@ -861,14 +900,22 @@ async function cicloChecklist(): Promise<void> {
       if (!ultimoPorChat.has(m.chat_id)) ultimoPorChat.set(m.chat_id, m.ts_canal as string);
     }
 
-    // Estado ya analizado por chat.
-    const { data: cks } = await sb.from('chat_checklist').select('chat_id, ultimo_mensaje_ts');
+    // Estado ya analizado por chat. cerrado_manual=true → Jhon decidió cerrar el
+    // checklist por chat de Junior (caso terminado, no es comercial, etc.) y NO
+    // querés que el agente lo regenere en el próximo ciclo. Si más adelante llega
+    // actividad nueva, Jhon puede reabrirlo desde el chat (protocolo opuesto).
+    const { data: cks } = await sb.from('chat_checklist').select('chat_id, ultimo_mensaje_ts, cerrado_manual');
     const analizadoPorChat = new Map<number, string | null>();
-    for (const c of cks ?? []) analizadoPorChat.set(c.chat_id, c.ultimo_mensaje_ts);
+    const cerradosManualmente = new Set<number>();
+    for (const c of cks ?? []) {
+      analizadoPorChat.set(c.chat_id, c.ultimo_mensaje_ts);
+      if (c.cerrado_manual) cerradosManualmente.add(c.chat_id);
+    }
 
     // Chats con actividad nueva (mensaje más nuevo que el último analizado).
     const necesitan: number[] = [];
     for (const ch of chats) {
+      if (cerradosManualmente.has(ch.id)) continue;    // cerrado por Jhon → respetar
       const ultimoMsg = ultimoPorChat.get(ch.id);
       if (!ultimoMsg) continue;                        // chat sin mensajes
       const analizado = analizadoPorChat.get(ch.id);
