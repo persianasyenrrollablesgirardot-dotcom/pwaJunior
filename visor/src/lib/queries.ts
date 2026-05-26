@@ -560,7 +560,7 @@ export interface ItemTranscripcion {
 const TIPOS_MEDIA = ['imagen', 'audio', 'video', 'documento', 'ubicacion', 'contacto'];
 
 export async function fetchTranscripciones(): Promise<ItemTranscripcion[]> {
-  // Solo de chats procesados (ia_historico_procesado=true) — para no mezclar con crudos
+  // Solo de chats procesados (ia_historico_procesado=true o proyecto_id IS NOT NULL) — para no mezclar con crudos
   const { data, error } = await supabase
     .from('mensajes')
     .select(`
@@ -570,7 +570,7 @@ export async function fetchTranscripciones(): Promise<ItemTranscripcion[]> {
     .in('tipo', TIPOS_MEDIA)
     .is('deleted_at', null)
     // F1.22 fix I2: filtrar en BD (antes filtraba en cliente con LIMIT 500 → estallable)
-    .filter('chats.ia_historico_procesado', 'eq', true)
+    .or('ia_historico_procesado.eq.true,proyecto_id.not.is.null', { foreignTable: 'chats' })
     .order('ts_canal', { ascending: false })
     .limit(2000);
   if (error) throw error;
@@ -579,7 +579,7 @@ export async function fetchTranscripciones(): Promise<ItemTranscripcion[]> {
   const costoMedia = Number(cfg.ia_costo_estimado_por_mensaje_media_usd ?? 0.005);
 
   return (data ?? [])
-    .filter((m: any) => m.chats?.ia_historico_procesado === true)
+    .filter((m: any) => m.chats?.ia_historico_procesado === true || m.chats?.proyecto_id != null)
     .map((m: any): ItemTranscripcion => {
       const aiText = m.metadata?.ai_text ?? null;
       const aiStatus = m.metadata?.ai_status ?? null;
@@ -1801,11 +1801,25 @@ export async function actualizarTarea(id: number, patch: Partial<Tarea>): Promis
   if (patch.completada === true && !patch.completada_at) extra.completada_at = new Date().toISOString();
   const { error } = await supabase.from('tareas').update({ ...patch, ...extra }).eq('id', id);
   if (error) throw error;
+
+  // CASCADA FRONTEND: Si se completa la tarea, borrar su agendamiento vinculado
+  if (patch.completada === true) {
+    await supabase.from('agendamientos')
+      .update({ deleted_at: new Date().toISOString() } as any)
+      .eq('notas', `Sincronizado desde tarea #${id}`)
+      .is('deleted_at', null);
+  }
 }
 
 export async function eliminarTarea(id: number): Promise<void> {
   const { error } = await supabase.from('tareas').update({ deleted_at: new Date().toISOString() }).eq('id', id);
   if (error) throw error;
+
+  // CASCADA FRONTEND: Si se elimina la tarea, borrar su agendamiento vinculado
+  await supabase.from('agendamientos')
+    .update({ deleted_at: new Date().toISOString() } as any)
+    .eq('notas', `Sincronizado desde tarea #${id}`)
+    .is('deleted_at', null);
 }
 
 // ── Checklist (5.6) ──────────────────────────────────────────────────

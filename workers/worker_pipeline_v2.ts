@@ -699,6 +699,10 @@ async function cicloJuniorChat(): Promise<void> {
         }
         for (const ct of r.tareasCompletar) {
           try {
+            // Leer la tarea antes de completarla para saber su título y persona_id
+            const { data: tareaData } = await sb.from('tareas')
+              .select('id, titulo, persona_id').eq('id', ct.id).maybeSingle();
+
             const { error } = await sb.from('tareas')
               .update({ completada: true, completada_at: new Date().toISOString() })
               .eq('id', ct.id).eq('completada', false);
@@ -707,10 +711,90 @@ async function cicloJuniorChat(): Promise<void> {
               continue;
             }
             console.log(`[V2/JUNIOR] tarea ${ct.id} marcada como hecha`);
+
+            // CASCADA: cancelar agendamiento vinculado (mismo título o nota directa)
+            let queryAg = sb.from('agendamientos')
+              .update({ deleted_at: new Date().toISOString() })
+              .or(`notas.eq.Sincronizado desde tarea #${ct.id},and(titulo.eq."${tareaData?.titulo?.replace(/"/g, '""') || ''}",persona_id.eq.${tareaData?.persona_id ?? 'null'})`)
+              .is('deleted_at', null);
+            
+            const { error: errAg, count } = await queryAg;
+            if (!errAg && count && count > 0) {
+              console.log(`[V2/JUNIOR] cascada: ${count} agendamiento(s) cancelado(s) para tarea ${ct.id}`);
+            }
           } catch (e: any) {
             console.error(`[V2/JUNIOR] completar tarea ${ct.id}: ${e.message}`);
           }
         }
+
+        // Agendamientos (Calendario) que Jhon dictó por chat
+        for (const na of r.nuevosAgendamientos) {
+          try {
+            let pid = na.persona_id;
+            if (pid === 0 && idClienteNuevo != null) pid = idClienteNuevo;
+            const tiposValidos = ['visita_medidas', 'instalacion', 'reunion_proveedor', 'personal', 'otro'];
+            const tipo = na.tipo && tiposValidos.includes(na.tipo) ? na.tipo : 'otro';
+            const { data: nuevoA, error } = await sb.from('agendamientos').insert({
+              persona_id: pid,
+              titulo: na.titulo,
+              tipo,
+              fecha: na.fecha,
+              hora_inicio: na.hora,
+              direccion: na.direccion,
+              notas: na.notas,
+            } as any).select('id').single();
+            if (error) {
+              console.error(`[V2/JUNIOR] crear agendamiento "${na.titulo}": ${error.message}`);
+              continue;
+            }
+            console.log(`[V2/JUNIOR] agendamiento creado #${nuevoA.id}: ${na.titulo}`);
+          } catch (e: any) {
+            console.error(`[V2/JUNIOR] agendamiento "${na.titulo}": ${e.message}`);
+          }
+        }
+        for (const ca of r.agendamientosCancelar) {
+          try {
+            const { error } = await sb.from('agendamientos')
+              .update({ deleted_at: new Date().toISOString() })
+              .eq('id', ca.id).is('deleted_at', null);
+            if (error) {
+              console.error(`[V2/JUNIOR] cancelar agendamiento ${ca.id}: ${error.message}`);
+              continue;
+            }
+            console.log(`[V2/JUNIOR] agendamiento ${ca.id} cancelado/eliminado`);
+          } catch (e: any) {
+            console.error(`[V2/JUNIOR] cancelar agendamiento ${ca.id}: ${e.message}`);
+          }
+        }
+
+        // Notas de persona — decisiones de sesión que persisten en la BD
+        // (pendiente_verificacion, no_comercial, saltear) para que no se repitan preguntas
+        for (const np of r.notasPersona ?? []) {
+          try {
+            const prefijoPorTipo: Record<string, string> = {
+              pendiente_verificacion: '[VERIFICACIÓN PENDIENTE] ',
+              no_comercial: '[NO COMERCIAL] ',
+              saltear: '[SALTEAR] ',
+              otro: '',
+            };
+            const prefijo = prefijoPorTipo[np.tipo] ?? '';
+            const hecho = `${prefijo}${np.nota}`.trim();
+            const { error } = await sb.from('correcciones_humanas').insert({
+              persona_id: np.persona_id,
+              modulo: 'm1',
+              hecho,
+              origen: 'junior_chat',
+            } as any);
+            if (error) {
+              console.error(`[V2/JUNIOR] nota_persona persona ${np.persona_id}: ${error.message}`);
+            } else {
+              console.log(`[V2/JUNIOR] nota_persona [${np.tipo}] persona ${np.persona_id}: "${hecho.slice(0, 60)}"`);
+            }
+          } catch (e: any) {
+            console.error(`[V2/JUNIOR] nota_persona persona ${np.persona_id}: ${e.message}`);
+          }
+        }
+
       } catch (e: any) {
         console.error(`[V2/JUNIOR] error en mensaje ${msg.id}: ${e.message}`);
         await sb.from('junior_chat').update({ estado: 'error' }).eq('id', msg.id);

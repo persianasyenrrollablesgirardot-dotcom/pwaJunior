@@ -12,13 +12,15 @@ import { JuniorChat } from './JuniorChat';
 import { JuniorInstrucciones } from './JuniorInstrucciones';
 import { JuniorChecklist } from './JuniorChecklist';
 import { JuniorTareas } from './JuniorTareas';
+import { JuniorAgendamientos } from './JuniorAgendamientos';
 
-type Tab = 'chat' | 'instrucciones' | 'checklist' | 'tareas';
+type Tab = 'chat' | 'instrucciones' | 'checklist' | 'agendamientos' | 'tareas';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'chat', label: '💬 Chat' },
   { id: 'instrucciones', label: '📋 Instrucciones por chat' },
   { id: 'checklist', label: '✅ Checklist por chat' },
+  { id: 'agendamientos', label: '📅 Agendamientos' },
   { id: 'tareas', label: '📋 Tareas' },
 ];
 
@@ -62,12 +64,24 @@ export function Junior() {
         </div>
       </div>
 
-      {/* Contenido de la pestaña activa */}
-      <div style={{ flex: 1, overflow: 'hidden' }}>
-        {tab === 'chat' && <JuniorChat />}
-        {tab === 'instrucciones' && <JuniorInstrucciones />}
-        {tab === 'checklist' && <JuniorChecklist />}
-        {tab === 'tareas' && <JuniorTareas />}
+      {/* Contenido de la pestaña activa — se usa display:none en vez de desmontar
+          para preservar el estado (texto del input, posición de scroll) al cambiar de tab. */}
+      <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+        <div style={{ display: tab === 'chat' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
+          <JuniorChat />
+        </div>
+        <div style={{ display: tab === 'instrucciones' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
+          <JuniorInstrucciones />
+        </div>
+        <div style={{ display: tab === 'checklist' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
+          <JuniorChecklist />
+        </div>
+        <div style={{ display: tab === 'agendamientos' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
+          <JuniorAgendamientos />
+        </div>
+        <div style={{ display: tab === 'tareas' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
+          <JuniorTareas />
+        </div>
       </div>
     </div>
   );
