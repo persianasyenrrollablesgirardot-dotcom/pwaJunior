@@ -42,7 +42,7 @@ importScripts('extension_api.js');
 const DB_NAME    = 'wa_capture_v2_db';
 const DB_VERSION = 2;   // bump por chat_metadata store
 
-const SUPABASE_URL = 'https://olububjdvboiqgmihsmk.supabase.co';
+var SUPABASE_URL = 'https://olububjdvboiqgmihsmk.supabase.co';
 const OPENAI_CHAT_URL = 'https://api.openai.com/v1/chat/completions';
 const WHISPER_URL     = 'https://api.openai.com/v1/audio/transcriptions';
 
@@ -372,7 +372,8 @@ async function saveMessages(batch) {
         const isWhitelisted = chatIsWhitelisted(msg.chat_id, ia.whitelist);
         // Realtime procesa de ahora en adelante: los mensajes anteriores al
         // momento en que se prendió quedan para el "Procesar" manual.
-        const isRealtimeMsg = ia.realtimeEnabled && (msg.timestamp_ms || 0) >= (ia.realtimeSince || 0);
+        const margenTolerancia = 86400000; // 24 horas de margen para tolerar desincronización de reloj
+        const isRealtimeMsg = ia.realtimeEnabled && (msg.timestamp_ms || 0) >= ((ia.realtimeSince || 0) - margenTolerancia);
         if (!isWhitelisted && !isRealtimeMsg) {
           // Chat no autorizado y realtime OFF (o mensaje viejo): NO encolar (el msg
           // queda media_pending, listo para cuando se clickee "Procesar" o se
@@ -576,12 +577,70 @@ async function visionDescribe(bytes, mimetype) {
   return json.choices?.[0]?.message?.content?.trim() || '';
 }
 
+function extractTextFromPdf(bytes) {
+  try {
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    const rawStr = decoder.decode(bytes);
+    
+    // Limitar la extracción de texto a las primeras 2 páginas del PDF.
+    // Buscamos el marcador de la 3ra página ("/Type /Page" o "/Type/Page") y recortamos allí.
+    const pageMarkerRegex = /\/Type\s*\/Page\b/gi;
+    let pageCount = 0;
+    let limitIndex = -1;
+    let match;
+    while ((match = pageMarkerRegex.exec(rawStr)) !== null) {
+      pageCount++;
+      if (pageCount === 3) {
+        limitIndex = match.index;
+        break;
+      }
+    }
+    
+    const strToParse = limitIndex !== -1 ? rawStr.slice(0, limitIndex) : rawStr;
+    if (limitIndex !== -1) {
+      console.log('[VPG-BG-V2] PDF tiene >= 3 páginas. Recortando extracción al inicio de la página 3.');
+    }
+    
+    // Buscar todas las cadenas de texto dentro de paréntesis en el PDF recortado
+    const matches = strToParse.match(/\(([^)]+)\)/g) || [];
+    const strings = matches
+      .map(m => m.slice(1, -1).replace(/\\([()])/g, '$1')) // Quitar paréntesis externos y escapar caracteres
+      .filter(s => s.length >= 2 && !/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(s)); // Quedarse con texto legible/imprimible
+      
+    if (strings.length > 5) {
+      return strings.join(' ').slice(0, 10000);
+    }
+    
+    // Fallback: buscar palabras ASCII legibles en el binario (útil para PDFs no comprimidos)
+    const words = strToParse.match(/[a-zA-Z0-9áéíóúÁÉÍÓÚñÑüÜ\s\-\.\,\:\$\%]{4,}/g) || [];
+    const cleanedWords = words
+      .map(w => w.trim())
+      .filter(w => w.length >= 4 && !/^[a-zA-Z0-9]{15,}$/.test(w)); // Ignorar cadenas largas tipo hash/hexadecimal
+      
+    if (cleanedWords.length > 10) {
+      return cleanedWords.join(' ').slice(0, 10000);
+    }
+  } catch (err) {
+    console.warn('[VPG-BG-V2] extractTextFromPdf error:', err);
+  }
+  return '';
+}
+
 async function pdfSummarize(bytes, fileName) {
   const { openaiKey } = await getSettings();
   if (!openaiKey) throw new Error('openaiKey vacío');
-  let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  const b64 = btoa(bin);
+
+  // Extraer texto plano nativamente para evitar type: 'file' no soportado por OpenAI Chat
+  const extractedText = extractTextFromPdf(bytes);
+  let promptContent = PDF_PROMPT;
+  if (fileName) promptContent += `\nArchivo: ${fileName}`;
+
+  if (extractedText.trim().length > 10) {
+    promptContent += `\n\n[TEXTO EXTRAÍDO DEL DOCUMENTO PDF]:\n${extractedText}`;
+  } else {
+    promptContent += `\n\n[NOTA]: No se pudo extraer el texto directo del PDF (podría ser un PDF escaneado como imagen o comprimido). Si el nombre del archivo sugiere qué tipo de cotización o documento es, descríbelo según eso o indícalo amablemente.`;
+  }
+
   const res = await fetch(OPENAI_CHAT_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
@@ -590,10 +649,7 @@ async function pdfSummarize(bytes, fileName) {
       max_tokens: 600,
       messages: [{
         role: 'user',
-        content: [
-          { type: 'text', text: PDF_PROMPT + (fileName ? `\nArchivo: ${fileName}` : '') },
-          { type: 'file', file: { filename: fileName || 'documento.pdf', file_data: `data:application/pdf;base64,${b64}` } },
-        ],
+        content: promptContent,
       }],
     }),
   });
@@ -666,11 +722,32 @@ async function drainQueue() {
       });
       return out;
     });
-    for (const task of tasks) {
-      if (task.taskType === 'download_media' && downloadInFlight < MAX_DOWNLOAD_CONCURRENCY) {
+
+    const leasedTasks = [];
+    if (tasks.length > 0) {
+      await tx('pending_queue', 'readwrite', async s => {
+        for (const task of tasks) {
+          const downloadsCurrentlyActive = downloadInFlight + leasedTasks.filter(t => t.taskType === 'download_media').length;
+          const aiCurrentlyActive = aiInFlight + leasedTasks.filter(t => t.taskType === 'ai_process').length;
+          
+          const canDownload = task.taskType === 'download_media' && downloadsCurrentlyActive < MAX_DOWNLOAD_CONCURRENCY;
+          const canAI = task.taskType === 'ai_process' && aiCurrentlyActive < MAX_AI_CONCURRENCY;
+          
+          if (canDownload || canAI) {
+            // Lease de la tarea por 2 minutos para evitar ejecuciones duplicadas en paralelo (race condition)
+            task.nextAt = Date.now() + 120000;
+            await reqAsync(s.put(task));
+            leasedTasks.push(task);
+          }
+        }
+      });
+    }
+
+    for (const task of leasedTasks) {
+      if (task.taskType === 'download_media') {
         downloadInFlight++;
         runDownloadTask(task).finally(() => { downloadInFlight--; setTimeout(drainQueue, 50); });
-      } else if (task.taskType === 'ai_process' && aiInFlight < MAX_AI_CONCURRENCY) {
+      } else if (task.taskType === 'ai_process') {
         aiInFlight++;
         runAITask(task).finally(() => { aiInFlight--; setTimeout(drainQueue, 50); });
       }
@@ -742,6 +819,7 @@ async function runDownloadTask(task) {
           id: msg.id, state: 'ready_to_sync', attempts: 0, lastError: null, updatedAt: Date.now(),
         })));
         await removeTask(task.qid);
+        if (typeof syncToVisorPG === 'function') syncToVisorPG();
         return;
       }
       await tx('messages', 'readwrite', s => reqAsync(s.put(msg)));
@@ -780,6 +858,7 @@ async function runAITask(task) {
       msg.media.ai_status = 'processed';
       msg.processing_state = 'ready_to_sync';
       await tx('messages', 'readwrite', s => reqAsync(s.put(msg)));
+      if (typeof syncToVisorPG === 'function') syncToVisorPG();
     } else {
       msg.media.ai_status = 'skipped';
       await tx('messages', 'readwrite', s => reqAsync(s.put(msg)));
@@ -804,7 +883,10 @@ function handleMessage(msg, sender, sendResponse) {
   if (msg?.type === 'V2_BATCH' && Array.isArray(msg.messages)) {
     saveMessages(msg.messages)
       .then(({ saved, mediaQueued, mediaSkipped }) => {
-        if (saved > 0) console.log(`[WS-BG-V2] batch saved=${saved} mediaQueued=${mediaQueued} mediaSkipped=${mediaSkipped}`);
+        if (saved > 0) {
+          console.log(`[WS-BG-V2] batch saved=${saved} mediaQueued=${mediaQueued} mediaSkipped=${mediaSkipped}`);
+          if (typeof syncToVisorPG === 'function') syncToVisorPG();
+        }
         if (mediaQueued > 0) drainQueue();
         sendResponse({ ok: true, saved, mediaQueued, mediaSkipped });
       })
@@ -1315,7 +1397,6 @@ async function saveChatMetadata(metadataList) {
 }
 
 chrome.runtime.onMessage.addListener(handleMessage);
-chrome.runtime.onMessageExternal.addListener(handleMessage);
 
 // ─── Funciones de control para el Visor ───────────────────────────
 

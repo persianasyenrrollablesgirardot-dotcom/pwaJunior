@@ -22,6 +22,9 @@
 
 'use strict';
 
+var SUPABASE_URL = 'https://olububjdvboiqgmihsmk.supabase.co';
+
+
 const VISOR_API_VERSION = '5.0.0';
 
 // Expresiones regex para detectar candidatos a no-cliente

@@ -14,6 +14,9 @@
 
 'use strict';
 
+var SUPABASE_URL = 'https://olububjdvboiqgmihsmk.supabase.co';
+
+
 // Cache en memoria del SW: jid → chat_id_db (sobrevive hasta que el SW se duerme).
 const chatIdCache = new Map();
 
@@ -335,7 +338,10 @@ function canonicalToMensajeRow(m, chatIdDb) {
     metadata:       {
       internal_id:        m.internal_id,
       row_id:             m.row_id,
-      ai_text:            m.ai_text || null,
+      ai_text:            m.media?.ai_text || m.ai_text || null,
+      ai_status:          m.media?.ai_status || null,
+      ai_error:           m.media?.ai_error || null,
+      ai_kind:            m.media?.ai_kind || null,
       quoted_message_id:  m.quoted_message_id || null,
       quoted_sender_jid:  m.quoted_sender_jid || null,
       type_original:      m.type,
@@ -419,7 +425,8 @@ async function syncToVisorPG() {
           const cur = e.target.result;
           if (!cur || out.length >= 500) { res(); return; }
           const m = cur.value;
-          if (chatPermitido(m.chat_id) && (m.timestamp_ms || 0) >= realtimeSince) {
+          const margenTolerancia = 86400000; // 24 horas de margen para tolerar desincronización de reloj y offline
+          if (chatPermitido(m.chat_id) && (m.timestamp_ms || 0) >= (realtimeSince - margenTolerancia)) {
             out.push(m);
           }
           cur.continue();
