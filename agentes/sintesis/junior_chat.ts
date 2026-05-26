@@ -46,7 +46,6 @@ export interface NuevaTarea {
   descripcion: string | null;
 }
 export interface TareaCompletar { id: number }
-export interface SyncTareasAgenda { solo_con_hora: boolean }
 export interface NotaPersona { persona_id: number; nota: string; tipo: 'pendiente_verificacion' | 'no_comercial' | 'saltear' | 'otro' }
 
 export function systemPrompt(
@@ -372,6 +371,35 @@ Si Jhon te da una PREFERENCIA sobre cómo comportarte ("sé más breve", "tratam
 a "memorias" con tipo="preferencia" (forma de responder) o tipo="dato" (hecho del negocio).
 Confirmale en "respuesta" que lo vas a recordar. NO uses "memorias" para hechos de un cliente
 concreto — eso va en "correcciones".
+
+═══ ROLES NO COMERCIALES — DOBLE REGISTRO OBLIGATORIO ═══
+Cuando Jhon te dice que un contacto es su FAMILIAR (cuñado, suegra, esposa, hermano…), su
+PROVEEDOR (instalador, contadora, asesor de algún servicio…) o cualquier otro vínculo NO
+COMERCIAL, tenés que registrarlo en DOS lugares al mismo turno — uno solo no alcanza:
+
+1. "notasPersona" con tipo="no_comercial" y la nota descriptiva → el sistema reclasifica el
+   ámbito del contacto en la BD (queda como personal_familia / proveedor / personal_otros)
+   y dispara re-síntesis. Sin esto, en la próxima conversación el contacto vuelve a
+   aparecer como "cliente comercial" en el contexto.
+
+2. "memorias" con tipo="preferencia" y un texto en primera persona como "Cuando Jhon
+   mencione a <nombre o número>, recordar que es su <rol> (no cliente comercial)."
+   Esto garantiza que si la nota se pierde o el contexto cambia, vos lo sigas recordando
+   en TODAS las sesiones futuras, incluso las que arranquen de cero.
+
+Ejemplo — Jhon dice "este número +573132778804 es Fredy mi cuñado":
+{
+  "respuesta": "Anotado: Fredy es tu cuñado, lo saco del flujo comercial.",
+  "notasPersona": [{ "persona_id": 156, "tipo": "no_comercial", "nota": "Es Fredy, cuñado de Jhon. Contacto familiar." }],
+  "memorias": [{ "tipo": "preferencia", "contenido": "El contacto +573132778804 / persona_id 156 es Fredy, cuñado de Jhon. Familiar, no cliente comercial — NUNCA preguntar por él como si fuera cliente." }],
+  "correcciones": [], "nuevosClientes": [], "resoluciones": [],
+  "nuevasTareas": [], "tareasCompletar": [],
+  "nuevosAgendamientos": [], "agendamientosCancelar": []
+}
+
+Si Jhon te muestra frustración ("ya te lo dije N veces", "cuántas veces tengo que repetir"),
+es síntoma de que olvidaste el rol del contacto. SIEMPRE agregá la memoria persistente —
+es la única defensa contra que se pierda al comprimir el historial.
 ${duplicados}
 ${tareasAbiertas}
 

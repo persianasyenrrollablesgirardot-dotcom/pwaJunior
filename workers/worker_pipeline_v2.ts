@@ -768,7 +768,17 @@ async function cicloJuniorChat(): Promise<void> {
         }
 
         // Notas de persona — decisiones de sesión que persisten en la BD
-        // (pendiente_verificacion, no_comercial, saltear) para que no se repitan preguntas
+        // (pendiente_verificacion, no_comercial, saltear) para que no se repitan preguntas.
+        //
+        // Además, para 'no_comercial' y 'saltear', UPDATEa personas.ambito_principal
+        // y dispara re-síntesis. Antes solo escribía la corrección, el ámbito quedaba
+        // 'comercial' y Junior volvía a tratar al contacto como cliente en la siguiente
+        // sesión → Jhon tenía que repetir "es mi cuñado/suegra/mecánico" cada vez.
+        //
+        // Heurística de mapeo nota→ámbito: leer la nota para detectar familia /
+        // proveedor; fallback a 'personal_otros' si no se identifica nada específico.
+        // Si más adelante hace falta, Junior puede emitir notasPersona.ambito_destino
+        // explícito y nos saltamos la heurística.
         for (const np of r.notasPersona ?? []) {
           try {
             const prefijoPorTipo: Record<string, string> = {
@@ -787,8 +797,29 @@ async function cicloJuniorChat(): Promise<void> {
             } as any);
             if (error) {
               console.error(`[V2/JUNIOR] nota_persona persona ${np.persona_id}: ${error.message}`);
-            } else {
-              console.log(`[V2/JUNIOR] nota_persona [${np.tipo}] persona ${np.persona_id}: "${hecho.slice(0, 60)}"`);
+              continue;
+            }
+            console.log(`[V2/JUNIOR] nota_persona [${np.tipo}] persona ${np.persona_id}: "${hecho.slice(0, 60)}"`);
+
+            // Propagar al ámbito real cuando aplica + disparar re-síntesis.
+            if (np.tipo === 'no_comercial' || np.tipo === 'saltear') {
+              const notaLower = (np.nota ?? '').toLowerCase();
+              let ambitoDestino = 'personal_otros';
+              if (/\b(familiar|familia|cu[ñn]ado|cu[ñn]ada|esposa|esposo|hijo|hija|madre|mam[áa]|padre|pap[áa]|herman[oa]|t[íi]o|t[íi]a|primo|prima|abuel[oa]|suegr[oa]|sobrin[oa]|yerno|nuera)\b/.test(notaLower)) {
+                ambitoDestino = 'personal_familia';
+              } else if (/\b(proveedor|instalador|contadora|asesor[ae]?|socio|socia|empleado|empleada)\b/.test(notaLower)) {
+                ambitoDestino = 'proveedor';
+              } else if (/\b(mec[áa]nico|electricista|plomero|carpintero|t[ée]cnico|amigo|amiga|conocido)\b/.test(notaLower)) {
+                ambitoDestino = 'personal_otros';
+              }
+              const { error: e2 } = await sb.from('personas')
+                .update({ ambito_principal: ambitoDestino, sintesis_pendiente: true })
+                .eq('id', np.persona_id);
+              if (e2) {
+                console.error(`[V2/JUNIOR] update ambito persona ${np.persona_id}: ${e2.message}`);
+              } else {
+                console.log(`[V2/JUNIOR] persona ${np.persona_id} reclasificada → ambito='${ambitoDestino}' (re-síntesis encolada)`);
+              }
             }
           } catch (e: any) {
             console.error(`[V2/JUNIOR] nota_persona persona ${np.persona_id}: ${e.message}`);
