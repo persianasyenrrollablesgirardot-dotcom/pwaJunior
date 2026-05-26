@@ -120,7 +120,39 @@ export function Clientes() {
     }
   }
 
-  useEffect(() => { cargar(); }, []);
+  useEffect(() => {
+    cargar();
+
+    // SUSCRIPCIÓN EN TIEMPO REAL: Recargar la lista si hay cambios en chats o personas
+    const canalChats = supabase
+      .channel('realtime:clientes_chats')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'chats' },
+        () => {
+          console.log('[VPG-REALTIME] Cambio detectado en chats. Recargando clientes...');
+          cargar();
+        }
+      )
+      .subscribe();
+
+    const canalPersonas = supabase
+      .channel('realtime:clientes_personas')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'personas' },
+        () => {
+          console.log('[VPG-REALTIME] Cambio detectado en personas. Recargando clientes...');
+          cargar();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(canalChats);
+      supabase.removeChannel(canalPersonas);
+    };
+  }, []);
 
   const filtradas = useMemo(() => {
     let r = rows;
@@ -344,7 +376,12 @@ export function Clientes() {
         <ModalEliminarCliente
           cliente={modalEliminar}
           onClose={() => setModalEliminar(null)}
-          onDone={(msg) => { setModalEliminar(null); setAviso({ tipo: 'ok', msg }); cargar(); }}
+          onDone={(msg) => {
+            if (ctx.chatActivoId === modalEliminar.chat_id) ctx.limpiar();
+            setModalEliminar(null);
+            setAviso({ tipo: 'ok', msg });
+            cargar();
+          }}
           onError={(msg) => { setAviso({ tipo: 'err', msg }); }}
         />
       )}

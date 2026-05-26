@@ -66,6 +66,33 @@ export function Captura() {
         setTopeDiario(Number(cfg.ia_tope_diario_alerta_usd ?? 5));
       })
       .catch(() => {});
+
+    // SUSCRIPCIÓN EN TIEMPO REAL: Recargar los chats procesados si cambian en Supabase
+    const canalChats = supabase
+      .channel('realtime:captura_procesados')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'chats' },
+        async () => {
+          console.log('[VPG-REALTIME] Cambio detectado en chats. Recargando procesados...');
+          try {
+            const { data } = await supabase.from('chats')
+              .select('id, canal_chat_id, ia_historico_procesado')
+              .eq('canal', 'whatsapp')
+              .eq('ia_historico_procesado', true);
+            const m = new Map<string, number>();
+            (data ?? []).forEach((c: any) => { if (c.canal_chat_id) m.set(c.canal_chat_id, c.id); });
+            setProcesadosPorJid(m);
+          } catch (err) {
+            console.error('[VPG-REALTIME] Error recargando procesados:', err);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(canalChats);
+    };
   }, []);
 
   // Cargar mensajes del chat seleccionado para preview en panel derecho.
