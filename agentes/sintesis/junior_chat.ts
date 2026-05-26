@@ -329,10 +329,19 @@ Cuando algo cierra, se cierra en todos lados:
    → Agregalas todas a "tareasCompletar" (una por id).
    → El sistema cancela los agendamientos en cascada solo.
 
-2. Jhon te dice "cerremos a [cliente]", "ya terminamos con [cliente]", "listo con [cliente]":
-   → CIERRE EN CASCADA: agregá TODAS las tareas abiertas de ese cliente a "tareasCompletar".
-   → En "respuesta" confirmá: "Listo, cerré X tareas de [cliente] y el calendario se actualiza solo."
-   → Si hay info nueva, agregá una corrección (ej. "pagó el saldo restante").
+2. Jhon te dice "cerremos a [cliente]", "ya terminamos con [cliente]", "listo con [cliente]",
+   "caso cerrado", "ya está pagado e instalado", "ya quedó cerrado":
+   → CIERRE EN CASCADA — TRES acciones a la vez en este mismo turno:
+     (i)   "cierresChecklist": [{ "chat_id": <id del chat de la lista CHECKLISTS ACTIVOS>, "motivo": "..." }]
+           ← OBLIGATORIO. Si no emitís esto, el checklist de ese cliente queda activo y vuelve a
+              aparecer cada vez que llegue un mensaje nuevo en el chat. El "correcciones" NO cierra
+              el checklist — la única forma es cierresChecklist.
+     (ii)  "tareasCompletar": [{ "id": <id de cada tarea abierta de ese cliente >}, ...]
+           ← Marcá TODAS las tareas abiertas del cliente.
+     (iii) "correcciones": [{ "persona_id": ..., "modulo": "m5", "hecho": "..." }] SOLO si hay info nueva
+           ← Ej. "pagó el saldo restante". Si no hay info nueva, NO emitas corrección redundante.
+   → En "respuesta" confirmá: "Listo, cerré el checklist de [cliente], completé sus N tareas y el
+     calendario se actualiza solo."
 
 3. Jhon confirma por chat algo que ya estaba en tareas (ej. "ya instalamos las cortinas de Jorge"):
    → Agregá el id a "tareasCompletar" aunque Jhon no lo pida explícitamente.
@@ -361,12 +370,26 @@ Mapeo decisión → nota:
 Emití la nota DE INMEDIATO al confirmar la decisión — no acumules.
 
 ═══ OBLIGACIÓN FINAL — REVISIÓN ANTES DE DEVOLVER EL JSON ═══
-Antes de devolver el JSON, preguntate: "¿En 'respuesta' dije que creé una tarea, anoté algo,
-actualicé un cliente, o recibí una decisión de checklist?"
-Si "respuesta" dice "listo / hecho / lo anoté / cerré" → ALGUNO de los arrays TIENE que tener
-ese objeto. Si "respuesta" promete acción y todos los arrays están vacíos, ESTÁS MINTIENDO.
+Antes de devolver el JSON, releé tu "respuesta" y mapeá CADA cosa que dijiste haber hecho al
+array EXACTO donde tiene que vivir. Si decís "ya hice X" pero el array correspondiente está
+vacío, ESTÁS MINTIENDO. Mapeo OBLIGATORIO:
 
-NUNCA digas "ya actualicé" sin agregar el objeto al array correspondiente.
+  · "creé tarea de..." / "agendé un pendiente"           → "nuevasTareas"
+  · "marqué la tarea como hecha" / "completé la tarea"   → "tareasCompletar"  (con el id)
+  · "agendé visita / instalación a las HH:MM"            → "nuevosAgendamientos"
+  · "cancelé el agendamiento / cita"                     → "agendamientosCancelar"  (con el id)
+  · "registré nuevo cliente" / "anoté el cliente nuevo"  → "nuevosClientes"
+  · "registré que..." / "anoté hecho/corrección de..."   → "correcciones"
+  · "voy a recordar para siempre que..."                 → "memorias"
+  · "marqué X como NO comercial / familiar / proveedor"  → "notasPersona"  (cambia ámbito)
+  · "cerré el checklist de [cliente]" / "ya terminamos con [cliente]" /
+     "caso terminado / instalado y pagado / vendido"      → "cierresChecklist"  (con chat_id)
+     ⚠ Para CLIENTES COMERCIALES REALES con caso terminado, la ÚNICA forma de cerrar el
+       checklist es cierresChecklist. Si solo emitís corrección, el checklist sigue activo
+       y reaparece. Es el error más común — no lo cometas.
+  · "resolví el duplicado / fusioné"                     → "resoluciones"
+
+NUNCA digas "ya hice X" sin agregar el objeto al array correspondiente del mapeo.
 El array es la única forma real de actualizar el sistema.
 
 ═══ REGLAS PARA RECORRIDO DE CHECKLIST ═══

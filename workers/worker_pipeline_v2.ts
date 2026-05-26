@@ -584,6 +584,25 @@ async function cicloJuniorChat(): Promise<void> {
           .map((h: any) => ({ rol: h.rol, mensaje: h.mensaje }));
 
         const r = await responderJunior(sb, msg.mensaje, historial, msg.sesion_id);
+        // Detección defensiva — Junior promete acciones pero deja el array vacío.
+        // No bloquea la respuesta (puede ser frase ambigua) pero queda visible en el
+        // log para auditar el patrón. Si esto se repite mucho, hay que reforzar el prompt.
+        const resp = (r.respuesta ?? '').toLowerCase();
+        const promesas: string[] = [];
+        if (/cerr[ée]\s+(el\s+)?checklist|cierro\s+(el\s+)?checklist|caso\s+(cerrado|terminado)/i.test(resp) && r.cierresChecklist.length === 0)
+          promesas.push('cierresChecklist');
+        if (/marqu[ée]\s+(la\s+)?tarea\s+(como\s+)?(hecha|completada)|complet[ée]\s+(la\s+)?tarea/i.test(resp) && r.tareasCompletar.length === 0)
+          promesas.push('tareasCompletar');
+        if (/cancel[ée]\s+(el\s+)?agendamient/i.test(resp) && r.agendamientosCancelar.length === 0)
+          promesas.push('agendamientosCancelar');
+        if (/agend[ée]\s+(la\s+)?(visita|cita|instalaci[óo]n)/i.test(resp) && r.nuevosAgendamientos.length === 0)
+          promesas.push('nuevosAgendamientos');
+        if (/cre[ée]\s+(la\s+)?tarea|agend[ée]\s+(la\s+)?tarea/i.test(resp) && r.nuevasTareas.length === 0 && r.nuevosAgendamientos.length === 0)
+          promesas.push('nuevasTareas');
+        if (promesas.length > 0) {
+          console.warn(`[V2/JUNIOR] ⚠ msg ${msg.id}: respuesta promete acción pero estos arrays vienen vacíos: ${promesas.join(', ')}`);
+          console.warn(`  fragmento respuesta: "${(r.respuesta ?? '').slice(0, 200).replace(/\s+/g, ' ')}"`);
+        }
         // Los fallback ("no pude armar la respuesta") se marcan 'error': se
         // muestran a Jhon pero NO entran al historial (lo contaminarían).
         await sb.from('junior_chat').insert({
