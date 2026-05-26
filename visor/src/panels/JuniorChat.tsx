@@ -38,9 +38,18 @@ export function JuniorChat() {
   const [sesiones, setSesiones] = useState<Sesion[]>([]);
   const [sesionActiva, setSesionActiva] = useState<number | null>(null);
   const [mensajes, setMensajes] = useState<Mensaje[]>([]);
+  const [prevLen, setPrevLen] = useState(0);
   const [input, setInput] = useState('');
   const [enviando, setEnviando] = useState(false);
   const finRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  /** Devuelve true si el usuario está cerca del final (últimos 80px). */
+  function estaEnFondo(): boolean {
+    const el = scrollRef.current;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }
 
   /** Carga las sesiones; si no hay ninguna, crea una. Devuelve la más reciente. */
   async function cargarSesiones(): Promise<number | null> {
@@ -81,7 +90,16 @@ export function JuniorChat() {
     return () => clearInterval(t);
   }, [sesionActiva]);
 
-  useEffect(() => { finRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [mensajes]);
+  useEffect(() => {
+    if (mensajes.length > prevLen) {
+      // Solo hace scroll automático si el usuario ya estaba en el fondo.
+      // Si está leyendo mensajes anteriores, no lo interrumpimos.
+      if (estaEnFondo()) {
+        finRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }
+    }
+    setPrevLen(mensajes.length);
+  }, [mensajes, prevLen]);
 
   const esperando = mensajes.some(m => m.rol === 'usuario' && m.estado === 'pendiente');
 
@@ -114,6 +132,8 @@ export function JuniorChat() {
       setSesiones(list => list.map(s => s.id === sesionActiva ? { ...s, titulo } : s));
     }
     await cargarMensajes(sesionActiva);
+    // Después de enviar SÍ queremos ir al final siempre.
+    setTimeout(() => finRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
     setEnviando(false);
   }
 
@@ -157,7 +177,7 @@ export function JuniorChat() {
       </div>
 
       {/* Mensajes */}
-      <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
+      <div ref={scrollRef} style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
         {mensajes.length === 0 && (
           <div style={{ maxWidth: 520, margin: '40px auto', textAlign: 'center' }}>
             <div style={{ fontSize: 40, marginBottom: 10 }}>🤖</div>

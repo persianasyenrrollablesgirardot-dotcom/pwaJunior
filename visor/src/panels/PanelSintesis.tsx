@@ -41,30 +41,77 @@ export function PanelSintesis({ modulo, titulo }: { modulo: string; titulo: stri
   const [data, setData] = useState<Sintesis | null>(null);
   const [novedades, setNovedades] = useState<Novedad[]>([]);
   const [cargando, setCargando] = useState(true);
+  const [reanalizando, setReanalizando] = useState(false);
+
+  async function reanalizar() {
+    if (ctx.personaActivaId == null) return;
+    setReanalizando(true);
+    try {
+      const { error } = await supabase
+        .from('personas')
+        .update({ sintesis_pendiente: true })
+        .eq('id', ctx.personaActivaId);
+      if (error) throw error;
+      console.log('[VPG] Re-análisis solicitado para persona:', ctx.personaActivaId);
+    } catch (e) {
+      console.error('[VPG] Error al solicitar re-análisis:', e);
+    } finally {
+      setTimeout(() => setReanalizando(false), 2000);
+    }
+  }
 
   useEffect(() => {
     if (ctx.personaActivaId == null) { setData(null); setNovedades([]); setCargando(false); return; }
     setCargando(true);
     const personaId = ctx.personaActivaId;
-    Promise.all([
-      supabase
-        .from('modulo_sintesis')
-        .select('sintesis,estado,estado_semaforo,proximo_paso,alerta,generado_at,generado_por')
-        .eq('persona_id', personaId)
-        .eq('modulo', modulo)
-        .maybeSingle(),
-      supabase
-        .from('correcciones_humanas')
-        .select('id,hecho,created_at')
-        .eq('persona_id', personaId)
-        .eq('modulo', modulo)
-        .eq('vigente', true)
-        .order('created_at', { ascending: false }),
-    ]).then(([sint, corr]) => {
-      setData((sint.data as Sintesis) ?? null);
-      setNovedades((corr.data as Novedad[]) ?? []);
-      setCargando(false);
-    });
+
+    function cargarDatos() {
+      Promise.all([
+        supabase
+          .from('modulo_sintesis')
+          .select('sintesis,estado,estado_semaforo,proximo_paso,alerta,generado_at,generado_por')
+          .eq('persona_id', personaId)
+          .eq('modulo', modulo)
+          .maybeSingle(),
+        supabase
+          .from('correcciones_humanas')
+          .select('id,hecho,created_at')
+          .eq('persona_id', personaId)
+          .eq('modulo', modulo)
+          .eq('vigente', true)
+          .order('created_at', { ascending: false }),
+      ]).then(([sint, corr]) => {
+        setData((sint.data as Sintesis) ?? null);
+        setNovedades((corr.data as Novedad[]) ?? []);
+        setCargando(false);
+      });
+    }
+
+    cargarDatos();
+
+    // SUSCRIPCIÓN EN TIEMPO REAL: Recargar datos cuando cambie la síntesis de esta persona en este módulo
+    const canal = supabase
+      .channel(`realtime:sintesis_${modulo}_${personaId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'modulo_sintesis',
+          filter: `persona_id=eq.${personaId}`,
+        },
+        (payload: any) => {
+          if (payload.new && payload.new.modulo === modulo) {
+            console.log('[VPG-REALTIME] Nueva síntesis recibida en tiempo real:', payload.new);
+            setData(payload.new as Sintesis);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(canal);
+    };
   }, [ctx.personaActivaId, modulo]);
 
   if (ctx.personaActivaId == null) return null;
@@ -83,9 +130,27 @@ export function PanelSintesis({ modulo, titulo }: { modulo: string; titulo: stri
 
   if (!data || !data.sintesis) {
     return (
-      <div style={{ ...wrap, color: 'var(--text-muted)', fontSize: 13 }}>
+      <div style={{ ...wrap, color: 'var(--text-muted)', fontSize: 13, borderLeft: '4px solid var(--border)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--accent)' }}>
+            🤖 {titulo} — {ctx.personaActivaNombre}
+          </span>
+          <button
+            onClick={reanalizar}
+            disabled={reanalizando}
+            title="Forzar re-análisis manual por los agentes analistas de IA"
+            style={{
+              fontSize: 10, padding: '2px 8px', background: 'transparent',
+              border: '1px solid var(--accent)', color: 'var(--accent)',
+              borderRadius: 4, cursor: reanalizando ? 'default' : 'pointer',
+              opacity: reanalizando ? 0.6 : 1, fontWeight: 600
+            }}
+          >
+            {reanalizando ? '⌛ Solicitando...' : '↻ Re-analizar'}
+          </button>
+        </div>
         El analista todavía no procesó a <strong>{ctx.personaActivaNombre}</strong>. Procesá su chat
-        para que el agente genere el análisis.
+        o dale click en Re-analizar para que el agente genere el análisis.
       </div>
     );
   }
@@ -95,13 +160,28 @@ export function PanelSintesis({ modulo, titulo }: { modulo: string; titulo: stri
   return (
     <div style={{ ...wrap, borderLeft: `4px solid ${sem.color}` }}>
       {/* Encabezado */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
         <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--accent)' }}>
           🤖 {titulo} — {ctx.personaActivaNombre}
         </span>
-        <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-          analizado {fmtFecha(data.generado_at)}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            onClick={reanalizar}
+            disabled={reanalizando}
+            title="Forzar re-análisis manual por los agentes analistas de IA"
+            style={{
+              fontSize: 10, padding: '2px 8px', background: 'transparent',
+              border: '1px solid var(--accent)', color: 'var(--accent)',
+              borderRadius: 4, cursor: reanalizando ? 'default' : 'pointer',
+              opacity: reanalizando ? 0.6 : 1, fontWeight: 600, marginRight: 8
+            }}
+          >
+            {reanalizando ? '⌛ Solicitando...' : '↻ Re-analizar'}
+          </button>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+            analizado {fmtFecha(data.generado_at)}
+          </span>
+        </div>
       </div>
 
       {/* Síntesis */}

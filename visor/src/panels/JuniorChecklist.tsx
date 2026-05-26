@@ -94,11 +94,11 @@ export function JuniorChecklist() {
     return () => clearInterval(t);
   }, []);
 
-  const conteo = (e: Estado) => filas.filter(f => f.estado === e).length;
-  const teToca = filas.filter(f => TE_TOCA.includes(f.estado));
-  const noTeToca = filas.filter(f => !TE_TOCA.includes(f.estado));
-  const filtradas = filtro === 'todos' ? [] : filas.filter(f => f.estado === filtro);
-  const compromisos = filas.flatMap(f =>
+  const conteo = (e: Estado) => filas.filter(f => f.estado === e && f.tipo !== 'no_aplica').length;
+  const teToca = filas.filter(f => TE_TOCA.includes(f.estado) && f.tipo !== 'no_aplica');
+  const noTeToca = filas.filter(f => !TE_TOCA.includes(f.estado) && f.tipo !== 'no_aplica');
+  const filtradas = filtro === 'todos' ? [] : filas.filter(f => f.estado === filtro && f.tipo !== 'no_aplica');
+  const compromisos = filas.filter(f => f.tipo !== 'no_aplica').flatMap(f =>
     (f.compromisos ?? []).map(c => ({ cliente: nombreDe(f), ...c })));
 
   return (
@@ -124,7 +124,7 @@ export function JuniorChecklist() {
           {/* Filtro por estado — el semáforo es clickeable */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 18 }}>
             <FiltroChip activo={filtro === 'todos'} onClick={() => setFiltro('todos')}
-              punto="" label="Todos" count={filas.length} color="var(--accent)" />
+              punto="" label="Todos" count={filas.filter(f => f.tipo !== 'no_aplica').length} color="var(--accent)" />
             {(Object.keys(ESTADO_META) as Estado[]).map(e => (
               <FiltroChip key={e} activo={filtro === e}
                 onClick={() => setFiltro(filtro === e ? 'todos' : e)}
