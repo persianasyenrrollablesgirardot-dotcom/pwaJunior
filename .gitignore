@@ -57,3 +57,6 @@ _audit_shots/
 /_*.mjs
 /_*.ts
 /_*.mts
+
+# Artifacts del stress test (snapshots, JSONL, bitácora, reportes — efímeros)
+tests/_*

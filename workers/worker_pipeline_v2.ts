@@ -662,16 +662,27 @@ async function cicloJuniorChat(): Promise<void> {
           console.warn(`  · tareasCompletar (${r.tareasCompletar.length}): ${r.tareasCompletar.map(x => '#' + x.id).join(', ')}`);
           console.warn(`  · cierresChecklist (${r.cierresChecklist.length}): ${r.cierresChecklist.map(x => 'chat' + x.chat_id).join(', ')}`);
           console.warn(`  · agendamientosCancelar (${r.agendamientosCancelar.length}): ${r.agendamientosCancelar.map(x => '#' + x.id).join(', ')}`);
+          console.warn(`  · respuesta original (queda en log, NO se muestra a Jhon): "${(r.respuesta ?? '').slice(0, 400).replace(/\s+/g, ' ')}"`);
           r.tareasCompletar = [];
           r.cierresChecklist = [];
           r.agendamientosCancelar = [];
-          // Anteponer aviso al texto que ve Jhon — así sabe que el guard se activó.
-          r.respuesta = `⚠ Bloqueé las ${totalDestructivas} acciones destructivas que iba a aplicar — son demasiadas para un solo turno (límite=5) y prefiero confirmar antes de romper algo. Mencioná específicamente qué cerrar/completar (por nombre o id) y procedo en bloques de 5 como máximo.\n\n— mi propuesta era:\n${r.respuesta}`;
+          // REEMPLAZAR respuesta entera (no anteponer): si dejamos la propuesta abajo, el
+          // usuario lee "cerré checklists de Rocio, Julio..." y queda confundido entre el
+          // aviso y la frase mentirosa. La propuesta detallada queda en los logs del worker
+          // si Jhon necesita auditar qué iba a hacer Junior.
+          r.respuesta = `⚠ Bloqueé ${totalDestructivas} acciones destructivas que ibas a aplicar — son demasiadas para un solo turno (límite=5) y prefiero confirmar antes de romper algo. Decime específicamente qué cerrar/completar/cancelar (por nombre o id) y procedo en bloques de 5 como máximo.`;
         }
 
-        // Detección defensiva — Junior promete acciones pero deja el array vacío.
-        // No bloquea la respuesta (puede ser frase ambigua) pero queda visible en el
-        // log para auditar el patrón. Si esto se repite mucho, hay que reforzar el prompt.
+        // Detección defensiva CORRECTORA — Junior promete acciones pero deja el array vacío.
+        // El prompt ya lo prohíbe (sección OBLIGACIÓN FINAL + REGLA DE HONESTIDAD), pero si
+        // el LLM miente igual, antepongo un aviso determinístico a la respuesta para que el
+        // usuario NO lea la promesa falsa sin contexto. Mismo patrón que el guard anti-ráfaga.
+        // Promesas detectadas:
+        //   cierresChecklist     → "cerré/cierro checklist", "caso cerrado/terminado"
+        //   tareasCompletar      → "marqué/completé tarea"
+        //   agendamientosCancelar → "cancelé agendamiento"
+        //   nuevosAgendamientos  → "agendé visita/cita/instalación"
+        //   nuevasTareas         → "creé/agendé tarea"
         const resp = (r.respuesta ?? '').toLowerCase();
         const promesas: string[] = [];
         if (/cerr[ée]\s+(el\s+)?checklist|cierro\s+(el\s+)?checklist|caso\s+(cerrado|terminado)/i.test(resp) && r.cierresChecklist.length === 0)
@@ -687,6 +698,17 @@ async function cicloJuniorChat(): Promise<void> {
         if (promesas.length > 0) {
           console.warn(`[V2/JUNIOR] ⚠ msg ${msg.id}: respuesta promete acción pero estos arrays vienen vacíos: ${promesas.join(', ')}`);
           console.warn(`  fragmento respuesta: "${(r.respuesta ?? '').slice(0, 200).replace(/\s+/g, ' ')}"`);
+          // Aviso al usuario: la frase de abajo dice que hice X pero NO lo hice.
+          // Lo antepongo en lugar de reemplazar la respuesta entera porque la frase original
+          // puede contener info útil (preguntas, contexto). El usuario lee el aviso primero.
+          const promesasLeg = promesas.map(p => ({
+            cierresChecklist:     'cerrar checklists',
+            tareasCompletar:      'completar tareas',
+            agendamientosCancelar:'cancelar agendamientos',
+            nuevosAgendamientos:  'agendar visitas/citas',
+            nuevasTareas:         'crear tareas',
+          } as Record<string,string>)[p] || p).join(', ');
+          r.respuesta = `⚠ Aviso del worker: en mi respuesta de abajo dije que iba a ${promesasLeg}, pero NO emití las acciones (arrays vacíos). Probablemente me faltaron ids concretos o el caso era ambiguo. Pedímelo otra vez con los nombres/ids o un "/listar" y procedo.\n\n— respuesta original (lo que dije):\n${r.respuesta}`;
         }
         // Los fallback ("no pude armar la respuesta") se marcan 'error': se
         // muestran a Jhon pero NO entran al historial (lo contaminarían).

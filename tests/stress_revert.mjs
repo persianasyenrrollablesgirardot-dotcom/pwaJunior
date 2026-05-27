@@ -80,6 +80,13 @@ async function main() {
     .select('mensaje_chat_id, persona_id, modulo, tipo')
     .in('mensaje_chat_id', msgIdsUsuario);
   const corrPersonaModulo = new Set((instrs ?? []).filter(i => i.tipo === 'correccion').map(i => `${i.persona_id}|${i.modulo}|${i.mensaje_chat_id}`));
+
+  // Set de personas tocadas SOLO por este test (via instrucciones de los msgs del usuario).
+  // Lo usamos en secciones 3, 4, 8 y 8b para NO borrar/modificar registros de personas
+  // ajenas al test (ej: WhatsApp real entrando en paralelo durante las 2h de stress).
+  const personasTocadasPorTest = new Set((instrs ?? []).map(i => i.persona_id).filter(Boolean));
+  const idsClientesNuevosPorTest = new Set((instrs ?? []).filter(i => i.tipo === 'nuevo_cliente').map(i => i.persona_id).filter(Boolean));
+  console.log(`Personas tocadas por el test: ${personasTocadasPorTest.size} (de las cuales ${idsClientesNuevosPorTest.size} fueron clientes nuevos)`);
   // Para invalidar las correcciones, las buscamos por persona+modulo+created_at en ventana
   const { data: corrs } = await sb.from('correcciones_humanas')
     .select('id, persona_id, modulo, hecho, created_at')
@@ -102,35 +109,41 @@ async function main() {
     console.log('  (skip — instrucciones no tienen flag de soft-delete, quedan como traza)');
   }
 
-  // ─── 3. Tareas creadas en ventana (CUALQUIER origen) → soft-delete ──────
-  // Antes solo borraba origen='chat'. El stress test descubrió que las tareas
-  // generadas por A_SINTESIS_M5 (origen='agente') quedaban como basura tras
-  // el revert. Ahora se borran todas las creadas en la ventana del test.
-  sep('3) Tareas creadas en ventana (TODAS las origenes) → soft-delete');
-  const { data: tareas } = await sb.from('tareas')
+  // ─── 3. Tareas creadas en ventana → soft-delete ────────────────────────
+  // Solo borrar: (a) las que tienen origen='chat' (Junior las creó desde el chat),
+  // o (b) cualquier origen PERO la persona aparece en personasTocadasPorTest.
+  // Esto evita borrar tareas que A_SINTESIS_M5 generó procesando mensajes reales
+  // de WhatsApp que llegaron en paralelo a las 2h del test.
+  sep('3) Tareas creadas en ventana → soft-delete (filtradas por personas del test)');
+  const { data: tareasRaw } = await sb.from('tareas')
     .select('id, persona_id, titulo, completada, deleted_at, created_at, origen, agente_origen')
     .gte('created_at', ventanaIni).lte('created_at', ventanaFin)
     .is('deleted_at', null);
-  console.log(`Tareas a borrar: ${tareas?.length}`);
-  for (const t of (tareas ?? []).slice(0, 15)) {
+  const tareas = (tareasRaw ?? []).filter(t => t.origen === 'chat' || personasTocadasPorTest.has(t.persona_id));
+  const tareasDescartadas = (tareasRaw ?? []).length - tareas.length;
+  console.log(`Tareas en ventana: ${tareasRaw?.length} · a borrar (del test): ${tareas.length} · descartadas (ajenas al test): ${tareasDescartadas}`);
+  for (const t of tareas.slice(0, 15)) {
     console.log(`  #${t.id} (p${t.persona_id}) origen=${t.origen}${t.agente_origen ? '/' + t.agente_origen : ''} "${(t.titulo ?? '').slice(0, 60)}" comp=${t.completada}`);
   }
-  if (APPLY && (tareas?.length ?? 0) > 0) {
+  if (APPLY && tareas.length > 0) {
     const { error } = await sb.from('tareas').update({ deleted_at: new Date().toISOString() }).in('id', tareas.map(t => t.id));
     if (error) console.error('  ❌ ' + error.message); else console.log(`  ✓ ${tareas.length} tareas soft-deleted`);
   }
 
   // ─── 4. Agendamientos creados en ventana → soft-delete ─────────────────
-  sep('4) Agendamientos creados en ventana → soft-delete');
-  const { data: ags } = await sb.from('agendamientos')
+  // Solo borrar agendamientos de personas tocadas por el test.
+  sep('4) Agendamientos creados en ventana → soft-delete (filtrados por personas del test)');
+  const { data: agsRaw } = await sb.from('agendamientos')
     .select('id, persona_id, titulo, fecha, deleted_at, created_at')
     .gte('created_at', ventanaIni).lte('created_at', ventanaFin)
     .is('deleted_at', null);
-  console.log(`Agendamientos a borrar: ${ags?.length}`);
-  for (const a of (ags ?? []).slice(0, 15)) {
+  const ags = (agsRaw ?? []).filter(a => personasTocadasPorTest.has(a.persona_id));
+  const agsDescartados = (agsRaw ?? []).length - ags.length;
+  console.log(`Agendamientos en ventana: ${agsRaw?.length} · a borrar (del test): ${ags.length} · descartados (ajenos al test): ${agsDescartados}`);
+  for (const a of ags.slice(0, 15)) {
     console.log(`  #${a.id} (p${a.persona_id}) ${a.fecha} "${a.titulo}"`);
   }
-  if (APPLY && (ags?.length ?? 0) > 0) {
+  if (APPLY && ags.length > 0) {
     const { error } = await sb.from('agendamientos').update({ deleted_at: new Date().toISOString() }).in('id', ags.map(a => a.id));
     if (error) console.error('  ❌ ' + error.message); else console.log(`  ✓ ${ags.length} agendamientos soft-deleted`);
   }
@@ -194,32 +207,49 @@ async function main() {
   }
 
   // ─── 8. Re-abrir tareas comerciales completadas durante ventana ────────
-  sep('8) Re-abrir tareas comerciales completadas durante ventana del test');
-  const { data: tareasComp } = await sb.from('tareas')
+  // Solo re-abrir las de personas tocadas por el test (evita revertir completados
+  // legítimos de WhatsApp real procesados en paralelo).
+  sep('8) Re-abrir tareas completadas durante ventana (filtradas por personas del test)');
+  const { data: tareasCompRaw } = await sb.from('tareas')
     .select('id, titulo, completada_at, persona_id, deleted_at')
     .gte('completada_at', ventanaIni).lte('completada_at', ventanaFin)
     .eq('completada', true).is('deleted_at', null);
-  console.log(`Tareas completadas en ventana: ${tareasComp?.length}`);
-  if (APPLY && (tareasComp?.length ?? 0) > 0) {
+  const tareasComp = (tareasCompRaw ?? []).filter(t => personasTocadasPorTest.has(t.persona_id));
+  const tareasCompDescartadas = (tareasCompRaw ?? []).length - tareasComp.length;
+  console.log(`Tareas completadas en ventana: ${tareasCompRaw?.length} · a re-abrir (del test): ${tareasComp.length} · descartadas (ajenas al test): ${tareasCompDescartadas}`);
+  if (APPLY && tareasComp.length > 0) {
     const { error } = await sb.from('tareas').update({ completada: false, completada_at: null }).in('id', tareasComp.map(t => t.id));
     if (error) console.error('  ❌ ' + error.message); else console.log(`  ✓ ${tareasComp.length} tareas reabiertas`);
   }
-  for (const t of (tareasComp ?? []).slice(0, 10)) console.log(`  #${t.id} (p${t.persona_id}) "${(t.titulo ?? '').slice(0, 60)}"`);
+  for (const t of tareasComp.slice(0, 10)) console.log(`  #${t.id} (p${t.persona_id}) "${(t.titulo ?? '').slice(0, 60)}"`);
 
   // ─── 8b. Personas (clientes nuevos) creadas en ventana → soft-delete ────
   // Bug detectado en stress test 1: Junior creó 6 personas duplicadas
-  // (Sandra Pinilla x2, Patricia x4) y el revert no las borraba. Quedaba
-  // basura en la lista de clientes. Ahora se borran personas + sus proyectos.
-  sep('8b) Personas creadas en ventana (clientes nuevos del test) → soft-delete');
-  const { data: pNew } = await sb.from('personas')
+  // (Sandra Pinilla x2, Patricia x4) y el revert no las borraba.
+  //
+  // Bug detectado en stress test 2 (2026-05-26): si la ventana del test solapa
+  // con WhatsApp real, personas con origen='whatsapp' (contactos legítimos) se
+  // borraban. Fix: cruzar con idsClientesNuevosPorTest (personas que aparecen
+  // en junior_instrucciones con tipo='nuevo_cliente'). Eso solo incluye lo que
+  // Junior creó desde el chat durante el test.
+  sep('8b) Personas creadas en ventana (filtradas por instrucciones nuevo_cliente del test) → soft-delete');
+  const { data: pNewRaw } = await sb.from('personas')
     .select('id, nombre, telefono_e164, origen')
     .gte('created_at', ventanaIni).lte('created_at', ventanaFin)
     .is('deleted_at', null);
-  console.log(`Personas a borrar: ${pNew?.length}`);
-  for (const p of (pNew ?? []).slice(0, 15)) {
+  const pNew = (pNewRaw ?? []).filter(p => idsClientesNuevosPorTest.has(p.id));
+  const pNewDescartadas = (pNewRaw ?? []).length - pNew.length;
+  console.log(`Personas creadas en ventana: ${pNewRaw?.length} · a borrar (del test): ${pNew.length} · descartadas (ajenas al test): ${pNewDescartadas}`);
+  for (const p of pNew.slice(0, 15)) {
     console.log(`  p${p.id} "${p.nombre}" origen=${p.origen} tel=${p.telefono_e164 ?? '-'}`);
   }
-  if (APPLY && (pNew?.length ?? 0) > 0) {
+  if (pNewDescartadas > 0) {
+    console.log(`  ── Descartadas (NO se borran, son ajenas al test):`);
+    for (const p of (pNewRaw ?? []).filter(p => !idsClientesNuevosPorTest.has(p.id)).slice(0, 10)) {
+      console.log(`    p${p.id} "${p.nombre}" origen=${p.origen} tel=${p.telefono_e164 ?? '-'}`);
+    }
+  }
+  if (APPLY && pNew.length > 0) {
     const ids = pNew.map(p => p.id);
     // Borrar proyectos asociados primero
     const { error: ep } = await sb.from('proyectos')
