@@ -644,9 +644,16 @@ async function cicloJuniorChat(): Promise<void> {
           }
         }
 
-        // Ciclo de aprendizaje: correcciones de Jhon + re-síntesis de los
-        // clientes afectados (los analistas las toman como verdad prioritaria).
-        // persona_id=0 en una corrección apunta al cliente nuevo recién creado.
+        // Ciclo de aprendizaje: correcciones de Jhon. Los analistas las toman
+        // como verdad prioritaria. persona_id=0 apunta al cliente recién creado.
+        //
+        // CAMBIO ESTRUCTURAL: la re-síntesis YA NO se hace acá en sync. Antes,
+        // cada corrección disparaba sintetizarPersona() (8 llamadas LLM cada una)
+        // dentro del lock de cicloJuniorChat → si Junior emitía 25 correcciones,
+        // el chat quedaba bloqueado 4-10 minutos y los siguientes mensajes del
+        // usuario se acumulaban en 'pendiente'. Ahora solo marcamos
+        // sintesis_pendiente=true en bulk; cicloSintesisPendiente (corre cada 4s
+        // en paralelo, 10 personas por ciclo) las procesa sin bloquear el chat.
         const afectados = new Set<number>();
         if (idClienteNuevo != null) afectados.add(idClienteNuevo);
         for (const c of r.correcciones) {
@@ -666,13 +673,12 @@ async function cicloJuniorChat(): Promise<void> {
           });
           afectados.add(pid);
         }
-        for (const pid of afectados) {
-          try {
-            await sintetizarPersona(sb, pid);
-            console.log(`[V2/JUNIOR] re-sintetizado cliente ${pid}`);
-          } catch (e: any) {
-            console.error(`[V2/JUNIOR] re-síntesis cliente ${pid}: ${e.message}`);
-          }
+        if (afectados.size > 0) {
+          const ids = Array.from(afectados);
+          const { error } = await sb.from('personas')
+            .update({ sintesis_pendiente: true }).in('id', ids);
+          if (error) console.error(`[V2/JUNIOR] marcar sintesis_pendiente: ${error.message}`);
+          else console.log(`[V2/JUNIOR] ${ids.length} cliente(s) encolado(s) para re-síntesis: ${ids.join(',')}`);
         }
 
         // F7.3 — resoluciones de duplicados: Jhon confirmó por el chat si dos
@@ -693,10 +699,14 @@ async function cicloJuniorChat(): Promise<void> {
               console.log(`[V2/JUNIOR] duplicado ${dup.id} descartado (son personas distintas)`);
             } else {
               // El cliente que ya existía sobrevive; el nuevo se fusiona en él.
+              // La fusión SÍ es sync (mueve eventos/proyectos/chats — necesita
+              // consistencia transaccional). La re-síntesis post-fusión se
+              // encola igual que arriba — la hace cicloSintesisPendiente.
               await fusionarPersonas(sb, dup.persona_existente_id, dup.persona_nueva_id,
                 `Confirmado por Jhon en el chat de Junior (duplicado #${dup.id})`);
-              await sintetizarPersona(sb, dup.persona_existente_id);
-              console.log(`[V2/JUNIOR] duplicado ${dup.id} fusionado → persona ${dup.persona_existente_id}`);
+              await sb.from('personas')
+                .update({ sintesis_pendiente: true }).eq('id', dup.persona_existente_id);
+              console.log(`[V2/JUNIOR] duplicado ${dup.id} fusionado → persona ${dup.persona_existente_id} (re-síntesis encolada)`);
             }
           } catch (e: any) {
             console.error(`[V2/JUNIOR] resolver duplicado ${res.duplicado_id}: ${e.message}`);
