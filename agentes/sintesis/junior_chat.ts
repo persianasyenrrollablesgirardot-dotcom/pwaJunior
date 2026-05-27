@@ -560,12 +560,61 @@ Sé breve, en viñetas. Texto plano, sin JSON.`,
   return { texto: res.contenido.trim(), costo: res.costo_usd };
 }
 
-/** Arma el bloque de contexto con el estado de todos los clientes. */
+/** Arma el bloque de contexto con el estado de todos los clientes.
+ *
+ * OPTIMIZACIÓN: excluye del bloque pesado a las personas que cumplen TODAS:
+ *   - ámbito_principal NO es 'comercial' (familiares, proveedores, internos)
+ *   - todos sus checklists están cerrados_manual=true o tipo='no_aplica'
+ * Estas personas ya no son operativas y Junior las recuerda vía memoria
+ * persistente. Antes ocupaban ~30% del prompt sin aportar.
+ *
+ * La lista corta "CLIENTES (persona_id: nombre)" SÍ las incluye para que
+ * Junior pueda referenciarlas si Jhon pregunta por nombre.
+ */
 async function construirContextoClientes(sb: SupabaseClient): Promise<{ contexto: string; lista: string }> {
   const { data: personas } = await sb.from('personas')
     .select('id,nombre,telefono_e164,email,ciudad,notas,ambito_principal').is('deleted_at', null);
   if (!personas || personas.length === 0) {
     return { contexto: '(todavía no hay clientes procesados)', lista: '(sin clientes)' };
+  }
+
+  // Identificar personas "archivables": no comerciales con todos sus chats cerrados.
+  const personasNoComerciales = (personas).filter(p => p.ambito_principal && p.ambito_principal !== 'comercial');
+  const idsNoCom = personasNoComerciales.map(p => p.id);
+  const archivables = new Set<number>();
+  if (idsNoCom.length > 0) {
+    const { data: proys } = await sb.from('proyectos')
+      .select('id, persona_id').in('persona_id', idsNoCom).is('deleted_at', null);
+    const proyToPersona = new Map((proys ?? []).map(x => [x.id, x.persona_id]));
+    const proyIds = (proys ?? []).map(x => x.id);
+    const { data: chatsP } = proyIds.length
+      ? await sb.from('chats').select('id, proyecto_id').in('proyecto_id', proyIds).is('deleted_at', null)
+      : { data: [] as { id: number; proyecto_id: number }[] };
+    const chatToPersona = new Map((chatsP ?? []).map(x => [x.id, proyToPersona.get(x.proyecto_id)]));
+    const chatIds = (chatsP ?? []).map(x => x.id);
+    const { data: cls } = chatIds.length
+      ? await sb.from('chat_checklist').select('chat_id, tipo, cerrado_manual').in('chat_id', chatIds)
+      : { data: [] as any[] };
+    // Para cada persona no comercial, ¿todos sus chats están cerrados?
+    const chatsPorPersona = new Map<number, number[]>();
+    for (const c of chatsP ?? []) {
+      const pid = chatToPersona.get(c.id);
+      if (pid == null) continue;
+      if (!chatsPorPersona.has(pid)) chatsPorPersona.set(pid, []);
+      chatsPorPersona.get(pid)!.push(c.id);
+    }
+    const clMap = new Map((cls ?? []).map((c: any) => [c.chat_id, c]));
+    for (const [pid, chats] of chatsPorPersona) {
+      const todosCerrados = chats.every(cid => {
+        const cl = clMap.get(cid);
+        return cl && (cl.cerrado_manual === true || cl.tipo === 'no_aplica');
+      });
+      if (todosCerrados && chats.length > 0) archivables.add(pid);
+    }
+    // Personas no comerciales SIN chats (creadas a mano y nunca activas) también archivables.
+    for (const p of personasNoComerciales) {
+      if (!chatsPorPersona.has(p.id)) archivables.add(p.id);
+    }
   }
 
   const { data: sints } = await sb.from('modulo_sintesis')
@@ -589,7 +638,9 @@ async function construirContextoClientes(sb: SupabaseClient): Promise<{ contexto
   }
 
   const bloques: string[] = [];
+  let archivadosCount = 0;
   for (const p of personas) {
+    if (archivables.has(p.id)) { archivadosCount++; continue; }   // optimización: skip no-comerciales cerrados
     const ss = porPersona.get(p.id) ?? [];
     const contacto = [
       p.telefono_e164 ? `tel: ${p.telefono_e164}` : null,
@@ -617,8 +668,11 @@ async function construirContextoClientes(sb: SupabaseClient): Promise<{ contexto
       (s.alerta ? ` [ALERTA: ${s.alerta}]` : ''));
     bloques.push(`${encabezado}\n${lineas.join('\n')}`);
   }
+  const aviso = archivadosCount > 0
+    ? `\n\n(${archivadosCount} contactos NO comerciales con casos cerrados están archivados del análisis detallado — siguen en la lista de CLIENTES de abajo si necesitás referenciarlos por id, y en memoria persistente si Jhon te dictó su rol.)`
+    : '';
   return {
-    contexto: bloques.join('\n\n'),
+    contexto: bloques.join('\n\n') + aviso,
     lista: personas.map(p => `${p.id}: ${p.nombre}`).join('\n'),
   };
 }

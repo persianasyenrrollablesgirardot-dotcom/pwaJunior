@@ -121,9 +121,24 @@ jsonPrompt(
 `Incluí solo medidas EXPLÍCITAS en la conversación (ej: "2.40 x 1.80"). NO inventes dimensiones.
 Rango razonable: 0.3m a 8m.`) },
 
-  m5: { titulo: 'Análisis Operativo', system:
+  m5: { titulo: 'Análisis Operativo', poblar: poblarTareas, system:
+jsonPrompt(
 `Sos el ANALISTA OPERATIVO de Fábrica de Cortinas Girardot. Analizá qué hay que HACER y CUÁNDO
-en términos operativos (visitas, instalaciones, mantenimientos). Dejá las tareas concretas para que el asistente principal (Junior) las asigne con el humano.` + FORMATO },
+Y estructurá las tareas operativas pendientes del cliente (visitas, instalaciones, mantenimientos,
+seguimientos).`,
+  'tareas',
+`    {
+      "titulo": "qué hacer, corto (ej: Agendar instalación)",
+      "descripcion": "detalle o null",
+      "tipo": "llamar|enviar_cotizacion|confirmar_pago|pedir_ficha|agendar_instalacion|reclamar_proveedor|pedir_resena|otro",
+      "fecha_vence": "YYYY-MM-DD o null",
+      "prioridad": número entero 1 (baja) a 10 (urgente)
+    }`,
+`Incluí solo tareas REALES y accionables que surjan de la conversación de WhatsApp o de los
+HECHOS CONFIRMADOS por Jhon. NO dupliques tareas obvias (el sistema tiene anti-duplicado por
+título, pero igual sé conciso). Si el cliente NO es comercial o el caso está CERRADO ("paz y
+salvo", "instalación completada"), devolvé tareas: []. Las tareas que Jhon crea por chat con
+Junior (origen='chat') tienen prioridad — no las pisés generando duplicados.`) },
 
   m6: { titulo: 'Análisis de Postventa', poblar: poblarPostventa, system:
 jsonPrompt(
@@ -490,6 +505,61 @@ async function poblarMedidas(sb: SupabaseClient, personaId: number, data: any): 
 }
 
 
+
+/**
+ * Pobla tareas del analista M5 — con anti-duplicado contra las tareas del chat.
+ *
+ * Lógica:
+ *   1. Borra solo las tareas previas de M5 (`agente_origen='A_SINTESIS_M5'`) — las
+ *      de Junior chat (`origen='chat'`) NO se tocan, son verdad de Jhon.
+ *   2. Antes de insertar una propuesta nueva, verifica si ya hay tarea ACTIVA del
+ *      chat con título similar (normalizado: lowercase, sin tildes, sin "los/las/
+ *      el/la" filler). Si match → skip insert (la tarea del chat gana).
+ *   3. Si no hay duplicado de chat, inserta la propuesta de M5.
+ *
+ * Reactivado en feat: re-habilitar M5→tareas con anti-duplicado (commit posterior a 2d9f130).
+ */
+function normalizarTitulo(t: string): string {
+  return (t || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')      // sin tildes
+    .replace(/[^\w\s]/g, ' ')                                 // sin puntuación
+    .replace(/\b(el|la|los|las|de|del|al|a|en|para|por|un|una|con)\b/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+async function poblarTareas(sb: SupabaseClient, personaId: number, data: any): Promise<void> {
+  const tareas = Array.isArray(data.tareas) ? data.tareas : [];
+  const proy = (await sb.from('proyectos').select('id').eq('persona_id', personaId).limit(1)).data?.[0];
+  await borrarDeAgente(sb, 'tareas', personaId);
+
+  // Tareas activas del chat/manuales — NO se tocan, pero usamos sus títulos para
+  // evitar que M5 cree duplicados conceptuales.
+  const { data: tareasChat } = await sb.from('tareas')
+    .select('titulo').eq('persona_id', personaId)
+    .eq('completada', false).is('deleted_at', null)
+    .not('agente_origen', 'eq', 'A_SINTESIS_M5');
+  const titulosChat = new Set((tareasChat ?? []).map(t => normalizarTitulo(t.titulo as string)));
+
+  for (const t of tareas) {
+    if (!t.titulo) continue;
+    const norm = normalizarTitulo(String(t.titulo));
+    // Anti-duplicado: si Jhon ya dictó una tarea con título conceptualmente igual, skip.
+    if (titulosChat.has(norm)) {
+      console.log(`[A_SINTESIS_M5] skip duplicado "${t.titulo}" (ya existe tarea del chat con título similar)`);
+      continue;
+    }
+    const prioridad = typeof t.prioridad === 'number'
+      ? Math.max(1, Math.min(10, Math.round(t.prioridad))) : 5;
+    const { error } = await sb.from('tareas').insert({
+      persona_id: personaId, proyecto_id: proy?.id ?? null,
+      titulo: String(t.titulo), descripcion: t.descripcion ?? null,
+      tipo: TIPOS_TAREA.has(t.tipo) ? t.tipo : 'otro', fecha_vence: t.fecha_vence ?? null,
+      prioridad, asignado_a: 'jhon', origen: 'agente',
+      agente_origen: 'A_SINTESIS_M5', shadow: false,
+    } as any);
+    if (error) console.error(`[A_SINTESIS_M5] insert tarea: ${error.message}`);
+  }
+}
 
 async function poblarPostventa(sb: SupabaseClient, personaId: number, data: any): Promise<void> {
   const garantias = Array.isArray(data.garantias) ? data.garantias : [];

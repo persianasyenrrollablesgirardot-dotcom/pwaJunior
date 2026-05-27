@@ -399,6 +399,15 @@ async function drenarSintesis(): Promise<void> {
 // Re-síntesis bajo demanda: el Visor marca `personas.sintesis_pendiente` (ej.
 // al reclasificar el ámbito de un contacto en el módulo Clientes). Este ciclo
 // las recoge, las re-sintetiza al toque y baja el flag.
+//
+// GUARD ANTI-LOOP: si algo re-marca sintesis_pendiente=true después de procesar
+// (visto en logs con p169 procesada 3 veces seguidas), llevamos un counter por
+// persona. Si pasa >MAX_ITER_5MIN veces en 5 minutos, se la mete en lista negra
+// por COOLDOWN_MS para que no queme dinero ni bloquee el ciclo.
+const MAX_ITER_5MIN = 3;
+const COOLDOWN_MS = 10 * 60 * 1000;
+const histIter = new Map<number, number[]>();      // persona_id → timestamps de procesos recientes
+const blacklist = new Map<number, number>();       // persona_id → unix ms hasta cuando está bloqueada
 let sintesisPendienteEnCurso = false;
 async function cicloSintesisPendiente(): Promise<void> {
   if (sintesisPendienteEnCurso) return;
@@ -406,11 +415,34 @@ async function cicloSintesisPendiente(): Promise<void> {
   try {
     const { data } = await sb.from('personas')
       .select('id').eq('sintesis_pendiente', true).is('deleted_at', null).limit(10);
+    const ahora = Date.now();
     for (const p of data ?? []) {
+      // Check blacklist
+      const bl = blacklist.get(p.id);
+      if (bl && bl > ahora) {
+        // Bajar el flag para que no quede stuck — la próxima vez que algo legítimo
+        // la marque, ya estará fuera del cooldown.
+        await sb.from('personas').update({ sintesis_pendiente: false }).eq('id', p.id);
+        continue;
+      }
+      if (bl && bl <= ahora) blacklist.delete(p.id);
+
+      // Contar iteraciones en últimos 5 min
+      const ventana = ahora - 5 * 60 * 1000;
+      const hist = (histIter.get(p.id) ?? []).filter(t => t > ventana);
+      hist.push(ahora);
+      histIter.set(p.id, hist);
+      if (hist.length > MAX_ITER_5MIN) {
+        blacklist.set(p.id, ahora + COOLDOWN_MS);
+        console.error(`[V2/SINT-MANUAL] 🛑 LOOP DETECTADO persona ${p.id}: ${hist.length} iteraciones en 5min → blacklist ${COOLDOWN_MS / 60000}min`);
+        await sb.from('personas').update({ sintesis_pendiente: false }).eq('id', p.id);
+        continue;
+      }
+
       try {
         const r = await sintetizarPersona(sb, p.id);
         stats.pi_costo_usd += r.costo_usd;
-        console.log(`[V2/SINT-MANUAL] persona ${p.id}: ${r.ok}/7 módulos · $${r.costo_usd.toFixed(4)}`);
+        console.log(`[V2/SINT-MANUAL] persona ${p.id}: ${r.ok}/7 módulos · $${r.costo_usd.toFixed(4)} (iter ${hist.length}/${MAX_ITER_5MIN})`);
       } catch (e: any) {
         console.error(`[V2/SINT-MANUAL] persona ${p.id}: ${e.message}`);
       }
