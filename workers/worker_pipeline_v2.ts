@@ -554,11 +554,40 @@ function normalizarTelefono(t: string | null): string | null {
   return d ? '+' + d : null;
 }
 
-/** Crea una persona de origen manual (cliente del local / otro medio) + su proyecto. */
+/** Normaliza texto para comparar duplicados conceptuales (memorias, tareas,
+ * agendamientos). Lowercase, sin tildes, sin puntuación, sin filler común,
+ * espacios colapsados. Mismo patrón usado en analistas.ts poblarTareas. */
+function normalizarTexto(s: string): string {
+  return (s || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\b(el|la|los|las|de|del|al|a|en|para|por|un|una|con|que|mi|mis|tu|tus|su|sus|lo|le|les)\b/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+/** Crea una persona de origen manual (cliente del local / otro medio) + su proyecto.
+ *
+ * ANTI-DUPLICADO por teléfono: si llega un teléfono normalizado E.164 que ya
+ * existe en personas, devuelve el id existente y NO crea uno nuevo. Detectado
+ * en stress test 2026-05-26: "Patricia" se creó 4 veces porque Junior emitió
+ * nuevosClientes en 4 mensajes consecutivos con el mismo teléfono.
+ *
+ * Si NO viene teléfono, no se puede dedupear (un nombre suelto puede ser otra
+ * persona). En ese caso se crea igual y queda como riesgo conocido.
+ */
 async function crearPersonaManual(nc: NuevoCliente): Promise<number | null> {
+  const telE164 = normalizarTelefono(nc.telefono);
+  if (telE164) {
+    const { data: existente } = await sb.from('personas')
+      .select('id, nombre').eq('telefono_e164', telE164).is('deleted_at', null).maybeSingle();
+    if (existente) {
+      console.log(`[V2/JUNIOR] persona con tel ${telE164} ya existe como p${existente.id} "${existente.nombre}" — reuso, NO duplico`);
+      return existente.id;
+    }
+  }
   const { data: persona, error } = await sb.from('personas').insert({
     nombre: nc.nombre,
-    telefono_e164: normalizarTelefono(nc.telefono),
+    telefono_e164: telE164,
     ciudad: nc.ciudad,
     ambito_principal: 'comercial',
     origen: 'manual',
@@ -675,16 +704,33 @@ async function cicloJuniorChat(): Promise<void> {
 
         // Memoria persistente: lo que Junior debe recordar SIEMPRE (preferencias
         // de comportamiento, datos generales). Sobrevive a sesiones nuevas.
+        //
+        // ANTI-DUPLICADO: comparo contenido normalizado contra memorias vigentes.
+        // Si match → skip insert. Detectado en stress test: Junior creaba 5
+        // memorias casi idénticas sobre Margarita / "montos en negrita" porque
+        // emitía la misma memoria turno tras turno sin chequear.
         if (r.memorias.length > 0) {
+          const { data: vigentes } = await sb.from('junior_memoria')
+            .select('contenido').eq('vigente', true);
+          const yaExisten = new Set((vigentes ?? []).map(m => normalizarTexto(m.contenido as string)));
+          let nuevas = 0, dups = 0;
           for (const mem of r.memorias) {
+            const norm = normalizarTexto(mem.contenido);
+            if (yaExisten.has(norm)) {
+              dups++;
+              console.log(`[V2/JUNIOR] memoria duplicada — skip: "${mem.contenido.slice(0, 60)}"`);
+              continue;
+            }
+            yaExisten.add(norm);                  // evita dup dentro del mismo turno
             await sb.from('junior_memoria').insert({
               tipo: mem.tipo, contenido: mem.contenido,
             } as any);
             await registrarInstruccion('memoria', `Le enseñaste: "${mem.contenido}"`, {
               sesion_id: msg.sesion_id, mensaje_chat_id: msg.id,
             });
+            nuevas++;
           }
-          console.log(`[V2/JUNIOR] ${r.memorias.length} memoria(s) persistente(s) guardada(s)`);
+          console.log(`[V2/JUNIOR] memorias: ${nuevas} nueva(s) guardada(s), ${dups} duplicada(s) skipped`);
         }
 
         // Clientes nuevos del local / otros medios que Junior registró.
@@ -770,12 +816,30 @@ async function cicloJuniorChat(): Promise<void> {
         }
 
         // Tareas que Jhon le dictó por chat: crear nuevas + marcar hechas las que dijo que ya cumplió.
+        //
+        // ANTI-DUPLICADO chat→chat: si ya existe tarea ACTIVA del mismo persona_id
+        // (o transversal si persona_id es null) con título normalizado igual → skip.
+        // Detectado en stress test: Walter terminaba con 4 tareas "Llamar a Walter"
+        // y Patricia con 4 "Cotizar a Patricia" porque Jhon dictaba lo mismo en
+        // mensajes consecutivos. El anti-duplicado de M5 (analistas.ts) cubre
+        // chat→M5 pero NO chat→chat.
         for (const nt of r.nuevasTareas) {
           try {
             let pid = nt.persona_id;
             if (pid === 0 && idClienteNuevo != null) pid = idClienteNuevo;
             const tiposValidos = ['llamar','enviar_cotizacion','confirmar_pago','pedir_ficha','agendar_instalacion','reclamar_proveedor','pedir_resena','otro'];
             const tipo = nt.tipo && tiposValidos.includes(nt.tipo) ? nt.tipo : 'otro';
+            const tituloNorm = normalizarTexto(nt.titulo);
+            // Check duplicado: tareas activas mismo persona_id (o null) con título similar
+            let q = sb.from('tareas').select('id, titulo').eq('completada', false).is('deleted_at', null);
+            if (pid != null && pid !== 0) q = q.eq('persona_id', pid);
+            else q = q.is('persona_id', null);
+            const { data: existentes } = await q;
+            const dup = (existentes ?? []).find(t => normalizarTexto(t.titulo as string) === tituloNorm);
+            if (dup) {
+              console.log(`[V2/JUNIOR] tarea duplicada — skip "${nt.titulo}" (ya existe #${dup.id})`);
+              continue;
+            }
             const { data: nuevaT, error } = await sb.from('tareas').insert({
               titulo: nt.titulo, descripcion: nt.descripcion,
               tipo, persona_id: pid, fecha_vence: nt.fecha_vence, hora_vence: nt.hora_vence,
@@ -820,13 +884,29 @@ async function cicloJuniorChat(): Promise<void> {
           }
         }
 
-        // Agendamientos (Calendario) que Jhon dictó por chat
+        // Agendamientos (Calendario) que Jhon dictó por chat.
+        // ANTI-DUPLICADO: mismo persona_id + fecha + titulo normalizado → skip.
+        // Detectado en stress test: Patricia tenía 3 agendamientos idénticos
+        // "Visita de medidas - Patricia" para 2026-05-29 porque Junior los emitió
+        // 3 veces seguidas. Antes solo limpiábamos duplicados post-hoc; ahora se
+        // previenen en el insert.
         for (const na of r.nuevosAgendamientos) {
           try {
             let pid = na.persona_id;
             if (pid === 0 && idClienteNuevo != null) pid = idClienteNuevo;
             const tiposValidos = ['visita_medidas', 'instalacion', 'reunion_proveedor', 'personal', 'otro'];
             const tipo = na.tipo && tiposValidos.includes(na.tipo) ? na.tipo : 'otro';
+            const tituloNorm = normalizarTexto(na.titulo);
+            // Check duplicado: agendamiento activo mismo persona_id + fecha + título similar
+            let q = sb.from('agendamientos').select('id, titulo').is('deleted_at', null).eq('fecha', na.fecha);
+            if (pid != null && pid !== 0) q = q.eq('persona_id', pid);
+            else q = q.is('persona_id', null);
+            const { data: existentes } = await q;
+            const dup = (existentes ?? []).find(a => normalizarTexto(a.titulo as string) === tituloNorm);
+            if (dup) {
+              console.log(`[V2/JUNIOR] agendamiento duplicado — skip "${na.titulo}" ${na.fecha} (ya existe #${dup.id})`);
+              continue;
+            }
             const { data: nuevoA, error } = await sb.from('agendamientos').insert({
               persona_id: pid,
               titulo: na.titulo,
@@ -895,7 +975,41 @@ async function cicloJuniorChat(): Promise<void> {
             console.log(`[V2/JUNIOR] nota_persona [${np.tipo}] persona ${np.persona_id}: "${hecho.slice(0, 60)}"`);
 
             // Propagar al ámbito real cuando aplica + disparar re-síntesis.
+            //
+            // GUARD CRÍTICO (bug detectado en stress test 2026-05-26): Pedro
+            // Bustos (cliente comercial real con $285k abonados + cotización
+            // $571k + instalación agendada) fue reclasificado a personal_familia
+            // porque un mensaje dijo "Pedro Bustos es mi hermano, sacalo del
+            // flujo comercial". Junior lo aceptó sin verificar el historial
+            // comercial. La reclasificación corrompió datos reales.
+            //
+            // Política nueva: si la persona tiene HISTORIAL COMERCIAL ACTIVO
+            // (cotización, abono o agendamiento sin borrar), NO se reclasifica
+            // automáticamente. Se anota la corrección como [VERIFICACIÓN
+            // PENDIENTE] + se loguea para que Jhon confirme manualmente.
             if (np.tipo === 'no_comercial' || np.tipo === 'saltear') {
+              // Check historial comercial
+              const { count: cots } = await sb.from('cotizaciones').select('*', { count: 'exact', head: true })
+                .eq('persona_id', np.persona_id).is('deleted_at', null);
+              const { count: abs } = await sb.from('abonos').select('*', { count: 'exact', head: true })
+                .eq('persona_id', np.persona_id).is('deleted_at', null);
+              const { count: ags } = await sb.from('agendamientos').select('*', { count: 'exact', head: true })
+                .eq('persona_id', np.persona_id).is('deleted_at', null);
+              const tieneHistorial = (cots ?? 0) + (abs ?? 0) + (ags ?? 0) > 0;
+
+              if (tieneHistorial) {
+                // NO reclasificar automáticamente — esto puede ser un error
+                // (cliente real al que Junior le hizo caso a una contradicción).
+                // En vez de cambiar ámbito, registrar como verificación pendiente.
+                await sb.from('correcciones_humanas').insert({
+                  persona_id: np.persona_id, modulo: 'm1',
+                  hecho: `[VERIFICACIÓN PENDIENTE] Junior intentó reclasificar a no comercial, pero el cliente tiene historial comercial activo (${cots ?? 0} cotización(es), ${abs ?? 0} abono(s), ${ags ?? 0} agendamiento(s)). Motivo dado: "${np.nota}". Jhon debe confirmar manualmente si reclasificar.`,
+                  origen: 'junior_chat',
+                } as any);
+                console.warn(`[V2/JUNIOR] 🛑 GUARD reclasificación: persona ${np.persona_id} tiene historial comercial (${cots ?? 0}c/${abs ?? 0}a/${ags ?? 0}ag). NO reclasificada. Registrado [VERIFICACIÓN PENDIENTE].`);
+                continue;
+              }
+
               const notaLower = (np.nota ?? '').toLowerCase();
               let ambitoDestino = 'personal_otros';
               if (/\b(familiar|familia|cu[ñn]ado|cu[ñn]ada|esposa|esposo|hijo|hija|madre|mam[áa]|padre|pap[áa]|herman[oa]|t[íi]o|t[íi]a|primo|prima|abuel[oa]|suegr[oa]|sobrin[oa]|yerno|nuera)\b/.test(notaLower)) {
