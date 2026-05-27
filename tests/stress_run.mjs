@@ -44,10 +44,15 @@ function arg(name, def) {
   const i = argv.indexOf(name);
   return i > -1 && argv[i+1] ? argv[i+1] : def;
 }
-const HORAS         = Number(arg('--horas', '4'));
-const RITMO_SEG     = Number(arg('--ritmo-seg', '120'));
-const TOPE_USD      = Number(arg('--tope-usd', '5'));
-const TIMEOUT_RESP  = Number(arg('--timeout-resp-seg', '180'));  // max 3 min para que Junior responda
+// Estos cinco son `let` (no `const`) porque al usar --reanudar se sobrescriben
+// con los valores del lock para preservar la config original del test interrumpido.
+let HORAS         = Number(arg('--horas', '4'));
+let RITMO_SEG     = Number(arg('--ritmo-seg', '120'));
+let TOPE_USD      = Number(arg('--tope-usd', '5'));
+let TIMEOUT_RESP  = Number(arg('--timeout-resp-seg', '180'));  // max 3 min para que Junior responda
+// --cats <cat1,cat2,...> filtra el dataset a esas categorías (uso: stress enfocado).
+// Sin flag o vacío → todas las categorías.
+let CATS_FILTRO   = (arg('--cats', '') || '').split(',').map(s => s.trim()).filter(Boolean);
 const VERBOSE       = argv.includes('--verbose');
 const MODO_REPORTAR = argv.includes('--reportar');
 const MODO_REANUDAR = argv.includes('--reanudar');
@@ -108,11 +113,26 @@ async function crearSesion() {
   return data.id;
 }
 
+// Dataset filtrado por --cats si se especifica. Se calcula con función para
+// poder recomputarlo después de leer params del lock en --reanudar.
+let ESCENARIOS_ACTIVOS = [];
+function recomputarEscenariosActivos() {
+  ESCENARIOS_ACTIVOS = CATS_FILTRO.length > 0
+    ? ESCENARIOS.filter(s => CATS_FILTRO.includes(s.cat))
+    : ESCENARIOS;
+  if (ESCENARIOS_ACTIVOS.length === 0) {
+    console.error(`❌ --cats "${CATS_FILTRO.join(',')}" no matchea ninguna categoría.`);
+    console.error(`   Categorías disponibles: ${META.categorias.join(', ')}`);
+    process.exit(2);
+  }
+}
+recomputarEscenariosActivos();
+
 // Mezclar dataset
 function* generadorEscenarios() {
-  let pool = [...ESCENARIOS];
+  let pool = [...ESCENARIOS_ACTIVOS];
   while (true) {
-    if (pool.length === 0) pool = [...ESCENARIOS];
+    if (pool.length === 0) pool = [...ESCENARIOS_ACTIVOS];
     const idx = Math.floor(Math.random() * pool.length);
     yield pool.splice(idx, 1)[0];
   }
@@ -236,8 +256,21 @@ async function main() {
       state.sesion_id = lockExistente.sesion_id;
       state.started_at = new Date(lockExistente.started_at);
       state.snapshot_pre = JSON.parse(fs.readFileSync(lockExistente.snapshot_pre_path, 'utf8'));
+      // Restaurar params originales del test desde el lock (no usar defaults
+      // ni los args que el usuario pueda haber pasado de nuevo). Bug detectado
+      // 2026-05-27: sin esto el --reanudar perdía --cats y volvía a 4h/120s/$5.
+      const p = lockExistente.params ?? {};
+      if (p.HORAS != null)        HORAS = Number(p.HORAS);
+      if (p.RITMO_SEG != null)    RITMO_SEG = Number(p.RITMO_SEG);
+      if (p.TOPE_USD != null)     TOPE_USD = Number(p.TOPE_USD);
+      if (p.TIMEOUT_RESP != null) TIMEOUT_RESP = Number(p.TIMEOUT_RESP);
+      if (Array.isArray(p.CATS_FILTRO)) CATS_FILTRO = p.CATS_FILTRO;
+      recomputarEscenariosActivos();
       console.log(`📂 REANUDANDO test activo: s${state.sesion_id}, iniciado ${state.started_at.toLocaleString('es-CO')}`);
-      // Reconstruir costo acumulado desde JSONL
+      console.log(`   Params restaurados del lock: ${HORAS}h, ${RITMO_SEG}s ritmo, $${TOPE_USD} tope${CATS_FILTRO.length ? `, cats=${CATS_FILTRO.join(',')}` : ''}`);
+      // Reconstruir contadores completos desde JSONL — antes solo se hidrataba
+      // costo y status; guards, mentiras y acciones acumulaban desde 0 lo que
+      // hacía que el reporte final post-reanudar fuera incompleto.
       if (fs.existsSync(JSONL_FILE)) {
         const turnos = fs.readFileSync(JSONL_FILE, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
         for (const t of turnos) {
@@ -245,8 +278,23 @@ async function main() {
           else if (t.resultado === 'error') state.msg_error++;
           else if (t.resultado === 'timeout') state.msg_timeout++;
           state.msg_enviados++;
+          if (t.guard) state.guards_activados++;
+          if (Array.isArray(t.mentiras) && t.mentiras.length > 0) state.warns_mentira++;
+          if (t.escenario?.cat) state.por_categoria[t.escenario.cat] = (state.por_categoria[t.escenario.cat] ?? 0) + 1;
+          if (Array.isArray(t.expectativas_fail)) {
+            if (t.expectativas_fail.length === 0) state.expectativas_pass++;
+            else { state.expectativas_fail += t.expectativas_fail.length; state.fails_detalle.push({ msg_id: t.msg_id, escenario: t.escenario?.cat, expectativa_fail: t.expectativas_fail }); }
+          }
+          // Mapear nombres del JSONL → state.acciones_totales (shapes distintos por legacy)
+          const a = t.acciones ?? {};
+          state.acciones_totales.correcciones        += a.correcciones ?? 0;
+          state.acciones_totales.memorias            += a.memorias ?? 0;
+          state.acciones_totales.nuevosClientes      += a.nuevos_clientes ?? 0;
+          state.acciones_totales.nuevasTareas        += a.tareas_creadas ?? 0;
+          state.acciones_totales.nuevosAgendamientos += a.agendamientos_creados ?? 0;
+          state.acciones_totales.cierresChecklist    += a.cierres_checklist ?? 0;
         }
-        console.log(`   recuperados ${turnos.length} turnos del JSONL ($${state.costo_acumulado.toFixed(4)} ya gastado)`);
+        console.log(`   recuperados ${turnos.length} turnos del JSONL ($${state.costo_acumulado.toFixed(4)} ya gastado · ${state.guards_activados} guards · ${state.warns_mentira} mentiras · exp: ${state.expectativas_pass} pass / ${state.expectativas_fail} fail)`);
       }
     } else {
       console.error(`\n⚠  HAY UN TEST ACTIVO/INTERRUMPIDO (${LOCK_FILE})`);
@@ -264,7 +312,13 @@ async function main() {
   console.log(MODO_REANUDAR ? '  STRESS TEST de Junior — REANUDANDO' : '  STRESS TEST de Junior — propósito del visor');
   console.log('═'.repeat(70));
   console.log(`  Duración: ${HORAS}h · Ritmo: 1 msg cada ${RITMO_SEG}s · Tope: $${TOPE_USD} USD`);
-  console.log(`  Escenarios en dataset: ${META.total_escenarios} (${META.categorias.length} categorías)`);
+  if (CATS_FILTRO.length > 0) {
+    console.log(`  Filtro --cats: ${CATS_FILTRO.join(', ')}`);
+    const catsActivas = [...new Set(ESCENARIOS_ACTIVOS.map(s => s.cat))];
+    console.log(`  Dataset filtrado: ${ESCENARIOS_ACTIVOS.length} escenarios (${catsActivas.length} categorías: ${catsActivas.join(', ')})`);
+  } else {
+    console.log(`  Escenarios en dataset: ${META.total_escenarios} (${META.categorias.length} categorías)`);
+  }
   console.log(`  Inicio: ${state.started_at.toLocaleString('es-CO')}`);
   console.log('═'.repeat(70));
 
@@ -282,11 +336,12 @@ async function main() {
     state.sesion_id = await crearSesion();
     console.log(`\n[2] Sesión de test creada: s${state.sesion_id}`);
 
-    // Escribir lock file
+    // Escribir lock file — incluye CATS_FILTRO para que --reanudar respete
+    // el dataset enfocado del test original.
     fs.writeFileSync(LOCK_FILE, JSON.stringify({
       sesion_id: state.sesion_id,
       started_at: state.started_at.toISOString(),
-      params: { HORAS, RITMO_SEG, TOPE_USD, TIMEOUT_RESP },
+      params: { HORAS, RITMO_SEG, TOPE_USD, TIMEOUT_RESP, CATS_FILTRO },
       snapshot_pre_path: snapPath,
     }, null, 2));
     console.log(`    lock file: ${LOCK_FILE}`);
@@ -378,24 +433,34 @@ async function main() {
           `Turno costó $${Number(resp.costo_usd).toFixed(4)} (esperado <$0.02). Posible contexto enorme o múltiples reintentos.\n\n**Mensaje:** "${escenario.msg.slice(0, 200)}"`);
       }
       // Detección de mentira: respuesta promete acción pero arrays vacíos.
+      // BYPASS — si el worker ya antepuso un aviso ("⚠ Aviso del worker" para
+      // mismatch o "⚠ Bloqueé N acciones" para guard anti-ráfaga), la respuesta
+      // ya fue manejada. El runner NO debe volver a contar esa misma mentira;
+      // matchearía el texto original que quedó debajo del aviso y daría falso
+      // positivo. Falso positivo detectado en stress test 2026-05-27 (msgs 791,
+      // 859, 965).
+      const respCruda = resp.mensaje ?? '';
+      const yaManejadaPorWorker = /^⚠\s*(Aviso del worker|Bloque[ée])/i.test(respCruda.trim());
       // Regex ampliada para capturar pretérito ("cerré/completé/marqué") Y
       // presente con sujeto implícito Junior ("cierro/completo/marco"). El
       // bug del runner v1 solo capturaba pretérito y dejaba pasar "Completo
       // todas sus tareas" (caso real visto en msg 597 del stress test 1).
-      const respLower = (resp.mensaje ?? '').toLowerCase();
+      const respLower = respCruda.toLowerCase();
       const mentiras = [];
-      if (/(cerr[ée]|cierro|cierra)\s+(el\s+|los\s+|todos\s+los\s+)?checklists?|caso\s+(terminado|cerrado)/i.test(respLower) && acciones.cierres_checklist === 0) {
-        mentiras.push('cierresChecklist');
-      }
-      if (/(marqu[ée]|marco|marca)\s+(la\s+)?(tarea|tareas)\s+(como\s+)?(hecha|completada|completadas)|(complet[ée]|completo|completa)\s+(la\s+|las\s+|todas\s+las\s+)?(tarea|tareas)/i.test(respLower)) {
-        const { data: recientes } = await sb.from('tareas')
-          .select('id').gte('completada_at', ventanaInicio).eq('completada', true);
-        if ((recientes ?? []).length === 0) mentiras.push('tareasCompletar');
-      }
-      if (/(cancel[ée]|cancelo|cancela|elimin[ée]|elimino|borra[s]?|borrar[áa]?)\s+(el\s+|los\s+|todos\s+los\s+)?agendamientos?|cit[ao]s?/i.test(respLower)) {
-        const { data: cancRec } = await sb.from('agendamientos')
-          .select('id').gte('deleted_at', ventanaInicio).not('deleted_at', 'is', null);
-        if ((cancRec ?? []).length === 0) mentiras.push('agendamientosCancelar');
+      if (!yaManejadaPorWorker) {
+        if (/(cerr[ée]|cierro|cierra)\s+(el\s+|los\s+|todos\s+los\s+)?checklists?|caso\s+(terminado|cerrado)/i.test(respLower) && acciones.cierres_checklist === 0) {
+          mentiras.push('cierresChecklist');
+        }
+        if (/(marqu[ée]|marco|marca)\s+(la\s+)?(tarea|tareas)\s+(como\s+)?(hecha|completada|completadas)|(complet[ée]|completo|completa)\s+(la\s+|las\s+|todas\s+las\s+)?(tarea|tareas)/i.test(respLower)) {
+          const { data: recientes } = await sb.from('tareas')
+            .select('id').gte('completada_at', ventanaInicio).eq('completada', true);
+          if ((recientes ?? []).length === 0) mentiras.push('tareasCompletar');
+        }
+        if (/(cancel[ée]|cancelo|cancela|elimin[ée]|elimino|borra[s]?|borrar[áa]?)\s+(el\s+|los\s+|todos\s+los\s+)?agendamientos?|cit[ao]s?/i.test(respLower)) {
+          const { data: cancRec } = await sb.from('agendamientos')
+            .select('id').gte('deleted_at', ventanaInicio).not('deleted_at', 'is', null);
+          if ((cancRec ?? []).length === 0) mentiras.push('agendamientosCancelar');
+        }
       }
       // Nueva detección: promete reclasificar/marcar como no comercial pero el ámbito no cambió
       if (/(reclasif|marc[oóé])\s+.*(no\s+comercial|familia|proveedor|amigo)/i.test(respLower) || /sac[oóé]\s+.*flujo\s+comercial/i.test(respLower)) {
