@@ -584,6 +584,30 @@ async function cicloJuniorChat(): Promise<void> {
           .map((h: any) => ({ rol: h.rol, mensaje: h.mensaje }));
 
         const r = await responderJunior(sb, msg.mensaje, historial, msg.sesion_id);
+
+        // ─── GUARD HARD anti-ráfaga destructiva ────────────────────────────
+        // Si Junior emite más de 5 acciones destructivas (tareasCompletar +
+        // cierresChecklist + agendamientosCancelar) en UN solo turno, las
+        // rechazamos ALL-OR-NOTHING y le forzamos a re-pedir confirmación
+        // explícita. Razón: el patrón "Jhon dice 'limpia' → Junior completa
+        // 29 tareas" rompió datos reales (22 tareas comerciales válidas).
+        // Esta es una red de seguridad — el prompt ya prohíbe la ráfaga, pero
+        // si el LLM la emite igual, NO se ejecuta.
+        const totalDestructivas = (r.tareasCompletar?.length ?? 0)
+          + (r.cierresChecklist?.length ?? 0)
+          + (r.agendamientosCancelar?.length ?? 0);
+        if (totalDestructivas > 5) {
+          console.warn(`[V2/JUNIOR] 🛑 GUARD ANTI-RÁFAGA msg ${msg.id}: ${totalDestructivas} acciones destructivas (max=5). Rechazadas:`);
+          console.warn(`  · tareasCompletar (${r.tareasCompletar.length}): ${r.tareasCompletar.map(x => '#' + x.id).join(', ')}`);
+          console.warn(`  · cierresChecklist (${r.cierresChecklist.length}): ${r.cierresChecklist.map(x => 'chat' + x.chat_id).join(', ')}`);
+          console.warn(`  · agendamientosCancelar (${r.agendamientosCancelar.length}): ${r.agendamientosCancelar.map(x => '#' + x.id).join(', ')}`);
+          r.tareasCompletar = [];
+          r.cierresChecklist = [];
+          r.agendamientosCancelar = [];
+          // Anteponer aviso al texto que ve Jhon — así sabe que el guard se activó.
+          r.respuesta = `⚠ Bloqueé las ${totalDestructivas} acciones destructivas que iba a aplicar — son demasiadas para un solo turno (límite=5) y prefiero confirmar antes de romper algo. Mencioná específicamente qué cerrar/completar (por nombre o id) y procedo en bloques de 5 como máximo.\n\n— mi propuesta era:\n${r.respuesta}`;
+        }
+
         // Detección defensiva — Junior promete acciones pero deja el array vacío.
         // No bloquea la respuesta (puede ser frase ambigua) pero queda visible en el
         // log para auditar el patrón. Si esto se repite mucho, hay que reforzar el prompt.
