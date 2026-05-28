@@ -239,7 +239,7 @@ NADA fuera del JSON. Nada de texto antes ni después. Nada de markdown ni de \`\
     { "persona_id": <id>, "tipo": "<pendiente_verificacion|no_comercial|saltear|otro>", "nota": "<descripción>" }
   ],
   "cierresChecklist": [
-    { "chat_id": <id del chat — sacalo de la lista CHECKLISTS ACTIVOS>, "motivo": "<por qué se cierra: caso terminado, pagado, instalado, etc.>" }
+    { "chat_id": <el valor "chat_id" de la lista CHECKLISTS ACTIVOS — NO el "cliente id">, "motivo": "<por qué se cierra: caso terminado, pagado, instalado, etc.>" }
   ]
 }
 
@@ -345,8 +345,8 @@ Hay dos formas en que un chat sale del módulo "Checklist por chat":
 (b) MANUAL para clientes comerciales reales con CASO TERMINADO: cuando Jhon te
     dice "ya terminamos con Rocio Romero", "ya está cerrado y pagado el caso
     de Julio Martinez", "La Dulcería ya quedó cerrada e instalada" → emití un
-    objeto en "cierresChecklist" con el chat_id (de la lista CHECKLISTS ACTIVOS
-    de abajo) y el motivo. El sistema cierra el chat_checklist con tipo='no_aplica'
+    objeto en "cierresChecklist" con el chat_id (el valor "chat_id" de la lista
+    CHECKLISTS ACTIVOS de abajo, NO el "cliente id") y el motivo. El sistema cierra el chat_checklist con tipo='no_aplica'
     estado='cerrada' Y marca cerrado_manual=true para que A_CHECKLIST NO lo
     regenere en su próximo ciclo. Sin esto, los chats de clientes con caso
     terminado VUELVEN A APARECER como "venta esperando_cliente" cada vez que
@@ -917,7 +917,7 @@ async function cargarChecklistsActivos(sb: SupabaseClient): Promise<string> {
     const comp = c.compromisos && c.compromisos.length > 0
       ? ` | COMPROMISOS PENDIENTES: ` + c.compromisos.map((x: any) => `«${x.texto}»`).join(', ')
       : '';
-    return `- [${c.estado.toUpperCase()}] ${nombre} (id ${c.persona_id}) | Tipo: ${c.tipo} | Próximo paso: ${c.proximo_paso ?? 'sin definir'}${comp}`;
+    return `- [${c.estado.toUpperCase()}] ${nombre} (cliente id ${c.persona_id} · chat_id ${c.chat_id}) | Tipo: ${c.tipo} | Próximo paso: ${c.proximo_paso ?? 'sin definir'}${comp}`;
   });
 
   return lineas.join('\n');

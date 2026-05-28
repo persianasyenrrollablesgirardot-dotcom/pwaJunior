@@ -160,19 +160,46 @@ async function esperarRespuesta(mensajeId, sesionId, timeoutMs) {
   return { timeout: true };
 }
 
-// Verificar expectativas declaradas en el escenario
-function verificar(escenario, respuesta) {
+// Verificar expectativas declaradas en el escenario.
+// Recibe `acciones` (conteos de BD del turno, de contarAcciones) para poder
+// verificar expectativas ARRAY:<nombre><op><n> — antes solo se chequeaba RESP:
+// y las ARRAY: pasaban en silencio (falsa sensación de validación).
+function verificar(escenario, respuesta, acciones = {}) {
   if (!escenario.espera || escenario.espera.length === 0) return { ok: true, fails: [] };
   const fails = [];
   const resp = (respuesta.mensaje ?? '').toLowerCase();
-  // Acciones — para verificar arrays necesitamos pedirlas a BD por mensaje_chat_id de la respuesta
-  // Por simplicidad acá solo verificamos lo que se puede inferir del texto:
+  // Mapa nombre-de-array-emitido-por-Junior → conteo real en BD dentro de la
+  // ventana del turno. Junior NO persiste sus arrays emitidos por mensaje, así
+  // que la única fuente de verdad es el efecto en BD (mismo criterio que la
+  // detección de mentiras). Para cascada: tareasCompletar/agendamientosCancelar
+  // incluyen lo que cascadaCierreChecklist hizo solo al cerrar el caso — que es
+  // justo lo que queremos verificar end-to-end.
+  const conteoArrays = {
+    cierresChecklist:      acciones.cierres_checklist ?? 0,
+    tareasCompletar:       acciones.tareas_completadas ?? 0,
+    agendamientosCancelar: acciones.agendamientos_cancelados ?? 0,
+    nuevasTareas:          acciones.tareas_creadas ?? 0,
+    nuevosAgendamientos:   acciones.agendamientos_creados ?? 0,
+    nuevosClientes:        acciones.nuevos_clientes ?? 0,
+    memorias:              acciones.memorias ?? 0,
+    correcciones:          acciones.correcciones ?? 0,
+  };
   for (const exp of escenario.espera) {
     if (exp.startsWith('RESP:')) {
       const regex = new RegExp(exp.slice(5), 'i');
       if (!regex.test(resp)) fails.push(`RESP no matchea: ${exp.slice(5)}`);
+    } else if (exp.startsWith('ARRAY:')) {
+      const m = exp.slice(6).match(/^(\w+)\s*(>=|<=|>|<|=)\s*(\d+)$/);
+      if (!m) { fails.push(`ARRAY mal formado: ${exp}`); continue; }
+      const [, nombre, op, numStr] = m;
+      if (!(nombre in conteoArrays)) { fails.push(`ARRAY:${nombre} no mapeado en runner`); continue; }
+      const val = conteoArrays[nombre];
+      const num = Number(numStr);
+      const ok = op === '>' ? val > num : op === '>=' ? val >= num
+               : op === '<' ? val < num : op === '<=' ? val <= num : val === num;
+      if (!ok) fails.push(`ARRAY:${nombre}=${val} no cumple ${op}${num}`);
     }
-    // ARRAY/GUARD/NO-MIENTE se verifican afuera con queries a BD
+    // GUARD / NO-MIENTE se verifican aparte (detectarGuard + bloque de mentiras)
   }
   return { ok: fails.length === 0, fails };
 }
@@ -196,7 +223,19 @@ async function contarAcciones(mensajeId, sesionId, respuestaId, ventanaInicio) {
     .gte('created_at', ventanaInicio);
   const { data: cls } = await sb.from('chat_checklist')
     .select('chat_id').eq('cerrado_manual', true).gte('actualizado_at', ventanaInicio);
-  return { ...conteo, tareas_creadas: tareas ?? 0, agendamientos_creados: ags ?? 0, cierres_checklist: (cls ?? []).length };
+  // Tareas completadas y agendamientos cancelados en la ventana — incluye lo que
+  // la cascada de cierre hizo automáticamente. Mismas queries que usa la
+  // detección de mentiras más abajo, para que ambos midan lo mismo.
+  const { count: tareasComp } = await sb.from('tareas').select('*', { count: 'exact', head: true })
+    .gte('completada_at', ventanaInicio).eq('completada', true);
+  const { count: agsCanc } = await sb.from('agendamientos').select('*', { count: 'exact', head: true })
+    .gte('deleted_at', ventanaInicio).not('deleted_at', 'is', null);
+  return {
+    ...conteo,
+    tareas_creadas: tareas ?? 0, agendamientos_creados: ags ?? 0,
+    cierres_checklist: (cls ?? []).length,
+    tareas_completadas: tareasComp ?? 0, agendamientos_cancelados: agsCanc ?? 0,
+  };
 }
 
 async function detectarGuard(respuesta) {
@@ -413,7 +452,7 @@ async function main() {
           `Guard anti-ráfaga rechazó >5 acciones destructivas. ${escenario.cat === 'masivo_guard' ? '✓ Comportamiento esperado.' : '⚠ NO era escenario de ráfaga esperada.'}\n\n**Mensaje:** "${escenario.msg.slice(0, 200)}"`);
       }
       const acciones = await contarAcciones(msg.id, state.sesion_id, resp.id, ventanaInicio);
-      const verif = verificar(escenario, resp);
+      const verif = verificar(escenario, resp, acciones);
       if (verif.ok) state.expectativas_pass++;
       else {
         state.expectativas_fail++;
