@@ -447,16 +447,21 @@ async function main() {
       // todas sus tareas" (caso real visto en msg 597 del stress test 1).
       const respLower = respCruda.toLowerCase();
       const mentiras = [];
+      // Los 3 regex usan grupos externos y \b al final para evitar matches
+      // dentro de palabras. Bug detectado 2026-05-27: el regex viejo de
+      // agendamientosCancelar tenía precedencia rota y "cit[ao]s?" se
+      // evaluaba como alternativa global, matcheando "cito" dentro de
+      // "explíCITO" (caso real msg 1095 s19). Ahora paréntesis explícitos.
       if (!yaManejadaPorWorker) {
-        if (/(cerr[ée]|cierro|cierra)\s+(el\s+|los\s+|todos\s+los\s+)?checklists?|caso\s+(terminado|cerrado)/i.test(respLower) && acciones.cierres_checklist === 0) {
+        if (/((cerr[ée]|cierro|cierra)\s+(el\s+|los\s+|todos\s+los\s+)?checklists?\b|caso\s+(terminado|cerrado)\b)/i.test(respLower) && acciones.cierres_checklist === 0) {
           mentiras.push('cierresChecklist');
         }
-        if (/(marqu[ée]|marco|marca)\s+(la\s+)?(tarea|tareas)\s+(como\s+)?(hecha|completada|completadas)|(complet[ée]|completo|completa)\s+(la\s+|las\s+|todas\s+las\s+)?(tarea|tareas)/i.test(respLower)) {
+        if (/((marqu[ée]|marco|marca)\s+(la\s+)?(tarea|tareas)\s+(como\s+)?(hecha|completada|completadas)\b|(complet[ée]|completo|completa)\s+(la\s+|las\s+|todas\s+las\s+)?(tarea|tareas)\b)/i.test(respLower)) {
           const { data: recientes } = await sb.from('tareas')
             .select('id').gte('completada_at', ventanaInicio).eq('completada', true);
           if ((recientes ?? []).length === 0) mentiras.push('tareasCompletar');
         }
-        if (/(cancel[ée]|cancelo|cancela|elimin[ée]|elimino|borra[s]?|borrar[áa]?)\s+(el\s+|los\s+|todos\s+los\s+)?agendamientos?|cit[ao]s?/i.test(respLower)) {
+        if (/(cancel[ée]|cancelo|cancela|elimin[ée]|elimino|borra[s]?|borrar[áa]?)\s+(el\s+|los\s+|todos\s+los\s+)?(agendamientos?|cit[ao]s?)\b/i.test(respLower)) {
           const { data: cancRec } = await sb.from('agendamientos')
             .select('id').gte('deleted_at', ventanaInicio).not('deleted_at', 'is', null);
           if ((cancRec ?? []).length === 0) mentiras.push('agendamientosCancelar');

@@ -647,30 +647,49 @@ async function cicloJuniorChat(): Promise<void> {
         const r = await responderJunior(sb, msg.mensaje, historial, msg.sesion_id);
 
         // ─── GUARD HARD anti-ráfaga destructiva ────────────────────────────
-        // Si Junior emite más de 5 acciones destructivas (tareasCompletar +
-        // cierresChecklist + agendamientosCancelar) en UN solo turno, las
-        // rechazamos ALL-OR-NOTHING y le forzamos a re-pedir confirmación
-        // explícita. Razón: el patrón "Jhon dice 'limpia' → Junior completa
-        // 29 tareas" rompió datos reales (22 tareas comerciales válidas).
-        // Esta es una red de seguridad — el prompt ya prohíbe la ráfaga, pero
-        // si el LLM la emite igual, NO se ejecuta.
-        const totalDestructivas = (r.tareasCompletar?.length ?? 0)
-          + (r.cierresChecklist?.length ?? 0)
-          + (r.agendamientosCancelar?.length ?? 0);
-        if (totalDestructivas > 5) {
-          console.warn(`[V2/JUNIOR] 🛑 GUARD ANTI-RÁFAGA msg ${msg.id}: ${totalDestructivas} acciones destructivas (max=5). Rechazadas:`);
+        // Cuenta PERSONAS DISTINTAS tocadas por destructivas, no acciones totales.
+        // Razón: con la cascada obligatoria al cerrar checklist (un cliente puede
+        // tener 8 tareas + 3 agendamientos + 1 checklist = 12 destructivas
+        // legítimas), contar acciones totales bloquearía la cascada normal.
+        // El patrón malo a frenar es "limpia todo" → toca 8 clientes distintos,
+        // no "cerrá el caso de Walter" → toca solo a Walter aunque sean 12 ops.
+        //
+        // Para mapear destructivas → persona:
+        //   · tareasCompletar:       cruzar tarea.id con BD para obtener persona_id
+        //   · cierresChecklist:      el chat_id → persona del chat (1:1)
+        //   · agendamientosCancelar: cruzar agendamiento.id con BD para obtener persona_id
+        //
+        // Para no agregar latencia, hacemos UN solo query por tabla cuando hay items.
+        const tareasIds = (r.tareasCompletar ?? []).map(x => x.id).filter(Boolean);
+        const agsIds    = (r.agendamientosCancelar ?? []).map(x => x.id).filter(Boolean);
+        const chatsCC   = (r.cierresChecklist ?? []).map(x => x.chat_id).filter(Boolean);
+
+        const personasAfectadas = new Set<number>();
+        if (tareasIds.length > 0) {
+          const { data: t } = await sb.from('tareas').select('persona_id').in('id', tareasIds);
+          for (const x of t ?? []) if (x.persona_id) personasAfectadas.add(x.persona_id);
+        }
+        if (agsIds.length > 0) {
+          const { data: a } = await sb.from('agendamientos').select('persona_id').in('id', agsIds);
+          for (const x of a ?? []) if (x.persona_id) personasAfectadas.add(x.persona_id);
+        }
+        if (chatsCC.length > 0) {
+          const { data: c } = await sb.from('chats').select('persona_id').in('id', chatsCC);
+          for (const x of c ?? []) if (x.persona_id) personasAfectadas.add(x.persona_id);
+        }
+
+        const totalDestructivas = tareasIds.length + chatsCC.length + agsIds.length;
+        if (personasAfectadas.size > 5) {
+          console.warn(`[V2/JUNIOR] 🛑 GUARD ANTI-RÁFAGA msg ${msg.id}: ${personasAfectadas.size} personas distintas con destructivas (max=5, total ${totalDestructivas} ops). Rechazadas:`);
           console.warn(`  · tareasCompletar (${r.tareasCompletar.length}): ${r.tareasCompletar.map(x => '#' + x.id).join(', ')}`);
           console.warn(`  · cierresChecklist (${r.cierresChecklist.length}): ${r.cierresChecklist.map(x => 'chat' + x.chat_id).join(', ')}`);
           console.warn(`  · agendamientosCancelar (${r.agendamientosCancelar.length}): ${r.agendamientosCancelar.map(x => '#' + x.id).join(', ')}`);
+          console.warn(`  · personas afectadas: ${[...personasAfectadas].join(', ')}`);
           console.warn(`  · respuesta original (queda en log, NO se muestra a Jhon): "${(r.respuesta ?? '').slice(0, 400).replace(/\s+/g, ' ')}"`);
           r.tareasCompletar = [];
           r.cierresChecklist = [];
           r.agendamientosCancelar = [];
-          // REEMPLAZAR respuesta entera (no anteponer): si dejamos la propuesta abajo, el
-          // usuario lee "cerré checklists de Rocio, Julio..." y queda confundido entre el
-          // aviso y la frase mentirosa. La propuesta detallada queda en los logs del worker
-          // si Jhon necesita auditar qué iba a hacer Junior.
-          r.respuesta = `⚠ Bloqueé ${totalDestructivas} acciones destructivas que ibas a aplicar — son demasiadas para un solo turno (límite=5) y prefiero confirmar antes de romper algo. Decime específicamente qué cerrar/completar/cancelar (por nombre o id) y procedo en bloques de 5 como máximo.`;
+          r.respuesta = `⚠ Bloqueé acciones destructivas sobre ${personasAfectadas.size} personas distintas en un solo turno (límite=5) y prefiero confirmar antes de romper algo. Decime específicamente con qué cliente/caso empezamos y procedo en bloques de 5 personas como máximo.`;
         }
 
         // Detección defensiva CORRECTORA — Junior promete acciones pero deja el array vacío.
@@ -1060,6 +1079,14 @@ async function cicloJuniorChat(): Promise<void> {
         // regenere en su próximo ciclo. Diferente a notasPersona: acá la persona
         // SÍ es comercial (cliente real, no proveedor/familiar) pero el caso se
         // cerró (vendido+instalado+pagado, o perdido).
+        //
+        // CASCADA AUTOMÁTICA — al cerrar checklist se completan TODAS las tareas
+        // activas del cliente y se cancelan TODOS los agendamientos futuros.
+        // Razón: tras 3 stress tests Junior aprendió a DESCRIBIR la cascada en
+        // texto pero falla consistentemente en EMITIR los IDs en arrays (msgs
+        // 1105, 1145, 1151 del test s19 — frases perfectas tipo "completé tareas
+        // #657 y #658" con arrays vacíos). El prompt no garantiza coherencia
+        // entre texto y JSON. Decisión: cascada determinística en código.
         for (const cc of r.cierresChecklist ?? []) {
           try {
             const motivo = (cc.motivo ?? '').trim() || 'Cerrado manualmente por Jhon';
@@ -1076,10 +1103,47 @@ async function cicloJuniorChat(): Promise<void> {
               .select('chat_id').maybeSingle();
             if (error) {
               console.error(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: ${error.message}`);
-            } else if (!data) {
-              console.warn(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: no había fila en chat_checklist (skip)`);
-            } else {
-              console.log(`[V2/JUNIOR] checklist chat ${cc.chat_id} cerrado manualmente: "${motivo.slice(0, 60)}"`);
+              continue;
+            }
+            if (!data) {
+              console.warn(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: no había fila en chat_checklist (skip cascada)`);
+              continue;
+            }
+            console.log(`[V2/JUNIOR] checklist chat ${cc.chat_id} cerrado manualmente: "${motivo.slice(0, 60)}"`);
+
+            // Cascada — buscar persona_id del chat
+            const { data: chat } = await sb.from('chats')
+              .select('persona_id').eq('id', cc.chat_id).maybeSingle();
+            if (!chat?.persona_id) {
+              console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: sin persona_id, skip`);
+              continue;
+            }
+            const personaId = chat.persona_id;
+
+            // Cascada tareas: completar TODAS las activas (no completadas, no borradas)
+            const ahoraIso = new Date().toISOString();
+            const { data: tareasUpd, error: errT } = await sb.from('tareas')
+              .update({ completada: true, completada_at: ahoraIso } as any)
+              .eq('persona_id', personaId)
+              .eq('completada', false)
+              .is('deleted_at', null)
+              .select('id');
+            if (errT) console.error(`[V2/JUNIOR] cascada tareas persona ${personaId}: ${errT.message}`);
+            else if ((tareasUpd?.length ?? 0) > 0) {
+              console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: completadas ${tareasUpd!.length} tareas (ids: ${tareasUpd!.map(t => t.id).join(', ')})`);
+            }
+
+            // Cascada agendamientos: cancelar TODOS los futuros (fecha >= hoy)
+            const hoyISO = new Date().toISOString().slice(0, 10);
+            const { data: agsUpd, error: errA } = await sb.from('agendamientos')
+              .update({ deleted_at: ahoraIso } as any)
+              .eq('persona_id', personaId)
+              .gte('fecha', hoyISO)
+              .is('deleted_at', null)
+              .select('id');
+            if (errA) console.error(`[V2/JUNIOR] cascada agendamientos persona ${personaId}: ${errA.message}`);
+            else if ((agsUpd?.length ?? 0) > 0) {
+              console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: cancelados ${agsUpd!.length} agendamientos (ids: ${agsUpd!.map(a => a.id).join(', ')})`);
             }
           } catch (e: any) {
             console.error(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: ${e.message}`);
