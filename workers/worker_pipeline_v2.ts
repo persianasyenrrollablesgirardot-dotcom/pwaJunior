@@ -56,6 +56,7 @@ import { registrarTodosLosAgentes } from '../agentes/registro_agentes.js';
 import { sintetizarPersona } from '../agentes/sintesis/analistas.js';
 import { analizarChecklist } from '../agentes/sintesis/checklist.js';
 import { responderJunior, type NuevoCliente } from '../agentes/sintesis/junior_chat.js';
+import { cascadaCierreChecklist } from '../agentes/sintesis/cascada.js';
 import { fusionarPersonas } from '../identidad/fusionar_personas.js';
 
 // ─── Config y env ─────────────────────────────────────────────────────────
@@ -1089,62 +1090,19 @@ async function cicloJuniorChat(): Promise<void> {
         // entre texto y JSON. Decisión: cascada determinística en código.
         for (const cc of r.cierresChecklist ?? []) {
           try {
-            const motivo = (cc.motivo ?? '').trim() || 'Cerrado manualmente por Jhon';
-            // Update + return persona_id en una sola query — chat_checklist
-            // ya tiene la columna persona_id, no hace falta consultar chats
-            // (que tiene persona_id_dueno y no siempre está poblado).
-            const { error, data } = await sb.from('chat_checklist')
-              .update({
-                tipo: 'no_aplica',
-                estado: 'cerrada',
-                proximo_paso: null,
-                motivo_cierre: motivo,
-                cerrado_manual: true,
-                actualizado_at: new Date().toISOString(),
-              } as any)
-              .eq('chat_id', cc.chat_id)
-              .select('chat_id, persona_id').maybeSingle();
-            if (error) {
-              console.error(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: ${error.message}`);
+            const res = await cascadaCierreChecklist(sb, cc.chat_id, cc.motivo ?? '');
+            if (!res.ok) {
+              console.warn(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: ${res.motivoSkip} (skip cascada)`);
               continue;
             }
-            if (!data) {
-              console.warn(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: no había fila en chat_checklist (skip cascada)`);
-              continue;
-            }
-            console.log(`[V2/JUNIOR] checklist chat ${cc.chat_id} cerrado manualmente: "${motivo.slice(0, 60)}"`);
-
-            // Cascada — usar persona_id que ya viene del checklist
-            if (!data.persona_id) {
-              console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: checklist sin persona_id, skip`);
-              continue;
-            }
-            const personaId = data.persona_id;
-
-            // Cascada tareas: completar TODAS las activas (no completadas, no borradas)
-            const ahoraIso = new Date().toISOString();
-            const { data: tareasUpd, error: errT } = await sb.from('tareas')
-              .update({ completada: true, completada_at: ahoraIso } as any)
-              .eq('persona_id', personaId)
-              .eq('completada', false)
-              .is('deleted_at', null)
-              .select('id');
-            if (errT) console.error(`[V2/JUNIOR] cascada tareas persona ${personaId}: ${errT.message}`);
-            else if ((tareasUpd?.length ?? 0) > 0) {
-              console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: completadas ${tareasUpd!.length} tareas (ids: ${tareasUpd!.map(t => t.id).join(', ')})`);
-            }
-
-            // Cascada agendamientos: cancelar TODOS los futuros (fecha >= hoy)
-            const hoyISO = new Date().toISOString().slice(0, 10);
-            const { data: agsUpd, error: errA } = await sb.from('agendamientos')
-              .update({ deleted_at: ahoraIso } as any)
-              .eq('persona_id', personaId)
-              .gte('fecha', hoyISO)
-              .is('deleted_at', null)
-              .select('id');
-            if (errA) console.error(`[V2/JUNIOR] cascada agendamientos persona ${personaId}: ${errA.message}`);
-            else if ((agsUpd?.length ?? 0) > 0) {
-              console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: cancelados ${agsUpd!.length} agendamientos (ids: ${agsUpd!.map(a => a.id).join(', ')})`);
+            console.log(`[V2/JUNIOR] checklist chat ${cc.chat_id} cerrado manualmente`);
+            if (res.motivoSkip) {
+              console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: ${res.motivoSkip}`);
+            } else {
+              if (res.tareasCompletadas.length > 0)
+                console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: completadas ${res.tareasCompletadas.length} tareas (ids: ${res.tareasCompletadas.join(', ')})`);
+              if (res.agendamientosCancelados.length > 0)
+                console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: cancelados ${res.agendamientosCancelados.length} agendamientos (ids: ${res.agendamientosCancelados.join(', ')})`);
             }
           } catch (e: any) {
             console.error(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: ${e.message}`);
