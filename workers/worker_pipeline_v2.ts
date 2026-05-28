@@ -1090,6 +1090,9 @@ async function cicloJuniorChat(): Promise<void> {
         for (const cc of r.cierresChecklist ?? []) {
           try {
             const motivo = (cc.motivo ?? '').trim() || 'Cerrado manualmente por Jhon';
+            // Update + return persona_id en una sola query — chat_checklist
+            // ya tiene la columna persona_id, no hace falta consultar chats
+            // (que tiene persona_id_dueno y no siempre está poblado).
             const { error, data } = await sb.from('chat_checklist')
               .update({
                 tipo: 'no_aplica',
@@ -1100,7 +1103,7 @@ async function cicloJuniorChat(): Promise<void> {
                 actualizado_at: new Date().toISOString(),
               } as any)
               .eq('chat_id', cc.chat_id)
-              .select('chat_id').maybeSingle();
+              .select('chat_id, persona_id').maybeSingle();
             if (error) {
               console.error(`[V2/JUNIOR] cerrar checklist chat ${cc.chat_id}: ${error.message}`);
               continue;
@@ -1111,14 +1114,12 @@ async function cicloJuniorChat(): Promise<void> {
             }
             console.log(`[V2/JUNIOR] checklist chat ${cc.chat_id} cerrado manualmente: "${motivo.slice(0, 60)}"`);
 
-            // Cascada — buscar persona_id del chat
-            const { data: chat } = await sb.from('chats')
-              .select('persona_id').eq('id', cc.chat_id).maybeSingle();
-            if (!chat?.persona_id) {
-              console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: sin persona_id, skip`);
+            // Cascada — usar persona_id que ya viene del checklist
+            if (!data.persona_id) {
+              console.log(`[V2/JUNIOR] cascada chat ${cc.chat_id}: checklist sin persona_id, skip`);
               continue;
             }
-            const personaId = chat.persona_id;
+            const personaId = data.persona_id;
 
             // Cascada tareas: completar TODAS las activas (no completadas, no borradas)
             const ahoraIso = new Date().toISOString();
