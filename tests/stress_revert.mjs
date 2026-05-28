@@ -151,17 +151,43 @@ async function main() {
   // ─── 5. chat_checklist cerrado_manual=true durante la ventana → revertir ─
   sep('5) chat_checklist cerrado_manual durante ventana → revertir a false');
   const { data: cls } = await sb.from('chat_checklist')
-    .select('chat_id, tipo, estado, cerrado_manual, motivo_cierre, actualizado_at')
+    .select('chat_id, persona_id, tipo, estado, cerrado_manual, motivo_cierre, actualizado_at')
     .eq('cerrado_manual', true).gte('actualizado_at', ventanaIni).lte('actualizado_at', ventanaFin);
   console.log(`Checklists a revertir: ${cls?.length}`);
   for (const c of cls ?? []) {
     console.log(`  chat${c.chat_id} motivo="${(c.motivo_cierre ?? '').slice(0, 60)}"`);
   }
+  // Personas cuyo caso se cerró por cascada en la ventana. La cascada NO escribe
+  // junior_instrucciones, así que estas personas NO aparecen en
+  // personasTocadasPorTest — pero sus tareas se completaron y sus agendamientos
+  // se cancelaron, y hay que revertir esos efectos (secciones 5b y 8).
+  const personasCascada = new Set((cls ?? []).map(c => c.persona_id).filter(Boolean));
+  console.log(`Personas con caso cerrado por cascada en ventana: ${personasCascada.size}`);
   if (APPLY && (cls?.length ?? 0) > 0) {
     const { error } = await sb.from('chat_checklist').update({
       cerrado_manual: false, motivo_cierre: null, tipo: 'venta', estado: 'sin_responder',
     }).in('chat_id', cls.map(c => c.chat_id));
     if (error) console.error('  ❌ ' + error.message); else console.log(`  ✓ ${cls.length} checklists revertidos (A_CHECKLIST los regenera en próxima corrida)`);
+  }
+
+  // ─── 5b. Restaurar agendamientos CANCELADOS por la cascada en ventana ───
+  // La cascada hace soft-delete (deleted_at) de los agendamientos futuros al
+  // cerrar un caso. La sección 4 solo borra agendamientos CREADOS por el test;
+  // ninguna sección restauraba los cancelados → quedaban perdidos tras el revert
+  // (bug detectado 2026-05-28). Filtramos por personas del test o de la cascada
+  // para NO des-cancelar bajas legítimas de WhatsApp real en paralelo.
+  sep('5b) Restaurar agendamientos cancelados por cascada en ventana (filtrados por personas del test/cascada)');
+  const { data: agsCancRaw } = await sb.from('agendamientos')
+    .select('id, persona_id, titulo, fecha, deleted_at')
+    .gte('deleted_at', ventanaIni).lte('deleted_at', ventanaFin)
+    .not('deleted_at', 'is', null);
+  const agsCanc = (agsCancRaw ?? []).filter(a => personasTocadasPorTest.has(a.persona_id) || personasCascada.has(a.persona_id));
+  const agsCancDescartados = (agsCancRaw ?? []).length - agsCanc.length;
+  console.log(`Agendamientos cancelados en ventana: ${agsCancRaw?.length} · a restaurar (del test): ${agsCanc.length} · descartados (ajenos): ${agsCancDescartados}`);
+  for (const a of agsCanc.slice(0, 15)) console.log(`  #${a.id} (p${a.persona_id}) ${a.fecha} "${a.titulo}"`);
+  if (APPLY && agsCanc.length > 0) {
+    const { error } = await sb.from('agendamientos').update({ deleted_at: null }).in('id', agsCanc.map(a => a.id));
+    if (error) console.error('  ❌ ' + error.message); else console.log(`  ✓ ${agsCanc.length} agendamientos restaurados`);
   }
 
   // ─── 6. junior_memoria creadas en ventana → vigente=false ──────────────
@@ -207,14 +233,16 @@ async function main() {
   }
 
   // ─── 8. Re-abrir tareas comerciales completadas durante ventana ────────
-  // Solo re-abrir las de personas tocadas por el test (evita revertir completados
-  // legítimos de WhatsApp real procesados en paralelo).
-  sep('8) Re-abrir tareas completadas durante ventana (filtradas por personas del test)');
+  // Re-abrir las de personas tocadas por el test O por la cascada (la cascada
+  // completa TODAS las tareas de la persona al cerrar el caso pero no escribe
+  // junior_instrucciones, así que hay que incluir personasCascada). Filtrar
+  // evita revertir completados legítimos de WhatsApp real en paralelo.
+  sep('8) Re-abrir tareas completadas durante ventana (filtradas por personas del test/cascada)');
   const { data: tareasCompRaw } = await sb.from('tareas')
     .select('id, titulo, completada_at, persona_id, deleted_at')
     .gte('completada_at', ventanaIni).lte('completada_at', ventanaFin)
     .eq('completada', true).is('deleted_at', null);
-  const tareasComp = (tareasCompRaw ?? []).filter(t => personasTocadasPorTest.has(t.persona_id));
+  const tareasComp = (tareasCompRaw ?? []).filter(t => personasTocadasPorTest.has(t.persona_id) || personasCascada.has(t.persona_id));
   const tareasCompDescartadas = (tareasCompRaw ?? []).length - tareasComp.length;
   console.log(`Tareas completadas en ventana: ${tareasCompRaw?.length} · a re-abrir (del test): ${tareasComp.length} · descartadas (ajenas al test): ${tareasCompDescartadas}`);
   if (APPLY && tareasComp.length > 0) {
