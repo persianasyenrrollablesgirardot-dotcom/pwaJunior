@@ -165,6 +165,18 @@ export async function cicloTarjetas(sb: SupabaseClient, log: (m: string) => void
       if (!prev || (n.ts_creado ?? '') > prev) ultimaNota.set(n.persona_id, n.ts_creado);
     }
 
+    // Síntesis más reciente por persona. La tarjeta se arma de modulo_sintesis,
+    // que se actualiza DESPUÉS del mensaje. Si la síntesis es más nueva que la
+    // tarjeta, hay que rehacer — si no, la tarjeta queda stale (caso Angie: se
+    // reconstruyó con síntesis vieja y nunca se re-disparó al actualizarse).
+    const { data: sints } = await sb.from('modulo_sintesis')
+      .select('persona_id, generado_at').in('persona_id', personaIds);
+    const ultimaSintesis = new Map<number, string>();
+    for (const s of sints ?? []) {
+      const prev = ultimaSintesis.get(s.persona_id);
+      if (!prev || (s.generado_at ?? '') > prev) ultimaSintesis.set(s.persona_id, s.generado_at);
+    }
+
     const ahora = Date.now();
     const candidatos: { chat_id: number; motivo: string; nuevo: boolean }[] = [];
     for (const c of cks) {
@@ -176,7 +188,9 @@ export async function cicloTarjetas(sb: SupabaseClient, log: (m: string) => void
       else if (c.ultimo_mensaje_ts && new Date(c.ultimo_mensaje_ts).getTime() > actMs) motivo = 'mensaje nuevo';
       else {
         const nt = ultimaNota.get(c.persona_id);
+        const st = ultimaSintesis.get(c.persona_id);
         if (nt && new Date(nt).getTime() > actMs) motivo = 'nota nueva';
+        else if (st && new Date(st).getTime() > actMs) motivo = 'síntesis nueva';
       }
       if (!motivo) continue;
       if (tj && ahora - actMs < COALESCE_MS) continue;       // coalescing
