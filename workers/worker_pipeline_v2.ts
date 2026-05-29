@@ -57,6 +57,7 @@ import { sintetizarPersona } from '../agentes/sintesis/analistas.js';
 import { analizarChecklist } from '../agentes/sintesis/checklist.js';
 import { responderJunior, type NuevoCliente } from '../agentes/sintesis/junior_chat.js';
 import { cascadaCierreChecklist } from '../agentes/sintesis/cascada.js';
+import { cicloTarjetas } from '../agentes/sintesis/tarjeta_engine.js';
 import { fusionarPersonas } from '../identidad/fusionar_personas.js';
 
 // ─── Config y env ─────────────────────────────────────────────────────────
@@ -1264,6 +1265,8 @@ async function main() {
   setInterval(() => { cicloJuniorChat().catch(e => console.error('[V2/JUNIOR]', e?.message)); }, 3000);
   setInterval(() => { cicloChecklist().catch(e => console.error('[V2/CHK]', e?.message)); }, POLL_CHECKLIST_MS);
   setInterval(() => { cicloSintesisPendiente().catch(e => console.error('[V2/SINT-MANUAL]', e?.message)); }, 4000);
+  // V2: motor de tarjetas embebido (antes proceso aparte worker_tarjetas).
+  setInterval(() => { cicloTarjetas(sb, m => console.log('[V2/TARJETAS]', m)).catch(e => console.error('[V2/TARJETAS]', e?.message)); }, 10000);
 
   setInterval(() => console.log(`[V2] stats: ${JSON.stringify(stats)}`), STATS_INTERVAL_MS);
 

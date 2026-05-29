@@ -131,3 +131,64 @@ export async function reconstruirTarjeta(
     costo_usd: t.costo_usd + chk.costo_usd + tar.costo_usd + age.costo_usd,
   };
 }
+
+// ─── Ciclo: mantiene las tarjetas al día ─────────────────────────────────────
+// Detecta qué tarjetas (re)construir (sin tarjeta / dirty / mensaje nuevo / nota
+// nueva), respeta coalescing 30s y un tope por ciclo. Lo usan tanto el worker
+// standalone como el worker principal (un cycle más, consistente con el resto).
+const COALESCE_MS = 30_000;
+const MAX_POR_CICLO = 6;
+let cicloEnCurso = false;
+
+export async function cicloTarjetas(sb: SupabaseClient, log: (m: string) => void = () => {}): Promise<number> {
+  if (cicloEnCurso) return 0;
+  cicloEnCurso = true;
+  try {
+    const { data: cks } = await sb.from('chat_checklist')
+      .select('chat_id, persona_id, ultimo_mensaje_ts').not('persona_id', 'is', null);
+    if (!cks?.length) return 0;
+
+    const { data: tjs } = await sb.from('tarjeta').select('chat_id, actualizado_at, dirty');
+    const tjMap = new Map((tjs ?? []).map((t: any) => [t.chat_id, t]));
+
+    const personaIds = [...new Set(cks.map((c: any) => c.persona_id))];
+    const { data: notas } = await sb.from('notas_libres')
+      .select('persona_id, ts_creado').in('persona_id', personaIds).is('deleted_at', null);
+    const ultimaNota = new Map<number, string>();
+    for (const n of notas ?? []) {
+      const prev = ultimaNota.get(n.persona_id);
+      if (!prev || (n.ts_creado ?? '') > prev) ultimaNota.set(n.persona_id, n.ts_creado);
+    }
+
+    const ahora = Date.now();
+    const candidatos: { chat_id: number; motivo: string; nuevo: boolean }[] = [];
+    for (const c of cks) {
+      const tj: any = tjMap.get(c.chat_id);
+      const actMs = tj?.actualizado_at ? new Date(tj.actualizado_at).getTime() : 0;
+      let motivo = '';
+      if (!tj) motivo = 'backfill';
+      else if (tj.dirty) motivo = 'dirty';
+      else if (c.ultimo_mensaje_ts && new Date(c.ultimo_mensaje_ts).getTime() > actMs) motivo = 'mensaje nuevo';
+      else {
+        const nt = ultimaNota.get(c.persona_id);
+        if (nt && new Date(nt).getTime() > actMs) motivo = 'nota nueva';
+      }
+      if (!motivo) continue;
+      if (tj && ahora - actMs < COALESCE_MS) continue;       // coalescing
+      candidatos.push({ chat_id: c.chat_id, motivo, nuevo: !tj });
+    }
+    if (!candidatos.length) return 0;
+
+    candidatos.sort((a, b) => (b.nuevo ? 1 : 0) - (a.nuevo ? 1 : 0));  // backfill primero
+    const lote = candidatos.slice(0, MAX_POR_CICLO);
+    for (const x of lote) {
+      try {
+        const r = await reconstruirTarjeta(sb, x.chat_id);
+        if (r.cambio) log(`chat ${x.chat_id} (${x.motivo}) → ${r.estado_conversacion} · ${r.n_tareas}t · ${r.n_agenda}a · $${r.costo_usd.toFixed(4)}`);
+      } catch (e: any) { log(`chat ${x.chat_id}: ERROR ${e.message}`); }
+    }
+    return lote.length;
+  } finally {
+    cicloEnCurso = false;
+  }
+}
