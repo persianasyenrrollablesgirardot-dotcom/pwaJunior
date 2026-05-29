@@ -209,6 +209,25 @@ export async function sintetizarPersona(
     ? (await sb.from('chats').select('id').in('proyecto_id', proys.map(p => p.id))).data ?? []
     : [];
   const chatIds = chats.map(c => c.id);
+
+  // GATE A2_NOCLIENTE — si A2 ya detectó que este chat NO es cliente real
+  // (restaurante/spam/transporte/equivocado, con evidencia clara), NO gastamos
+  // los ~8 LLM de síntesis. A2 es conservador (ante la mínima duda → es_cliente=true),
+  // así que esto solo frena no-clientes confirmados. Reversible: si llega un mensaje
+  // comercial o A2 cambia de opinión, la persona vuelve a sintetizarse.
+  // (Cierra el hueco que el propio A2_NOCLIENTE dejó documentado: "suprimir agentes
+  //  downstream — se integra al pipeline en versiones futuras".)
+  if (chatIds.length > 0) {
+    const { data: a2 } = await sb.from('evento_pg')
+      .select('payload').eq('agente_origen', 'A2_NOCLIENTE')
+      .in('chat_id', chatIds).order('ts_creado', { ascending: false }).limit(1);
+    if ((a2?.[0]?.payload as any)?.es_cliente === false) {
+      const sub = (a2![0].payload as any)?.subtipo_no_cliente ?? 'no-cliente';
+      console.log(`[A_SINTESIS] persona ${personaId} saltada — A2_NOCLIENTE la marcó no-cliente (${sub}); no se gastan tokens de síntesis`);
+      return { ok: 0, fallidos: 0, costo_usd: 0 };
+    }
+  }
+
   const msgs = chatIds.length
     ? (await sb.from('mensajes')
         .select('direccion,tipo,texto,metadata,ts_canal')

@@ -85,27 +85,40 @@ export class IdentidadService {
     // 2. Resolver persona del chat
     // Para chats individuales: la persona es el dueño del jid (canal_chat_id).
     // Para grupos: la persona es el AUTOR del mensaje (vendrá en payload.autor_jid).
+    // Mensajes SALIENTES: los manda el negocio (Jhon), no hay autor externo que
+    // identificar. Se atribuyen a la persona/proyecto del chat. Antes caían como
+    // AMBIGUO en chats de grupo (sin autor_jid) y se trababan acumulándose.
+    const esSaliente = evt.tipo_evento === 'mensaje_saliente';
+
     const personaJid = chat.tipo === 'grupo'
       ? (evt.payload?.autor_jid as string | undefined) ?? null
       : chat.canal_chat_id;
 
-    if (!personaJid) {
-      // grupo sin autor identificado → no podemos resolver
-      console.warn(`[IDENTIDAD] evento ${evt.id} en grupo sin autor_jid`);
-      return null;
-    }
-
-    const match = await this.matchExactoPersona(personaJid);
     let persona: { id: number; nombre: string | null };
     let fueCreado = false;
     let cruceTelefono = false;
 
-    if (match) {
-      persona = { id: match.id, nombre: match.nombre };
-      cruceTelefono = match.matchedBy === 'telefono';
+    if (personaJid) {
+      const match = await this.matchExactoPersona(personaJid);
+      if (match) {
+        persona = { id: match.id, nombre: match.nombre };
+        cruceTelefono = match.matchedBy === 'telefono';
+      } else {
+        persona = await this.crearPersonaDesdeJid(personaJid, chat.titulo, chat.ambito);
+        fueCreado = true;
+      }
+    } else if (esSaliente) {
+      // Saliente sin autor (típico en grupos): atribuir a la persona del chat.
+      const pc = await this.personaDelChat(chat);
+      if (!pc) {
+        console.warn(`[IDENTIDAD] evento ${evt.id} saliente sin persona resoluble (chat ${chat.id})`);
+        return null;
+      }
+      persona = pc;
     } else {
-      persona = await this.crearPersonaDesdeJid(personaJid, chat.titulo, chat.ambito);
-      fueCreado = true;
+      // Entrante de grupo sin autor → no podemos saber quién escribió.
+      console.warn(`[IDENTIDAD] evento ${evt.id} en grupo sin autor_jid`);
+      return null;
     }
 
     // 3. Asegurar proyecto del chat
@@ -155,6 +168,22 @@ export class IdentidadService {
       })
       .eq('id', eventoId);
     if (error) throw new Error(`update evento_pg ${eventoId}: ${error.message}`);
+  }
+
+  /** Persona asociada a un chat (vía su proyecto) — para atribuir mensajes salientes. */
+  private async personaDelChat(chat: ChatRow): Promise<{ id: number; nombre: string | null } | null> {
+    if (chat.proyecto_id) {
+      const { data: proy } = await this.sb.from('proyectos').select('persona_id').eq('id', chat.proyecto_id).maybeSingle();
+      if (proy?.persona_id) {
+        const { data: p } = await this.sb.from('personas').select('id, nombre').eq('id', proy.persona_id).is('deleted_at', null).maybeSingle();
+        if (p) return p;
+      }
+    }
+    if (chat.tipo !== 'grupo') {
+      const m = await this.matchExactoPersona(chat.canal_chat_id);
+      if (m) return { id: m.id, nombre: m.nombre };
+    }
+    return null;
   }
 
   // ─── Match exacto ──────────────────────────────────────────────────────
