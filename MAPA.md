@@ -115,6 +115,47 @@ Bug detectado por Jhon: escribió una nota libre sobre un contacto ("Don Leonel 
 
    **NO se tocó** el par `+573105879410` (#126 "Rocio Romero" vs #169 "Lorena MORALES"): jids `@lid` distintos + nombres distintos → NO es dup. El tel compartido viene del Nequi del negocio (Sandra Lorena Morales) que quedó mal asignado como `telefono_e164` en uno de los dos. Decisión de negocio para Jhon: cuál persona tiene el tel correcto.
 
+- **Junior anti-historial-leak + atajo teléfono + anti-acción-falsa + cierre→nota** (2026-05-29, commits `e7e9e2d` `1694993` `b1f3f7a` `3d77244`): cadena de fixes a la respuesta de Junior tras la prueba general:
+   - **`cargarDetalle` respeta `es_no_cliente`**: cuando Jhon repetía la misma pregunta, su mensaje anterior contaminaba el historial y el ruteo LLM volvía a meter el `chat_id` ya flagueado. `cargarDetalle` ahora detecta `tarjeta.es_no_cliente=true` y devuelve un marcador *"MARCADO NO-CLIENTE (subtipo)"* en vez de la narrativa vieja invertida.
+   - **Atajo determinístico por teléfono**: si la pregunta contiene `+57…` o `3XXxxxxxxx`, antes del directe-response del ruteo busca en TODAS las tarjetas (incl. flagueadas) por `personas.telefono_e164` → mete el `chat_id` matcheado → `cargarDetalle` responde la verdad. Evita el fallback genérico "te toca" cuando preguntás por un colaborador específico.
+   - **Regla anti-acción-falsa (regla #5 en el prompt de respuesta)**: el LLM, bajo insistencia repetida ("cierralo / por eso te digo"), cedía inventando acciones inexistentes ("Voy a actualizar la tarjeta… ya quedó reflejado"). El paso de respuesta es READ-ONLY; las únicas escrituras (nombre + nota) las hace el RUTEO. Ahora explícitamente prohibido afirmar acciones — debe decir "no puedo hacerlo desde acá, te dejo nota o marcalo en la UI". También amplió la regla anti-ceder con más fórmulas de insistencia.
+   - **Ruteo auto-convierte intentos de cierre a nota**: "cerrá X" / "X ya está cerrado" / "dalo por terminado" → emite `nota={chat_id, texto: "Cierre por Jhon: <razón>"}`. La nota dispara el trigger "nota nueva" → `cicloTarjetas` reconstruye → `derivarChecklist` la procesa.
+
+- **Agregador deja de editorializar + checklist distingue venta nueva vs post-venta** (2026-05-29, commit `1f8d196`): caso Angie — chat de cambio simple ya coordinado. Checklist decía "Jhon debe confirmar si el servicio puede ejecutarse sin cotización, medidas ni pago previo". Trazado a 2 capas:
+   - **Agregador editorializaba ausencias** ("no hay cotización… lo que contradice la idea de gestión avanzada. La pelota en manos de Jhon, quien debe confirmar…"). Esa instrucción para downstream poisonaba al checklist. Fix: prohibido editorializar AUSENCIAS + prohibido redactar instrucciones para Jhon/siguientes agentes.
+   - **`derivarChecklist` asumía VENTA NUEVA por defecto** al ver "no hay cotización" en módulos. Fix: identificación de escenario por señales POSITIVAS — si la tarjeta menciona cambio/mantenimiento/garantía/visita técnica, es post-venta/operativo. La ausencia de cotización en post-venta es NORMAL.
+
+- **Paso A — A2_AMBITO detecta proveedor por buyer-signals + aplica directo** (2026-05-29, commit `ca256fa`): caso Santiago Uriza — Jhon le pide cotización de minipersianas a su proveedor. A2_AMBITO clasificaba como `comercial` porque las palabras compartidas ("cotización", "persianas", "precio") aparecen en ambos lados, y el label `CLIENTE` para entrantes reforzaba el default `CONTACTO=cliente final`. Fix:
+   - Label neutral en prompt (`NEGOCIO/OTRO`, no `NEGOCIO/CLIENTE`).
+   - Principio explícito "¿quién pide y quién ofrece?" como criterio dominante.
+   - Señales nuevas para proveedor: "Cotizame", "Ustedes manejan", "Donde le consigno", "Mi NIT es", NEGOCIO da dirección de entrega.
+   - `postProcesar` aplica DIRECTO (sin buzón, per `feedback_agentes_automaticos`): `chats.ambito` + `personas.ambito_principal` + `sintesis_pendiente=true` + `tarjeta.dirty=true`. Respeta `ambito_confirmado=true` para no pisar manualmente seteados.
+   - Backfill (`tests/recorrer_ambito.ts`): re-corrió A2_AMBITO sobre 81 chats `comercial` no confirmados → 2 reclasificados a `proveedor` (chats 25 y 67).
+
+- **Paso B — M1–M7 prompts respetan ámbito + preservan atribución por dirección** (2026-05-29, commit `dfbd734`): los analistas de síntesis hardcodeaban `CONTACTO=CLIENTE` e invertían atribuciones (la frase "Donde le consigno" la dijo Jhon pero terminaba como "el cliente manifestó intención de pago"). Cambios en `agentes/sintesis/analistas.ts`:
+   - Label del entrante en la conversación = `rolOtro` según `ambito_principal`: `proveedor`→PROVEEDOR, `interno_equipo`→COLABORADOR, etc. Ya no se le dice CLIENTE por default.
+   - User prompt: `CONTACTO: name (rolOtro)` en vez de `CLIENTE: name`.
+   - `ctxComun` ampliado con reglas duras de atribución por dirección + bloques condicionales por ámbito (`proveedor`: roles invertidos completos, `interno_equipo`: coordinación operativa).
+   - Gate `sintetizarPersona` relajado: `A2_NOCLIENTE` con subtipo `colaborador` o `proveedor` SÍ sintetiza (los prompts nuevos lo encuadran bien); restaurante/spam/etc se siguen saltando.
+   - Verificado E2E con Santiago: M2 ahora dice *"Jhon (NEGOCIO) solicitó cotización a su proveedor Santiago, Santiago cotizó $278.350, Jhon manifestó intención de pagar"*. Checklist: *"Jhon debe realizar el pago de $278.350"*.
+
+- **Junior filtra NO-acciones del listado + formato AGENDA + TE TOCA** (2026-05-29, commit `010d6b0`): caso Lorena MORALES / Pedro Bustos — Junior listaba items como *"Mantenerse a la expectativa, sin acción inmediata"* o *"Decidir si reclasificar X o mantener Y"* como pendientes accionables. Cambios:
+   - `derivarChecklist` regla #5: "no-acción NO es espera_jhon". Patrones explícitos → espera_cliente o cerrado.
+   - `junior_v2.cargarIndice` filtro defensivo: aunque `derivarChecklist` se equivoque, in-memory degrada a `cerrado` los items cuyo `proximo_paso` matchea NO_ACCION.
+   - Para queries amplias ("dame pendientes", "qué tengo hoy", "lista"), el ruteo delega al **fallback determinístico** (no respuesta_directa LLM) que arma 2 secciones: **📅 AGENDA próxima (7 días)** + **✅ TE TOCA (acciones concretas)**. La sección AGENDA hace dedup por `(nombre, fecha, hora)` para esconder duplicados históricos cross-persona.
+
+- **Botón Reprocesar Media (3 piezas: endpoint + UI + extensión)** (2026-05-29, commits `6333c65` `2134f05` `be94649` `10bd753`): para los media (audios/imágenes/PDFs) que la extensión no llegó a procesar al momento de captura, el Visor tiene ahora un botón para forzar el reprocess. Camino completo:
+   - **Backend**: `POST /api/reprocesar-media` (vite plugin) acepta `{message_id|chat_id}`, marca `metadata.reprocesar_pending=true` en mensajes media sin `ai_text`.
+   - **UI**: nueva sección 📎 Media en `TarjetaV2` lista los archivos del chat con su estado (procesado/CDN perdido/en cola/sin procesar). Botón 🔄 por item + "Reprocesar los N pendientes" masivo.
+   - **Extensión**: nuevo `chrome.alarms` cada 60s en `background.v2.js` que querya Supabase por mensajes flagueados, los busca en IndexedDB local, encola `download_media` o `ai_process` según si ya tiene bytes, limpia el flag con resultado (`enqueued` / `no_local_copy`).
+   - **Stack de bugs cerrados en outgoing** (el PDF de pago de Jhon a Santiago, #6099 chat 250): (a) outgoing iba siempre por `downloadAndDecryptMedia` que tira "media sin key o path" porque WA no popula esos campos en outgoing — la regex de fallback no matcheaba → reintento silencioso. Fix: si `msg.is_owner=true` saltar directo a `refreshMediaViaContent` (`Store.Msg.downloadMedia` de WA Web). (b) `msg.media` quedaba null en local para outgoing → crash al asignar `sha256`. Fix defensivo `if (!msg.media) msg.media = {}`. (c) `syncToVisorPG` usa `Prefer: resolution=ignore-duplicates` → el ai_text de reprocesados se ignoraba en BD. Fix: `runAITask` hace PATCH directo a Supabase tras IA exitosa (`patchAiTextEnSupabase`), bypass del sync genérico.
+   - Verificado E2E con el PDF de Santiago: tras los 4 fixes, `ai_text=processed` con el contenido del comprobante ("VERTIBLINDS BY DESIGN S A S, factura 13538, $278.350, PSE exitoso").
+   - Límites conocidos: videos no soportados (sin rama en `processMediaWithAI` — declarado, no implementado). PDFs comprimidos no respetan el límite de 2 páginas (el regex no encuentra `/Type /Page` dentro de streams comprimidos).
+
+- **Post-hoc force en checklist + dedup en agendamientos** (2026-05-29, commit `c6eb445`):
+   - **derivarChecklist** ahora tiene un chequeo determinístico POST-LLM: si el `proximo_paso` matchea NO_ACCION (`(decidir|confirmar|definir|evaluar)\s+si\b...\bo\b`, `reclasifi`, `mantener`, `expectativa`, etc.) y el estado quedó `espera_jhon`/`sin_responder`, lo baja a `cerrado`. El prompt lo prohibía pero el LLM lo evadía reformulando — esto da la garantía mecánica. Caso Pedro Bustos: el LLM seguía emitiendo "reclasificar a Pedro como contacto no comercial o mantenerlo", ahora el regex lo agarra y queda fuera del listado.
+   - **`tarjeta_engine`** dedup antes del insert de `agendamientos` y `tarjeta_agenda` por `(fecha, hora, primeras 30 letras del título normalizado)`. Cleanup de existentes: 0 dups within-persona (el patrón delete+insert por persona ya estaba limpio). Los dups visuales (Patricia ×6) son cross-persona y solo se resuelven fusionando esas personas (decisión de negocio pendiente).
+
 ---
 
 **FASE 8 — Módulo Checklist por chat** (2026-05-22, ✅ COMPLETA)
