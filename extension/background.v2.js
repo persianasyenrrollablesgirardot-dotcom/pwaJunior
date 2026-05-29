@@ -870,11 +870,16 @@ async function runAITask(task) {
     const entry = await processMediaWithAI(msg);
     if (entry?.text) {
       // Inyectar el texto IA al CanonicalMessage como `media.ai_text`
+      if (!msg.media) msg.media = {};
       msg.media.ai_text = entry.text;
       msg.media.ai_kind = entry.kind;
       msg.media.ai_status = 'processed';
       msg.processing_state = 'ready_to_sync';
       await tx('messages', 'readwrite', s => reqAsync(s.put(msg)));
+      // PATCH directo a Supabase: syncToVisorPG usa ignore-duplicates y no
+      // actualiza filas existentes. Sin este PATCH, los reprocesados nunca
+      // llegan al Visor (el ai_text se ignora al re-upsert).
+      await patchAiTextEnSupabase(msg.id, entry);
       if (typeof syncToVisorPG === 'function') syncToVisorPG();
     } else {
       msg.media.ai_status = 'skipped';
@@ -1944,6 +1949,37 @@ async function procesarReprocesarPendientes() {
   } catch (e) {
     console.warn('[WS-BG-V2] procesarReprocesarPendientes:', e.message);
   }
+}
+
+// PATCH directo a Supabase con ai_text/ai_kind/ai_status del mensaje.
+// Necesario porque syncToVisorPG usa upsert ignore-duplicates → filas
+// existentes no se actualizan, y los reprocesados de media nunca llegan.
+async function patchAiTextEnSupabase(canalMsgId, entry) {
+  try {
+    const { supabaseKey } = await getSettings();
+    if (!supabaseKey) return;
+    const url = `${SUPABASE_URL}/rest/v1/mensajes?canal_msg_id=eq.${encodeURIComponent(canalMsgId)}`;
+    const getRes = await fetch(`${url}&select=metadata`, { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
+    const rows = await getRes.json();
+    if (!Array.isArray(rows) || rows.length === 0) {
+      console.warn(`[WS-BG-V2] patch ai_text: msg ${canalMsgId} no encontrado en Supabase — el sync normal lo va a insertar`);
+      return;
+    }
+    const cur = rows[0].metadata ?? {};
+    const md = {
+      ...cur,
+      ai_text: entry.text, ai_kind: entry.kind, ai_status: 'processed',
+      reprocesar_pending: false,
+      reprocesar_result: 'processed', reprocesar_result_at: new Date().toISOString(),
+    };
+    const patchRes = await fetch(url, {
+      method: 'PATCH',
+      headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({ metadata: md }),
+    });
+    if (!patchRes.ok) console.warn(`[WS-BG-V2] patch ai_text ${canalMsgId}: HTTP ${patchRes.status}`);
+    else console.log(`[WS-BG-V2] ai_text ✓ sincronizado a Supabase para ${canalMsgId} (${entry.kind})`);
+  } catch (e) { console.warn(`[WS-BG-V2] patch ai_text falló: ${e.message}`); }
 }
 
 async function limpiarReprocesarFlag(supabaseKey, messageId, motivo) {
