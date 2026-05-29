@@ -39,16 +39,20 @@ function hace(iso: string | null): string {
 
 export function JuniorChecklist() {
   const [filas, setFilas] = useState<Fila[]>([]);
+  const [ocultos, setOcultos] = useState(0);
   const [cargado, setCargado] = useState(false);
   const [filtro, setFiltro] = useState<Estado | 'todos'>('todos');
 
   const cargar = useCallback(async () => {
     const { data: tjs } = await supabase.from('tarjeta')
-      .select('chat_id, tipo_contacto, personas(nombre)');
+      .select('chat_id, tipo_contacto, es_no_cliente, personas(nombre)');
     const { data: cks } = await supabase.from('tarjeta_checklist')
       .select('chat_id, estado_conversacion, proximo_paso, actualizado_at');
     const ck = new Map((cks as any[] ?? []).map(c => [c.chat_id, c]));
-    const rows: Fila[] = (tjs as any[] ?? []).map(t => {
+    // Filtrar no-clientes (restaurante/spam/etc. detectados por A2) del tablero.
+    const comerciales = (tjs as any[] ?? []).filter(t => !t.es_no_cliente);
+    setOcultos(((tjs as any[] ?? []).length) - comerciales.length);
+    const rows: Fila[] = comerciales.map(t => {
       const c = ck.get(t.chat_id);
       return {
         chat_id: t.chat_id,
@@ -76,6 +80,7 @@ export function JuniorChecklist() {
       <p style={{ margin: '0 0 14px', fontSize: 12, color: 'var(--text-muted)' }}>
         Estado de cada conversación según las tarjetas V2: en qué chats <strong>te toca mover a vos</strong> y
         en cuáles no. <em>Tocá un estado para filtrar.</em>
+        {ocultos > 0 && <span style={{ marginLeft: 8, color: '#9ca3af' }}>· {ocultos} no-cliente{ocultos > 1 ? 's' : ''} oculto{ocultos > 1 ? 's' : ''} (restaurante/spam/etc.)</span>}
       </p>
 
       {cargado && filas.length === 0 && (

@@ -37,6 +37,16 @@ async function resolverPersona(sb: SupabaseClient, chatId: number): Promise<numb
   return null;
 }
 
+/** Último veredicto de A2_NOCLIENTE para el chat: ¿no es cliente real? */
+async function verdictoNoCliente(sb: SupabaseClient, chatId: number): Promise<{ esNoCliente: boolean; subtipo: string | null }> {
+  const { data } = await sb.from('evento_pg')
+    .select('payload').eq('agente_origen', 'A2_NOCLIENTE').eq('chat_id', chatId)
+    .order('ts_creado', { ascending: false }).limit(1);
+  const p: any = data?.[0]?.payload;
+  if (p && p.es_cliente === false) return { esNoCliente: true, subtipo: p.subtipo_no_cliente ?? null };
+  return { esNoCliente: false, subtipo: null };
+}
+
 export async function reconstruirTarjeta(
   sb: SupabaseClient, chatId: number, opts: { forzar?: boolean } = {},
 ): Promise<ResultadoReconstruir> {
@@ -44,6 +54,7 @@ export async function reconstruirTarjeta(
   if (!personaId) {
     return { chat_id: chatId, persona_id: null, cambio: false, motivo: 'chat sin persona resoluble', hash: '', costo_usd: 0 };
   }
+  const noCli = await verdictoNoCliente(sb, chatId);
 
   // 1) Leer insumos SIN LLM y calcular el hash del input (hechos + notas + tipo).
   const ins = await leerInsumosTarjeta(sb, personaId);
@@ -56,7 +67,12 @@ export async function reconstruirTarjeta(
 
   // 2) Si el input no cambió → salir SIN gastar LLM (idempotencia real).
   if (!opts.forzar && previa?.input_hash === inputHash) {
-    await sb.from('tarjeta').update({ dirty: false, actualizado_at: ahora }).eq('chat_id', chatId);
+    // Aunque la tarjeta no cambie, el veredicto de no-cliente puede haber
+    // cambiado (A2 corre aparte) → lo refrescamos igual (barato, sin LLM).
+    await sb.from('tarjeta').update({
+      dirty: false, actualizado_at: ahora,
+      es_no_cliente: noCli.esNoCliente, no_cliente_subtipo: noCli.subtipo,
+    } as any).eq('chat_id', chatId);
     return { chat_id: chatId, persona_id: personaId, cambio: false, motivo: 'sin cambios (hash igual)', hash: inputHash, costo_usd: 0 };
   }
 
@@ -69,6 +85,7 @@ export async function reconstruirTarjeta(
     chat_id: chatId, persona_id: personaId, tipo_contacto: t.tipo_contacto,
     contexto: t.contexto_estructurado, notas: t.notas, narrativa: t.narrativa,
     input_hash: inputHash, dirty: false, costo_usd: t.costo_usd,
+    es_no_cliente: noCli.esNoCliente, no_cliente_subtipo: noCli.subtipo,
     generado_at: ahora, actualizado_at: ahora,
   } as any);
 

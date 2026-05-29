@@ -26,7 +26,8 @@ interface FilaIndice { chat_id: number; nombre: string; tipo: string; estado: st
 
 async function cargarIndice(sb: SupabaseClient): Promise<FilaIndice[]> {
   const { data: tjs } = await sb.from('tarjeta')
-    .select('chat_id, tipo_contacto, persona_id, personas(nombre)');
+    .select('chat_id, tipo_contacto, persona_id, es_no_cliente, personas(nombre)')
+    .eq('es_no_cliente', false);  // no surfacear no-clientes (restaurante/spam) a Junior
   const { data: cks } = await sb.from('tarjeta_checklist')
     .select('chat_id, estado_conversacion, proximo_paso');
   const ck = new Map((cks ?? []).map((c: any) => [c.chat_id, c]));
