@@ -98,7 +98,10 @@ export async function responderJuniorTarjeta(
         `NUNCA digas que "no hay tarjetas seleccionadas" ni pidas que Jhon "seleccione" — no existe seleccionar, SIEMPRE tenés el índice. ` +
         `Si "actualizar" se refiere a las tarjetas: aclaramos que se actualizan solas con info nueva, y mostramos el estado actual. ` +
         `En respuesta_directa NUNCA inventes datos (horas/montos/fechas) que no estén en el índice; si Jhon insiste con algo que no ves, no se lo confirmes inventando.\n` +
-        `Devolvé SOLO JSON: {"puede_responder_con_indice": bool, "respuesta_directa": string|null, "chat_ids": number[]}`,
+        `- Si Jhon te da una INSTRUCCIÓN para recordar/anotar algo sobre un contacto ("este es mi instalador William", "anotá que X", ` +
+        `"recordá que Y", "tené en cuenta que Z") → devolvé nota={"chat_id": <chat del contacto del índice>, "texto": "<la instrucción ` +
+        `redactada como nota>"}. Identificá el contacto por nombre/teléfono/contexto previo. Es para GUARDAR, no una pregunta.\n` +
+        `Devolvé SOLO JSON: {"puede_responder_con_indice": bool, "respuesta_directa": string|null, "chat_ids": number[], "nota": {"chat_id": number, "texto": string} | null}`,
     },
     { role: 'user', content: `CONVERSACIÓN PREVIA:\n${histTexto}\n\nÍNDICE DE TARJETAS:\n${indiceTexto}\n\nNUEVA PREGUNTA DE JHON: ${pregunta}` },
   ];
@@ -106,6 +109,35 @@ export async function responderJuniorTarjeta(
   let plan: any = {};
   try { plan = JSON.parse(r1.contenido); } catch { plan = {}; }
   let costo = r1.costo_usd;
+
+  // ── Acción: AGREGAR NOTA (instrucción de Jhon → notas_libres → la tarjeta se
+  //    rehace con la nota). Junior por fin puede ESCRIBIR, y confirma con la
+  //    verdad (sólo después de guardar de verdad).
+  if (plan.nota && typeof plan.nota.chat_id === 'number' && typeof plan.nota.texto === 'string' && plan.nota.texto.trim()) {
+    const chatId = plan.nota.chat_id as number;
+    const texto = String(plan.nota.texto).trim().slice(0, 500);
+    let personaId: number | null = null;
+    const { data: cl } = await sb.from('chat_checklist').select('persona_id').eq('chat_id', chatId).maybeSingle();
+    personaId = (cl?.persona_id as number) ?? null;
+    if (!personaId) {
+      const { data: ch } = await sb.from('chats').select('proyecto_id').eq('id', chatId).maybeSingle();
+      if (ch?.proyecto_id) {
+        const { data: pr } = await sb.from('proyectos').select('persona_id').eq('id', ch.proyecto_id).maybeSingle();
+        personaId = (pr?.persona_id as number) ?? null;
+      }
+    }
+    const nombre = indice.find(f => f.chat_id === chatId)?.nombre ?? `chat ${chatId}`;
+    if (!personaId) {
+      return { respuesta: `Quería anotar eso pero no pude identificar a qué contacto te referís. Decime el nombre o el número y lo guardo.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    const { error } = await sb.from('notas_libres').insert({ persona_id: personaId, contenido: texto, visible_para: ['todos'], creado_por: 1 } as any);
+    if (error) {
+      return { respuesta: `Quise anotarlo pero falló el guardado (${error.message}). Probá de nuevo.`, tarjetas_usadas: [chatId], via_indice: false, costo_usd: costo };
+    }
+    await sb.from('personas').update({ sintesis_pendiente: true }).eq('id', personaId);
+    await sb.from('tarjeta').update({ dirty: true }).eq('chat_id', chatId);
+    return { respuesta: `Listo, lo anoté en la tarjeta de ${nombre}: «${texto}». Se va a reflejar en la tarjeta en unos segundos.`, tarjetas_usadas: [chatId], via_indice: false, costo_usd: costo };
+  }
 
   if (plan.puede_responder_con_indice && plan.respuesta_directa) {
     return { respuesta: String(plan.respuesta_directa), tarjetas_usadas: [], via_indice: true, costo_usd: costo };
