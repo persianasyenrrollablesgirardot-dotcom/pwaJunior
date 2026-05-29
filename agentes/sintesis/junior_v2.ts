@@ -47,15 +47,26 @@ async function cargarDetalle(sb: SupabaseClient, chatIds: number[]): Promise<str
   const bloques: string[] = [];
   for (const id of chatIds) {
     const { data: t } = await sb.from('tarjeta')
-      .select('tipo_contacto, narrativa, notas, contexto, persona_id, personas(nombre, telefono_e164, ciudad)')
+      .select('tipo_contacto, narrativa, notas, contexto, persona_id, es_no_cliente, no_cliente_subtipo, personas(nombre, telefono_e164, ciudad)')
       .eq('chat_id', id).maybeSingle();
     if (!t) continue;
+    const tt: any = t;
+    const contacto = [tt.personas?.telefono_e164 ? `tel ${tt.personas.telefono_e164}` : null, tt.personas?.ciudad].filter(Boolean).join(' · ');
+    // Defensa: si el chat quedó marcado no-cliente (colaborador/restaurante/spam/etc.),
+    // NO leemos la narrativa vieja (puede ser previa al re-flagueo). Dar la VERDAD breve.
+    if (tt.es_no_cliente) {
+      bloques.push(
+        `### ${tt.personas?.nombre ?? `Chat #${id}`} (chat ${id})\n` +
+        (contacto ? `CONTACTO: ${contacto}\n` : '') +
+        `MARCADO NO-CLIENTE (${tt.no_cliente_subtipo ?? 'otro'}). No es un cliente comercial. ` +
+        `Decile esto a Jhon en una frase, NO inventes historia comercial ni te apoyes en la narrativa vieja.`
+      );
+      continue;
+    }
     const { data: ck } = await sb.from('tarjeta_checklist').select('estado_conversacion, proximo_paso').eq('chat_id', id).maybeSingle();
     const { data: tar } = await sb.from('tarjeta_tarea').select('titulo, prioridad').eq('chat_id', id).order('prioridad');
     const { data: ag } = await sb.from('tarjeta_agenda').select('titulo, cuando, lugar').eq('chat_id', id);
-    const tt: any = t;
     const ctx = (tt.contexto ?? []).map((c: any) => `  [${c.titulo}] ${c.sintesis}`).join('\n');
-    const contacto = [tt.personas?.telefono_e164 ? `tel ${tt.personas.telefono_e164}` : null, tt.personas?.ciudad].filter(Boolean).join(' · ');
     bloques.push(
       `### ${tt.personas?.nombre ?? `Chat #${id}`} (chat ${id}, ${tt.tipo_contacto})\n` +
       (contacto ? `CONTACTO: ${contacto}\n` : '') +
