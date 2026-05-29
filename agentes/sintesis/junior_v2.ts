@@ -118,6 +118,11 @@ export async function responderJuniorTarjeta(
         `- Si Jhon dice CÓMO SE LLAMA un contacto ("se llama Germán", "es Germán el socio", "este es William") → devolvé ` +
         `nuevo_nombre={"chat_id": <chat del contacto>, "nombre": "<el nombre, ej. 'Germán (socio)'>"} para actualizar el nombre de la tarjeta. ` +
         `Puede ir JUNTO con nota (la instrucción) en el mismo mensaje.\n` +
+        `- Si Jhon pide CERRAR / MARCAR COMO CERRADO / dar por TERMINADO / RESUELTO un caso ("cerrá X", "cierra X", ` +
+        `"X ya está cerrado", "lo cerré por fuera", "ya hablé con él y cerramos", "dalo por terminado", "ya quedó resuelto") → ` +
+        `convertilo en nota={"chat_id": <chat del contacto>, "texto": "Cierre por Jhon: <razón que dio, o 'tras conversación directa con el cliente' si no dio razón>"}. ` +
+        `Junior NO puede cambiar el estado de la tarjeta directamente, pero la nota queda registrada y los agentes re-derivan el checklist en el próximo ciclo. ` +
+        `Si Jhon insiste varias veces que lo cierres, NO inventes que ya lo hiciste — convertilo en nota acá y respondé honesto en respuesta_directa: "anoté el cierre por tu indicación; los agentes lo procesan en el próximo ciclo".\n` +
         `Devolvé SOLO JSON: {"puede_responder_con_indice": bool, "respuesta_directa": string|null, "chat_ids": number[], ` +
         `"nota": {"chat_id": number, "texto": string} | null, "nuevo_nombre": {"chat_id": number, "nombre": string} | null}`,
     },
