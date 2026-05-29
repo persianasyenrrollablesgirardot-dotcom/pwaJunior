@@ -9,16 +9,14 @@
  */
 import { useState } from 'react';
 import { JuniorChat } from './JuniorChat';
-import { JuniorInstrucciones } from './JuniorInstrucciones';
 import { JuniorChecklist } from './JuniorChecklist';
 import { JuniorTareas } from './JuniorTareas';
 import { JuniorAgendamientos } from './JuniorAgendamientos';
 
-type Tab = 'chat' | 'instrucciones' | 'checklist' | 'agendamientos' | 'tareas';
+type Tab = 'chat' | 'checklist' | 'agendamientos' | 'tareas';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'chat', label: '💬 Chat' },
-  { id: 'instrucciones', label: '📋 Instrucciones por chat' },
   { id: 'checklist', label: '✅ Checklist por chat' },
   { id: 'agendamientos', label: '📅 Agendamientos' },
   { id: 'tareas', label: '📋 Tareas' },
@@ -69,9 +67,6 @@ export function Junior() {
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
         <div style={{ display: tab === 'chat' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
           <JuniorChat />
-        </div>
-        <div style={{ display: tab === 'instrucciones' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
-          <JuniorInstrucciones />
         </div>
         <div style={{ display: tab === 'checklist' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}>
           <JuniorChecklist />

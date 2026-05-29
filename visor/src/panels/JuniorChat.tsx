@@ -1,268 +1,89 @@
 /**
- * Pestaña Chat del módulo Junior — la conversación de Jhon con su asistente.
+ * Chat con Junior — VERSIÓN V2.
  *
- * Jhon escribe → se inserta en `junior_chat` (estado='pendiente'). El worker lo
- * ve, arma el contexto con las síntesis de todos los clientes, y responde.
- * El componente hace polling cada 2s para mostrar la respuesta.
+ * Llama al endpoint /api/junior-v2 (responderJuniorTarjeta): Junior lee SOLO las
+ * tarjetas relevantes, no las 75. Muestra qué tarjetas leyó y el costo del turno.
  *
- * Sesiones: cada conversación es independiente. Jhon puede abrir un chat nuevo
- * o volver a uno viejo. El historial que ve Junior es el de la sesión activa.
+ * Nota: por ahora cada pregunta es independiente (sin historial de conversación
+ * en el server). El hilo de follow-ups llega en el Hito 3.
  */
-import { useEffect, useRef, useState } from 'react';
-import { supabase } from '../lib/supabase';
+import { useRef, useState, useEffect } from 'react';
 
-interface Mensaje {
-  id: number;
-  rol: 'usuario' | 'junior';
-  mensaje: string;
-  estado: string;
-  created_at: string;
+interface Turno {
+  rol: 'jhon' | 'junior';
+  texto: string;
+  meta?: { via_indice: boolean; tarjetas_usadas: number[]; costo_usd: number };
 }
-
-interface Sesion {
-  id: number;
-  titulo: string | null;
-  ultima_actividad: string;
-}
-
-const SUGERENCIAS = [
-  '¿Qué tengo que hacer hoy?',
-  '¿Quién me debe plata?',
-  '¿Qué cliente está en riesgo?',
-  '¿Cómo va Walter Estancia?',
-];
-
-const TITULO_DEFAULT = 'Conversación nueva';
 
 export function JuniorChat() {
-  const [sesiones, setSesiones] = useState<Sesion[]>([]);
-  const [sesionActiva, setSesionActiva] = useState<number | null>(null);
-  const [mensajes, setMensajes] = useState<Mensaje[]>([]);
-  const [prevLen, setPrevLen] = useState(0);
-  const [input, setInput] = useState('');
-  const [enviando, setEnviando] = useState(false);
+  const [turnos, setTurnos] = useState<Turno[]>([]);
+  const [pregunta, setPregunta] = useState('');
+  const [cargando, setCargando] = useState(false);
   const finRef = useRef<HTMLDivElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
 
-  /** Devuelve true si el usuario está cerca del final (últimos 80px). */
-  function estaEnFondo(): boolean {
-    const el = scrollRef.current;
-    if (!el) return true;
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  }
+  useEffect(() => { finRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [turnos, cargando]);
 
-  /** Carga las sesiones; si no hay ninguna, crea una. Devuelve la más reciente. */
-  async function cargarSesiones(): Promise<number | null> {
-    const { data } = await supabase
-      .from('junior_sesiones')
-      .select('id,titulo,ultima_actividad')
-      .order('ultima_actividad', { ascending: false });
-    let lista = (data as Sesion[]) ?? [];
-    if (lista.length === 0) {
-      const { data: nueva } = await supabase
-        .from('junior_sesiones')
-        .insert({ titulo: TITULO_DEFAULT } as any)
-        .select('id,titulo,ultima_actividad')
-        .single();
-      if (nueva) lista = [nueva as Sesion];
-    }
-    setSesiones(lista);
-    return lista[0]?.id ?? null;
-  }
-
-  async function cargarMensajes(sid: number) {
-    const { data } = await supabase
-      .from('junior_chat')
-      .select('id,rol,mensaje,estado,created_at')
-      .eq('sesion_id', sid)
-      .order('created_at', { ascending: true });
-    setMensajes((data as Mensaje[]) ?? []);
-  }
-
-  useEffect(() => {
-    cargarSesiones().then(sid => { if (sid) setSesionActiva(sid); });
-  }, []);
-
-  useEffect(() => {
-    if (sesionActiva == null) return;
-    cargarMensajes(sesionActiva);
-    const t = setInterval(() => cargarMensajes(sesionActiva), 2000);
-    return () => clearInterval(t);
-  }, [sesionActiva]);
-
-  useEffect(() => {
-    if (mensajes.length > prevLen) {
-      // Solo hace scroll automático si el usuario ya estaba en el fondo.
-      // Si está leyendo mensajes anteriores, no lo interrumpimos.
-      if (estaEnFondo()) {
-        finRef.current?.scrollIntoView({ behavior: 'smooth' });
+  async function enviar() {
+    const q = pregunta.trim();
+    if (!q || cargando) return;
+    setTurnos(t => [...t, { rol: 'jhon', texto: q }]);
+    setPregunta(''); setCargando(true);
+    try {
+      const res = await fetch('/api/junior-v2', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pregunta: q }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setTurnos(t => [...t, { rol: 'junior', texto: 'Tuve un problema: ' + data.error }]);
+      } else {
+        setTurnos(t => [...t, { rol: 'junior', texto: data.respuesta, meta: { via_indice: data.via_indice, tarjetas_usadas: data.tarjetas_usadas, costo_usd: data.costo_usd } }]);
       }
-    }
-    setPrevLen(mensajes.length);
-  }, [mensajes, prevLen]);
-
-  const esperando = mensajes.some(m => m.rol === 'usuario' && m.estado === 'pendiente');
-
-  async function nuevaConversacion() {
-    const { data: nueva } = await supabase
-      .from('junior_sesiones')
-      .insert({ titulo: TITULO_DEFAULT } as any)
-      .select('id,titulo,ultima_actividad')
-      .single();
-    if (nueva) {
-      setSesiones(s => [nueva as Sesion, ...s]);
-      setMensajes([]);
-      setSesionActiva((nueva as Sesion).id);
-    }
-  }
-
-  async function enviar(texto?: string) {
-    const t = (texto ?? input).trim();
-    if (!t || enviando || esperando || sesionActiva == null) return;
-    setEnviando(true);
-    setInput('');
-    await supabase.from('junior_chat').insert({
-      rol: 'usuario', mensaje: t, estado: 'pendiente', sesion_id: sesionActiva,
-    } as any);
-    // Auto-título: si la sesión todavía no tiene nombre propio, usar este mensaje.
-    const ses = sesiones.find(s => s.id === sesionActiva);
-    if (ses && (!ses.titulo || ses.titulo === TITULO_DEFAULT)) {
-      const titulo = t.length > 42 ? t.slice(0, 42) + '…' : t;
-      await supabase.from('junior_sesiones').update({ titulo } as any).eq('id', sesionActiva);
-      setSesiones(list => list.map(s => s.id === sesionActiva ? { ...s, titulo } : s));
-    }
-    await cargarMensajes(sesionActiva);
-    // Después de enviar SÍ queremos ir al final siempre.
-    setTimeout(() => finRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
-    setEnviando(false);
-  }
-
-  function etiquetaSesion(s: Sesion): string {
-    const fecha = new Date(s.ultima_actividad).toLocaleDateString('es-CO', {
-      day: '2-digit', month: '2-digit',
-    });
-    return `${s.titulo || TITULO_DEFAULT} · ${fecha}`;
+    } catch (e: any) {
+      setTurnos(t => [...t, { rol: 'junior', texto: 'Error de red: ' + e.message }]);
+    } finally { setCargando(false); }
   }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Barra de sesión */}
-      <div style={{
-        padding: '8px 24px', borderBottom: '1px solid var(--border-soft)',
-        display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8,
-      }}>
-        <select
-          value={sesionActiva ?? ''}
-          onChange={e => setSesionActiva(Number(e.target.value))}
-          title="Conversaciones"
-          style={{
-            maxWidth: 240, padding: '6px 10px', fontSize: 12, borderRadius: 8,
-            border: '1px solid var(--border)', background: 'var(--bg-page)',
-            color: 'var(--text)', cursor: 'pointer', outline: 'none',
-          }}
-        >
-          {sesiones.map(s => (
-            <option key={s.id} value={s.id}>{etiquetaSesion(s)}</option>
-          ))}
-        </select>
-        <button
-          onClick={nuevaConversacion}
-          title="Nueva conversación"
-          style={{
-            padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 8,
-            border: '1px solid var(--border)', background: 'var(--bg-panel)',
-            color: 'var(--text)', cursor: 'pointer', whiteSpace: 'nowrap',
-          }}
-        >+ Nueva</button>
-      </div>
-
-      {/* Mensajes */}
-      <div ref={scrollRef} style={{ flex: 1, overflow: 'auto', padding: '20px 24px' }}>
-        {mensajes.length === 0 && (
-          <div style={{ maxWidth: 520, margin: '40px auto', textAlign: 'center' }}>
-            <div style={{ fontSize: 40, marginBottom: 10 }}>🤖</div>
-            <h2 style={{ fontSize: 16, fontWeight: 700, margin: '0 0 6px' }}>Hablá con Junior</h2>
-            <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: '0 0 18px', lineHeight: 1.5 }}>
-              Preguntale lo que quieras sobre tus clientes y tu negocio.
-            </p>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
-              {SUGERENCIAS.map(s => (
-                <button key={s} onClick={() => enviar(s)}
-                  style={{
-                    padding: '7px 12px', fontSize: 12, borderRadius: 16,
-                    border: '1px solid var(--border)', background: 'var(--bg-panel)',
-                    color: 'var(--text)', cursor: 'pointer',
-                  }}>{s}</button>
-              ))}
-            </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '18px 24px' }}>
+        {turnos.length === 0 && (
+          <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '40px 0', fontSize: 13 }}>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>🤖</div>
+            Preguntale a Junior. Lee solo las tarjetas que necesita.<br />
+            <span style={{ fontSize: 12 }}>ej: <em>"¿qué pasa con Pedidos Cubides?"</em> · <em>"¿quién espera mi respuesta?"</em></span>
           </div>
         )}
-
-        {mensajes.map(m => {
-          const esUsuario = m.rol === 'usuario';
-          return (
-            <div key={m.id} style={{
-              display: 'flex', justifyContent: esUsuario ? 'flex-end' : 'flex-start', marginBottom: 12,
-            }}>
-              <div style={{
-                maxWidth: '72%', padding: '10px 14px', borderRadius: 12, fontSize: 13, lineHeight: 1.5,
-                whiteSpace: 'pre-wrap',
-                background: esUsuario ? 'var(--accent)' : 'var(--bg-panel)',
-                color: esUsuario ? 'white' : 'var(--text)',
-                border: esUsuario ? 'none' : '1px solid var(--border-soft)',
-                borderBottomRightRadius: esUsuario ? 3 : 12,
-                borderBottomLeftRadius: esUsuario ? 12 : 3,
-              }}>
-                {!esUsuario && (
-                  <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--accent)', textTransform: 'uppercase', marginBottom: 3 }}>
-                    🤖 Junior
-                  </div>
-                )}
-                {m.mensaje}
-              </div>
-            </div>
-          );
-        })}
-
-        {esperando && (
-          <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 12 }}>
+        {turnos.map((t, i) => (
+          <div key={i} style={{ display: 'flex', justifyContent: t.rol === 'jhon' ? 'flex-end' : 'flex-start', marginBottom: 12 }}>
             <div style={{
-              padding: '10px 14px', borderRadius: 12, fontSize: 13, fontStyle: 'italic',
-              background: 'var(--bg-panel)', color: 'var(--text-muted)', border: '1px solid var(--border-soft)',
+              maxWidth: '78%', padding: '10px 14px', borderRadius: 12, fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap',
+              background: t.rol === 'jhon' ? 'var(--accent)' : 'var(--bg-panel)',
+              color: t.rol === 'jhon' ? 'white' : 'var(--text)',
+              border: t.rol === 'jhon' ? 'none' : '1px solid var(--border-soft)',
             }}>
-              Junior está pensando…
+              {t.texto}
+              {t.meta && (
+                <div style={{ marginTop: 6, fontSize: 10, color: 'var(--text-muted)' }}>
+                  {t.meta.via_indice ? '· respondió con el índice' : `· leyó ${t.meta.tarjetas_usadas.length} tarjeta(s): ${t.meta.tarjetas_usadas.map(c => 'chat ' + c).join(', ') || '—'}`}
+                  {' · $'}{t.meta.costo_usd.toFixed(4)}
+                </div>
+              )}
             </div>
           </div>
-        )}
+        ))}
+        {cargando && <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '4px 0' }}>Junior está pensando…</div>}
         <div ref={finRef} />
       </div>
 
-      {/* Input */}
-      <div style={{ padding: '12px 24px 16px', borderTop: '1px solid var(--border-soft)' }}>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input
-            type="text"
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') enviar(); }}
-            placeholder="Preguntale algo a Junior…"
-            disabled={esperando}
-            style={{
-              flex: 1, padding: '10px 14px', fontSize: 13, borderRadius: 8,
-              border: '1px solid var(--border)', background: 'var(--bg-page)',
-              outline: 'none', color: 'var(--text)',
-            }}
-          />
-          <button
-            onClick={() => enviar()}
-            disabled={!input.trim() || esperando}
-            style={{
-              padding: '10px 18px', fontSize: 13, fontWeight: 600, borderRadius: 8, border: 'none',
-              background: (!input.trim() || esperando) ? 'var(--border)' : 'var(--accent)',
-              color: 'white', cursor: (!input.trim() || esperando) ? 'default' : 'pointer',
-            }}
-          >Enviar</button>
-        </div>
+      <div style={{ borderTop: '1px solid var(--border-soft)', padding: '12px 24px', display: 'flex', gap: 8 }}>
+        <input value={pregunta} onChange={e => setPregunta(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') enviar(); }}
+          placeholder="Escribí tu pregunta y Enter…" disabled={cargando}
+          style={{ flex: 1, padding: '10px 14px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 14 }} />
+        <button onClick={enviar} disabled={cargando || !pregunta.trim()} style={{
+          padding: '10px 20px', borderRadius: 8, border: 'none', fontWeight: 600, fontSize: 14,
+          background: cargando ? '#9ca3af' : 'var(--accent)', color: 'white',
+        }}>{cargando ? '…' : 'Enviar'}</button>
       </div>
     </div>
   );
