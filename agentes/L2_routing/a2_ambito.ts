@@ -122,7 +122,7 @@ export const a2AmbitoHooks: AgenteHooks<DatosA2Ambito> = {
     const ventana = datos.mensajes_chat.length === 0
       ? '(chat sin mensajes con texto)'
       : datos.mensajes_chat.map(m =>
-          `[msg_id=${m.canal_msg_id}] (${m.direccion === 'saliente' ? 'NEGOCIO' : 'CLIENTE'}): ${truncar(m.texto, 160)}`
+          `[msg_id=${m.canal_msg_id}] (${m.direccion === 'saliente' ? 'NEGOCIO' : 'OTRO'}): ${truncar(m.texto, 160)}`
         ).join('\n');
 
     const system: ChatMessage = {
@@ -132,16 +132,32 @@ export const a2AmbitoHooks: AgenteHooks<DatosA2Ambito> = {
 Sos A2_AMBITO. Clasificás el chat COMPLETO en EXACTAMENTE UN ámbito.
 No clasificás cada mensaje, mirás la conversación entera.
 
+PRINCIPIO CLAVE — ¿QUIÉN PIDE Y QUIÉN OFRECE?
+Antes de elegir entre comercial y proveedor, mirá la DIRECCIÓN del flujo comercial.
+Las palabras "cotización / persianas / precio / fabricación" aparecen en AMBOS, no las uses solas.
+
+  NEGOCIO es VENDEDOR (chat = comercial) cuando NEGOCIO (saliente) OFRECE/COTIZA/COORDINA INSTALACIÓN.
+  NEGOCIO es COMPRADOR (chat = proveedor) cuando NEGOCIO (saliente) PIDE/CONSULTA/COTIZA HACIA AFUERA.
+
 Ámbitos (mutuamente excluyentes):
 
-  comercial         → Cliente actual o potencial de persianas/cortinas.
-                      Señales: habla de cotización, medidas, precios, persianas,
-                               instalación, ventanas, espacios del hogar.
+  comercial         → CONTACTO compra a Persianas Girardot; NEGOCIO actúa como VENDEDOR.
+                      Señales de CONTACTO-como-comprador:
+                        - OTRO pide cotización: "me cotizan", "cuánto vale", "necesito persianas"
+                        - OTRO habla de SU casa/apartamento/local, ventanas, habitaciones (espacio residencial PROPIO)
+                        - OTRO pide visita técnica para tomar medidas
+                        - NEGOCIO envía precio/cotización AL OTRO, coordina instalación EN CASA DEL OTRO
 
-  proveedor         → Empresa que VENDE insumos a Safra (no es cliente).
-                      Señales: factura proveedor, lote, despacho, telas al por mayor,
-                               motores, "envío su pedido", "ref proveedor", logo de empresa
-                               textil/industrial. Generalmente B2B con jerga distinta.
+  proveedor         → CONTACTO vende a Persianas Girardot; NEGOCIO actúa como COMPRADOR.
+                      Señales fuertes de NEGOCIO-como-comprador (ver dirección de mensajes salientes):
+                        - NEGOCIO pide: "Cotizame X", "¿Ustedes manejan X?", "¿en cuánto sale?"
+                        - NEGOCIO pregunta tiempos de fabricación: "Cuánto se demora", "Cuándo lo tienen"
+                        - NEGOCIO pregunta dónde pagar: "Dónde le consigno", "Dónde pago", "datos de cuenta"
+                        - NEGOCIO da SU PROPIO NIT/cédula para que LE facturen: "Mi NIT es", "Jhon Cubides 10142..."
+                        - NEGOCIO da una dirección de entrega (donde quiere RECIBIR el producto)
+                        - OTRO envía catálogo / lista de precios / "Valor con descuento"
+                        - OTRO pregunta especificaciones para fabricar PARA NEGOCIO: "izquierdo o derecho", "color", "medida exacta"
+                        - Jerga B2B: lotes, despachos, telas al por mayor, motores, "ref proveedor", logo industrial
 
   personal_familia  → Familiar de Jhon (esposa, hijos, padres, hermanos).
                       Señales: trato muy familiar, temas domésticos no comerciales,
@@ -293,10 +309,28 @@ con confianza DUDOSO (mejor no proponer cambios sin evidencia).`,
     }
   },
 
-  async postProcesar(_sb: SupabaseClient, _out, _ctx) {
-    // L2: no muta chats.ambito directamente. El cambio se propone al buzón
-    // (lo hace el runner automáticamente si confianza != CONFIRMADO).
-    return;
+  async postProcesar(sb: SupabaseClient, out, ctx) {
+    // V2 (feedback_agentes_automaticos): sin buzón — los agentes escriben directo.
+    // Si A2_AMBITO propone cambio y tiene señales (confianza ≠ DUDOSO) y el chat
+    // NO está confirmado por Jhon, aplicamos el cambio a chats + personas y
+    // marcamos sintesis_pendiente + tarjeta dirty para que el ciclo regenere.
+    const p: any = out.payload;
+    if (!p?.cambio_propuesto) return;
+    if (p?.confianza_ambito === 'DUDOSO') return;
+
+    // No pisar si Jhon ya confirmó manualmente el ámbito de este chat.
+    const { data: chat } = await sb.from('chats')
+      .select('ambito_confirmado').eq('id', ctx.chat_id).maybeSingle();
+    if (chat?.ambito_confirmado) return;
+
+    const nuevo = p.ambito_propuesto as string;
+    await sb.from('chats').update({ ambito: nuevo } as any).eq('id', ctx.chat_id);
+    if (ctx.persona_id) {
+      await sb.from('personas').update({
+        ambito_principal: nuevo, sintesis_pendiente: true,
+      } as any).eq('id', ctx.persona_id);
+    }
+    await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', ctx.chat_id);
   },
 };
 
