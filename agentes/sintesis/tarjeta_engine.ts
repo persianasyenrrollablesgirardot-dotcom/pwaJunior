@@ -110,8 +110,16 @@ export async function reconstruirTarjeta(
   }
 
   await sb.from('tarjeta_agenda').delete().eq('chat_id', chatId);
-  if (age.agendamientos.length) {
-    await sb.from('tarjeta_agenda').insert(age.agendamientos.map(x => ({
+  // Dedup por (fecha/'por coordinar', hora, título normalizado) — derivarAgenda
+  // a veces emite variaciones del mismo evento.
+  const vistosAg = new Set<string>();
+  const dedupTarjAg = age.agendamientos.filter(x => {
+    const k = `${x.fecha ?? 'tbd'}|${x.hora ?? ''}|${(x.titulo ?? '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 30)}`;
+    if (vistosAg.has(k)) return false;
+    vistosAg.add(k); return true;
+  });
+  if (dedupTarjAg.length) {
+    await sb.from('tarjeta_agenda').insert(dedupTarjAg.map(x => ({
       chat_id: chatId, titulo: x.titulo,
       cuando: x.fecha ? `${x.fecha} ${x.hora}` : 'por coordinar',
       lugar: x.lugar, derivado_de_hash: inputHash,
@@ -121,10 +129,20 @@ export async function reconstruirTarjeta(
   // Calendario: alimentar la tabla canónica `agendamientos` con los que tienen
   // FECHA. origen='agente_v2' → regenero solo lo mío, sin tocar las citas
   // manuales (origen NULL). Así la visita aparece en el calendario de la UI.
+  //
+  // Dedup dentro de la lista del agente: derivarAgenda a veces emite varias
+  // variaciones del mismo evento (mismo día/hora, título distinto). Quedarse
+  // con la primera por (fecha, hora, primeras 30 letras del título normalizado).
   await sb.from('agendamientos').delete().eq('persona_id', personaId).eq('origen', 'agente_v2');
   const conFecha = age.agendamientos.filter(x => x.fecha);
-  if (conFecha.length) {
-    await sb.from('agendamientos').insert(conFecha.map(x => ({
+  const vistos = new Set<string>();
+  const dedupAge = conFecha.filter(x => {
+    const k = `${x.fecha}|${x.hora ?? ''}|${(x.titulo ?? '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 30)}`;
+    if (vistos.has(k)) return false;
+    vistos.add(k); return true;
+  });
+  if (dedupAge.length) {
+    await sb.from('agendamientos').insert(dedupAge.map(x => ({
       persona_id: personaId, titulo: x.titulo, tipo: x.tipo, fecha: x.fecha,
       hora_inicio: x.hora, direccion: x.lugar || null, origen: 'agente_v2',
     })) as any);

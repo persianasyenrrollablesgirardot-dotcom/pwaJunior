@@ -58,8 +58,17 @@ export async function derivarChecklist(t: Tarjeta): Promise<ResChecklist> {
     `Devolvé SOLO JSON: {"estado_conversacion": "cerrado|espera_jhon|espera_cliente|sin_responder", "proximo_paso": "frase corta y accionable"}.`,
     'DERIV_CHECKLIST');
   const estados: EstadoConv[] = ['cerrado', 'espera_jhon', 'espera_cliente', 'sin_responder'];
-  const estado = estados.includes(obj.estado_conversacion) ? obj.estado_conversacion : 'espera_jhon';
-  return { estado_conversacion: estado, proximo_paso: String(obj.proximo_paso ?? 'sin definir'), costo_usd: costo };
+  let estado = estados.includes(obj.estado_conversacion) ? obj.estado_conversacion : 'espera_jhon';
+  let proximo = String(obj.proximo_paso ?? 'sin definir');
+  // Defensa post-LLM: si el agente coló un proximo_paso de NO-ACCIÓN o INDECISIÓN
+  // ("mantenerse a la expectativa", "decidir si X o Y", "reclasificar como X o mantener Y",
+  // "confirmar si reclasifica") en espera_jhon, lo bajamos a cerrado. La regla #5 del
+  // prompt lo prohíbe pero el LLM la evade reformulando — esto la garantiza.
+  if (estado === 'espera_jhon' || estado === 'sin_responder') {
+    const NO_ACCION = /\b(mantener(se)?|esperar(\s+oportunidades)?|observar|monitorear|reclasifi|expectativa|atento|sin\s+acci[oó]n|ninguna\s+acci[oó]n|(decidir|confirmar|definir|evaluar)\s+si\b[^.]*\bo\b)/i;
+    if (NO_ACCION.test(proximo)) estado = 'cerrado';
+  }
+  return { estado_conversacion: estado, proximo_paso: proximo, costo_usd: costo };
 }
 
 /** TAREAS — qué hay que hacer, accionable. */
