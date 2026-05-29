@@ -621,8 +621,14 @@ async function registrarInstruccion(
   } as any);
 }
 
+// HITO 4 — Junior viejo (monolítico) RETIRADO: lo reemplazó Junior V2
+// (/api/junior-v2, que lee solo las tarjetas relevantes). Nada escribe en
+// junior_chat desde la UI, así que este ciclo está dormido. Rollback: poner
+// JUNIOR_VIEJO_ACTIVO = true y reiniciar el worker.
+const JUNIOR_VIEJO_ACTIVO = false;
 let juniorChatEnCurso = false;
 async function cicloJuniorChat(): Promise<void> {
+  if (!JUNIOR_VIEJO_ACTIVO) return;
   if (juniorChatEnCurso) return;
   juniorChatEnCurso = true;
   try {
@@ -1262,7 +1268,7 @@ async function main() {
   if (!SKIP_EXTRACTOR) setInterval(() => { cicloExtractor().catch(e => console.error('[V2/EX]', e?.message)); }, POLL_EXTRACTOR_MS);
   if (!SKIP_IDENTIDAD) setInterval(() => { cicloIdentidad().catch(e => console.error('[V2/ID]', e?.message)); }, POLL_IDENTIDAD_MS);
   if (!SKIP_PIPELINE)  setInterval(() => { cicloPipeline().catch(e => console.error('[V2/PI]', e?.message)); }, POLL_PIPELINE_MS);
-  setInterval(() => { cicloJuniorChat().catch(e => console.error('[V2/JUNIOR]', e?.message)); }, 3000);
+  if (JUNIOR_VIEJO_ACTIVO) setInterval(() => { cicloJuniorChat().catch(e => console.error('[V2/JUNIOR]', e?.message)); }, 3000);
   setInterval(() => { cicloChecklist().catch(e => console.error('[V2/CHK]', e?.message)); }, POLL_CHECKLIST_MS);
   setInterval(() => { cicloSintesisPendiente().catch(e => console.error('[V2/SINT-MANUAL]', e?.message)); }, 4000);
   // V2: motor de tarjetas embebido (antes proceso aparte worker_tarjetas).
