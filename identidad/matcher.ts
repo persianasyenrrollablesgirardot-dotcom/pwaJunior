@@ -268,8 +268,16 @@ export class IdentidadService {
       .insert(row)
       .select('id, nombre')
       .single();
-    if (error || !data) throw new Error(`crear persona: ${error?.message}`);
-    return data;
+    if (data) return data;
+    // Carrera: otro worker creó la persona con el mismo jid entre el match y este
+    // insert. El índice único parcial personas_jid_activa_uniq (migr 043) rechaza
+    // el duplicado con code 23505. Reusamos la existente en vez de propagar el error.
+    if (error?.code === '23505' && jid) {
+      const { data: existente } = await this.sb.from('personas')
+        .select('id, nombre').eq('jid', jid).is('deleted_at', null).limit(1).maybeSingle();
+      if (existente) return existente;
+    }
+    throw new Error(`crear persona: ${error?.message}`);
   }
 
   private async crearProyectoParaChat(personaId: number, chat: ChatRow): Promise<number> {

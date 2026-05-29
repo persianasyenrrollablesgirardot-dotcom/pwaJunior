@@ -24,6 +24,7 @@ import type { ChatMessage } from '../lib/llm.js';
 import { ValidacionError, resolverMsgId } from '../lib/validador.js';
 
 const SUBTIPOS_NO_CLIENTE = [
+  'colaborador',   // instalador/ayudante/taller propio del negocio (trabaja CON Jhon, no es cliente)
   'restaurante',   // entrega de comida, restaurante con quien Jhon pidió
   'transporte',    // Uber/taxi/mensajería/conductor
   'spam',          // promoción masiva, marketing, cadenas
@@ -128,6 +129,7 @@ conjuntos residenciales, etc.
 Tu tarea: DOS valores en la salida:
   - es_cliente: true / false
   - subtipo_no_cliente: si es_cliente=false, uno de:
+       * "colaborador"   → instalador/ayudante/taller que TRABAJA con Jhon (no es cliente)
        * "restaurante"   → restaurante/comida (chat surgió porque Jhon pidió comida)
        * "transporte"    → Uber, conductor, mensajería, taxi
        * "spam"          → promoción masiva, marketing, cadena viral
@@ -160,6 +162,21 @@ evidencia_msg_ids:
   - NUNCA devuelvas evidencia_msg_ids=[].
 
 Señales para cada subtipo:
+
+  colaborador (instalador / ayudante / taller propio del negocio):
+    Es alguien que TRABAJA CON o PARA Persianas Girardot — no recibe el servicio,
+    lo EJECUTA. Señales fuertes:
+    - El OTRO reporta trabajo hecho en primera persona del equipo: "ya instalamos",
+      "ya quedó instalado", "terminamos la obra", "ya medí".
+    - El OTRO reporta dinero cobrado A NOMBRE del negocio: "me dió 140 en efectivo",
+      "el cliente ya pagó", "recogí el saldo", "me consignaron".
+    - NEGOCIO le asigna trabajo/dirección o coordinan salir juntos: "a qué horas
+      salimos", "la instalación es en <dirección>", "pasa por el taller", "llevá la herramienta".
+    - Tono de compañero de trabajo / confianza ("hágale", apodos), logística de campo.
+    DISTINCIÓN CLAVE vs cliente: el CLIENTE pregunta precio/medidas/cuándo vienen y
+    RECIBE el servicio; el COLABORADOR ejecuta y REPORTA de vuelta (instaló, cobró, sale a ruta).
+    Conservador: pedí ≥2 de estas señales antes de marcar colaborador. Un cliente
+    que solo dice "ya instalaron, gracias" NO es colaborador.
 
   restaurante:
     "su pedido", "ya está listo para entrega", "el domiciliario está en camino",
@@ -257,6 +274,21 @@ EJEMPLO 3 — edge AMBIGUO (es_cliente=true por regla conservadora, DUDOSO → b
     "confianza_no_cliente": "DUDOSO",
     "señales": ["chat muy corto", "solo saludo, no hay contenido"],
     "resumen": "Insuficiente evidencia, asumimos cliente potencial"
+  },
+  "evidencia_msg_ids": ["XYZ"],
+  "reglas_aplicadas": ["R-001"]
+}
+
+EJEMPLO 4 — COLABORADOR/instalador (caso B, queda INFERIDO forzado):
+{
+  "tipo_evento": "dato_extraido",
+  "confianza": "INFERIDO",
+  "payload": {
+    "es_cliente": false,
+    "subtipo_no_cliente": "colaborador",
+    "confianza_no_cliente": "CONFIRMADO",
+    "señales": ["reporta 'ya instalamos' en nombre del equipo", "reporta 'me dió 140 en efectivo' (cobró por el negocio)", "coordinan 'a qué horas salimos' a la ruta"],
+    "resumen": "Instalador/colaborador del negocio, no un cliente"
   },
   "evidencia_msg_ids": ["XYZ"],
   "reglas_aplicadas": ["R-001"]
