@@ -778,14 +778,26 @@ async function runDownloadTask(task) {
     msg = await tx('messages', 'readonly', s => reqAsync(s.get(task.messageId)));
     if (!msg) throw new Error('msg no en BD');
     let result;
-    try {
-      result = await downloadAndDecryptMedia(msg);
-    } catch (downloadErr) {
-      // URL caducada o HTTP error → intentar refresh via API interna de WA Web
-      const isExpiredOrHttp = /expirada|HTTP \d|HMAC/i.test(downloadErr.message);
-      if (!isExpiredOrHttp) throw downloadErr;
-      console.log(`[WS-BG-V2] download falló ${task.messageId} (${downloadErr.message}) — intentando refresh via WA Web…`);
+    if (msg.is_owner) {
+      // OUTGOING: WA Web no popula media_key/direct_path en los archivos que
+      // VOS enviaste igual que en los entrantes — el path URL+desencriptado
+      // siempre tira "media sin key o path" para outgoing. La API canónica
+      // para tus propios archivos es Store.Msg.downloadMedia() (refresh via
+      // WA Web), que sí los tiene en caché interna. Saltamos directo al
+      // refresh — sin esto, los PDFs/audios/imágenes que enviás nunca se
+      // procesan (caso #6099 PDF de pago a proveedor).
+      console.log(`[WS-BG-V2] download outgoing ${task.messageId} — vía refresh WA Web (Store.Msg.downloadMedia)`);
       result = await refreshMediaViaContent(msg);
+    } else {
+      try {
+        result = await downloadAndDecryptMedia(msg);
+      } catch (downloadErr) {
+        // URL caducada / HTTP / HMAC / metadata faltante → fallback al refresh.
+        const fallback = /expirada|HTTP \d|HMAC|sin key|sin path|mediaKey size|archivo muy corto/i.test(downloadErr.message);
+        if (!fallback) throw downloadErr;
+        console.log(`[WS-BG-V2] download falló ${task.messageId} (${downloadErr.message}) — intentando refresh via WA Web…`);
+        result = await refreshMediaViaContent(msg);
+      }
     }
     msg.media.sha256 = result.sha256;
     msg.media.download_status = 'downloaded';
