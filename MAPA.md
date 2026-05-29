@@ -3,7 +3,7 @@
 > **Documento de progreso vivo.** Se actualiza con cada fase completada o decisión nueva.
 > Si se va la luz: leer `README.md` (contexto, 5 min) → `VISION.md` (qué) → `ARQUITECTURA.md` (cómo) → este `MAPA.md` (dónde) → retomar.
 >
-> **Última actualización:** 2026-05-22 (FASE 9.1 — Corrector de nombres @lid)
+> **Última actualización:** 2026-05-29 — **Rediseño V2 COMPLETO** (4 hitos: tarjeta + agregador + 3 derivados + Junior V2). Junior viejo retirado. Ver sección "REDISEÑO V2".
 > **Owner:** Jhon Cubides
 
 ---
