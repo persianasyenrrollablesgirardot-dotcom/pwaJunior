@@ -223,8 +223,13 @@ export async function sintetizarPersona(
       .in('chat_id', chatIds).order('ts_creado', { ascending: false }).limit(1);
     if ((a2?.[0]?.payload as any)?.es_cliente === false) {
       const sub = (a2![0].payload as any)?.subtipo_no_cliente ?? 'no-cliente';
-      console.log(`[A_SINTESIS] persona ${personaId} saltada — A2_NOCLIENTE la marcó no-cliente (${sub}); no se gastan tokens de síntesis`);
-      return { ok: 0, fallidos: 0, costo_usd: 0 };
+      // colaborador / proveedor: SÍ sintetizar (Jhon necesita contexto; los prompts
+      // ambito-aware lo encuadran con los roles invertidos/operativos).
+      // restaurante / spam / transporte / encuesta / bot / equivocado / otro: skip.
+      if (sub !== 'colaborador' && sub !== 'proveedor') {
+        console.log(`[A_SINTESIS] persona ${personaId} saltada — A2_NOCLIENTE la marcó no-cliente (${sub}); no se gastan tokens de síntesis`);
+        return { ok: 0, fallidos: 0, costo_usd: 0 };
+      }
     }
   }
 
@@ -255,6 +260,25 @@ export async function sintetizarPersona(
   // Extraer el teléfono del cliente de los mensajes / OCR de comprobantes.
   if (msgs.length > 0) await extraerTelefonoCliente(sb, personaId, msgs);
 
+  // Ámbito de la persona → determina cómo etiquetar la conversación y el framing.
+  const AMBITO_DESC: Record<string, string> = {
+    comercial:        'CLIENTE del negocio (cotiza / compra persianas a Persianas Girardot).',
+    proveedor:        'PROVEEDOR — NO es cliente. JHON le COMPRA insumos / productos. Roles invertidos: NEGOCIO=Jhon como comprador, OTRO=vendedor.',
+    personal_familia: 'CONTACTO PERSONAL (familia) — NO es cliente. No aplicar flujo comercial.',
+    personal_amigos:  'CONTACTO PERSONAL (amigo) — NO es cliente.',
+    personal_otros:   'Contacto personal sin clasificar — probablemente NO es cliente.',
+    interno_equipo:   'EQUIPO INTERNO (instalador / técnico / contadora del negocio) — NO es cliente. Jhon le ASIGNA tareas / le PAGA por trabajo hecho.',
+  };
+  const ambitoPersona = (persona.ambito_principal as string) ?? '';
+  const ambitoCtx = AMBITO_DESC[ambitoPersona] ?? 'Sin clasificar.';
+  // Etiqueta del rol OTRO en la conversación, según el ámbito (no hardcodear "CLIENTE").
+  const ROL_OTRO: Record<string, string> = {
+    comercial: 'CLIENTE', proveedor: 'PROVEEDOR',
+    personal_familia: 'FAMILIA', personal_amigos: 'AMIGO', personal_otros: 'CONTACTO',
+    interno_equipo: 'COLABORADOR',
+  };
+  const rolOtro = ROL_OTRO[ambitoPersona] ?? 'OTRO';
+
   // Cada mensaje va con SU fecha real de envío (ts_canal). Sin esto el analista
   // no puede resolver "el jueves" / "mañana" ni calcular qué venció — causa raíz
   // de los errores de fecha.
@@ -262,9 +286,9 @@ export async function sintetizarPersona(
     ? new Date(ts).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })
     : '????-??-??';
   const conversacion = msgs.length === 0
-    ? '(este cliente todavía no tiene chat de WhatsApp — lo registró Jhon a mano; lo que se sabe de él está en los HECHOS CONFIRMADOS de abajo)'
+    ? '(este contacto todavía no tiene chat de WhatsApp — lo registró Jhon a mano; lo que se sabe de él está en los HECHOS CONFIRMADOS de abajo)'
     : msgs.map(m => {
-        const quien = m.direccion === 'saliente' ? 'NEGOCIO' : 'CLIENTE';
+        const quien = m.direccion === 'saliente' ? 'NEGOCIO' : rolOtro;
         const t = m.texto || (m.metadata as any)?.ai_text || `[${m.tipo} sin texto]`;
         return `[${fechaMsg(m.ts_canal)}] ${quien}: ${String(t).replace(/\n/g, ' ').trim()}`;
       }).join('\n');
@@ -288,16 +312,6 @@ export async function sintetizarPersona(
   ].filter(Boolean);
   const bloqueNotas = lineasNotas.length > 0 ? lineasNotas.join('\n') : '(ninguna)';
 
-  const AMBITO_DESC: Record<string, string> = {
-    comercial:        'CLIENTE del negocio (cotiza / compra persianas).',
-    proveedor:        'PROVEEDOR — NO es cliente. Le vende o le presta un servicio al negocio.',
-    personal_familia: 'CONTACTO PERSONAL (familia) — NO es cliente.',
-    personal_amigos:  'CONTACTO PERSONAL (amigo) — NO es cliente.',
-    personal_otros:   'Contacto personal sin clasificar — probablemente NO es cliente.',
-    interno_equipo:   'EQUIPO INTERNO (instalador / técnico / contadora) — NO es cliente.',
-  };
-  const ambitoCtx = AMBITO_DESC[(persona.ambito_principal as string) ?? ''] ?? 'Sin clasificar.';
-
   // Fecha de Colombia (America/Bogota), no UTC.
   const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
   const ctxComun = `HOY ES: ${hoy} — usá esta fecha SOLO para razonar internamente (qué venció,
@@ -309,9 +323,31 @@ síntesis describe el ESTADO del cliente, no la fecha en que la generaste.
 
 === QUÉ ES ESTE CONTACTO (ámbito) ===
 ${ambitoCtx}
-Si este contacto NO es un cliente comercial, NO lo analices como comprador de persianas:
-no inventes cotizaciones, abonos ni medidas. Ajustá tu síntesis a lo que realmente es y,
-en los módulos comerciales que no apliquen, decí explícitamente que no corresponde.
+
+REGLAS DE ATRIBUCIÓN POR DIRECCIÓN DE MENSAJE (críticas — no las violes):
+- Cada línea de la conversación tiene un emisor declarado (NEGOCIO o ${rolOtro}). NEGOCIO = Jhon escribiendo;
+  ${rolOtro} = el contacto escribiendo. Atribuí cada acción a quien la dijo en su línea, no "al cliente"
+  por default. Si NEGOCIO dijo "Donde le consigno", esa intención de pagar es de JHON, no del contacto.
+- ❌ PROHIBIDO escribir cosas como "el contacto manifestó intención de pago" si esa frase la dijo NEGOCIO
+  (línea saliente). Verificá la dirección antes de atribuir.
+${ambitoPersona === 'proveedor' ? `
+ROLES INVERTIDOS (este contacto es PROVEEDOR):
+- NEGOCIO (Jhon) es el COMPRADOR. ${rolOtro} (el proveedor) es el VENDEDOR.
+- Las cotizaciones que aparezcan son cotizaciones que el PROVEEDOR le envía a Jhon — son COSTOS para
+  Persianas Girardot, NO ventas. NO las pueblas en la tabla cotizaciones (esa es de ventas del negocio).
+- Los pagos van DESDE Jhon HACIA el proveedor. NO los registres como abonos del cliente.
+- "Medidas" son las que JHON le especifica AL proveedor para que fabrique. NO las medidas de un cliente final.
+- Síntesis correcta tipo: "Jhon le pidió cotización al proveedor X por Y, X cotizó Z, Jhon manifestó intención
+  de pagar". NUNCA "el cliente cotizó / manifestó intención de pago".
+` : ''}${ambitoPersona === 'interno_equipo' ? `
+EQUIPO INTERNO (este contacto trabaja CON Jhon):
+- Coordinación operativa: Jhon le asigna trabajo, el ${rolOtro} reporta avance / cobra por trabajo hecho.
+- NO hay cotización ni venta entre las partes. Las menciones de plata son pagos de Jhon al colaborador
+  por trabajo, o cobros que el colaborador hizo al cliente final EN NOMBRE del negocio.
+- Síntesis correcta: "Jhon coordinó X con [nombre], reportó Y", NO "el cliente solicitó Z".
+` : ''}Si este contacto NO es un cliente comercial, NO lo analices como comprador de persianas:
+no inventes cotizaciones, abonos ni medidas EN LAS TABLAS DEL NEGOCIO. Ajustá tu síntesis a lo que
+realmente es y, en los módulos comerciales que no apliquen, decí explícitamente que no corresponde.
 
 === NOTAS DEL HUMANO SOBRE ESTE CONTACTO (verdad prioritaria — las escribió Jhon a mano) ===
 ${bloqueNotas}
@@ -348,7 +384,7 @@ ${datosAgentes || '(nada relevante)'}`;
         temperature: 0.3,
         messages: [
           { role: 'system', content: cfg.system },
-          { role: 'user', content: `CLIENTE: ${persona.nombre}\n\n${ctxComun}\n\nGenerá tu análisis de este cliente.` },
+          { role: 'user', content: `CONTACTO: ${persona.nombre} (${rolOtro})\n\n${ctxComun}\n\nGenerá tu análisis de este contacto según su ámbito.` },
         ],
       });
       costo_usd += res.costo_usd;
@@ -413,7 +449,7 @@ async function sintetizarEstructurado(
     response_format: { type: 'json_object' },
     messages: [
       { role: 'system', content: cfg.system },
-      { role: 'user', content: `CLIENTE: ${nombre}\n\n${ctxComun}\n\nDevolvé el objeto JSON.` },
+      { role: 'user', content: `CONTACTO: ${nombre}\n\n${ctxComun}\n\nDevolvé el objeto JSON.` },
     ],
   });
 
