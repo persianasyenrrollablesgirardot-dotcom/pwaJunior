@@ -101,7 +101,7 @@ export async function responderJuniorTarjeta(
     },
     { role: 'user', content: `CONVERSACIÓN PREVIA:\n${histTexto}\n\nÍNDICE DE TARJETAS:\n${indiceTexto}\n\nNUEVA PREGUNTA DE JHON: ${pregunta}` },
   ];
-  const r1 = await deepseekChat({ messages: ruteo, agente: 'JUNIOR_V2_RUTEO', max_tokens: 300, response_format: { type: 'json_object' } });
+  const r1 = await deepseekChat({ messages: ruteo, agente: 'JUNIOR_V2_RUTEO', max_tokens: 900, response_format: { type: 'json_object' } });
   let plan: any = {};
   try { plan = JSON.parse(r1.contenido); } catch { plan = {}; }
   let costo = r1.costo_usd;
@@ -121,8 +121,8 @@ export async function responderJuniorTarjeta(
     if (!teToca.length) {
       return { respuesta: 'No tenés nada pendiente de tu lado ahora mismo. 👏 Si querés ver un caso puntual, nombrame el cliente.', tarjetas_usadas: [], via_indice: true, costo_usd: costo };
     }
-    const lista = teToca.slice(0, 12).map(f => `• ${f.nombre}${f.proximo ? ` — ${f.proximo}` : ''}`).join('\n');
-    const extra = teToca.length > 12 ? `\n…y ${teToca.length - 12} más` : '';
+    const lista = teToca.slice(0, 25).map(f => `• ${f.nombre}${f.proximo ? ` — ${f.proximo}` : ''}`).join('\n');
+    const extra = teToca.length > 25 ? `\n…y ${teToca.length - 25} más` : '';
     return { respuesta: `Esto es lo que te toca mover (según los checklists):\n${lista}${extra}`, tarjetas_usadas: [], via_indice: true, costo_usd: costo };
   }
 
@@ -139,7 +139,7 @@ export async function responderJuniorTarjeta(
     ...hist.map(h => ({ role: (h.rol === 'jhon' ? 'user' : 'assistant') as 'user' | 'assistant', content: h.texto })),
     { role: 'user', content: `TARJETAS RELEVANTES:\n\n${detalle}\n\n────\nPREGUNTA DE JHON: ${pregunta}` },
   ];
-  const r2 = await deepseekChat({ messages: resp, agente: 'JUNIOR_V2_RESP', max_tokens: 500 });
+  const r2 = await deepseekChat({ messages: resp, agente: 'JUNIOR_V2_RESP', max_tokens: 1200 });
   costo += r2.costo_usd;
   return { respuesta: r2.contenido.trim(), tarjetas_usadas: chatIds, via_indice: false, costo_usd: costo };
 }
