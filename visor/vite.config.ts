@@ -266,11 +266,62 @@ function juniorV2ApiPlugin(env: Record<string, string>): Plugin {
   };
 }
 
+/**
+ * V2 — endpoint /api/reprocesar-media (solo localhost).
+ * Marca mensajes media para que la EXTENSIÓN los re-encole (download+IA).
+ * Body: { message_id?: number } o { chat_id?: number } (todos los pendientes del chat).
+ * Devuelve { marcados, message_ids }.
+ */
+function reprocesarMediaPlugin(env: Record<string, string>): Plugin {
+  return {
+    name: 'visor-pg-reprocesar-media-api',
+    configureServer(server) {
+      server.middlewares.use('/api/reprocesar-media', async (req: IncomingMessage, res: ServerResponse) => {
+        const addr = req.socket?.remoteAddress ?? '';
+        const esLocalhost = addr === '127.0.0.1' || addr === '::1' || addr.endsWith('127.0.0.1');
+        if (!esLocalhost) { res.statusCode = 403; res.end(JSON.stringify({ error: 'forbidden: solo localhost' })); return; }
+        if (req.method !== 'POST') { res.statusCode = 405; res.end(JSON.stringify({ error: 'use POST' })); return; }
+        try {
+          const chunks: Buffer[] = [];
+          for await (const c of req as any) chunks.push(c as Buffer);
+          const { message_id, chat_id } = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+          if (!message_id && !chat_id) { res.statusCode = 400; res.end(JSON.stringify({ error: 'falta message_id o chat_id' })); return; }
+          const { createClient } = await import('@supabase/supabase-js');
+          const sb = createClient(env.VITE_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+          // Selecciono mensajes target (media SIN ai_text) y marco metadata
+          let q = sb.from('mensajes').select('id, metadata, chat_id, canal_msg_id, tipo')
+            .in('tipo', ['imagen','audio','documento','video']).is('deleted_at', null);
+          if (message_id) q = q.eq('id', Number(message_id));
+          else q = q.eq('chat_id', Number(chat_id));
+          const { data: rows, error } = await q;
+          if (error) throw new Error(error.message);
+          const targets = (rows ?? []).filter((m: any) => {
+            const md = m.metadata ?? {};
+            return md.ai_status !== 'processed' && md.ai_status !== 'skipped_cdn_lost';
+          });
+          const now = new Date().toISOString();
+          for (const m of targets as any[]) {
+            const md = { ...(m.metadata ?? {}), reprocesar_pending: true, reprocesar_requested_at: now };
+            await sb.from('mensajes').update({ metadata: md } as any).eq('id', m.id);
+          }
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'no-store');
+          res.end(JSON.stringify({ marcados: targets.length, message_ids: targets.map((m: any) => m.id) }));
+        } catch (e: any) {
+          console.error('[/api/reprocesar-media]', e.message);
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   // Cargar TODAS las variables (incluyendo las sin prefijo VITE_) del root del proyecto
   const env = loadEnv(mode, path.resolve(__dirname, '..'), '');
   return {
-    plugins: [react(), keysApiPlugin(env), transcribeApiPlugin(env), juniorV2ApiPlugin(env), embeddedWorkerPlugin()],
+    plugins: [react(), keysApiPlugin(env), transcribeApiPlugin(env), juniorV2ApiPlugin(env), reprocesarMediaPlugin(env), embeddedWorkerPlugin()],
     server: { port: 5180, strictPort: true, host: true },
     define: {
       // SOLO las VITE_ se inyectan en el bundle (públicas por diseño)

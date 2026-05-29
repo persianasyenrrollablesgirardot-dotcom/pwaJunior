@@ -1861,6 +1861,11 @@ chrome.alarms.create(ALARM_NAME, { periodInMinutes: ALARM_PERIOD_MIN });
 const BACKFILL_TICK_NAME = 'ws_v2_backfill_ticks';
 chrome.alarms.create(BACKFILL_TICK_NAME, { periodInMinutes: 0.5 });   // cada 30s
 
+// Reprocesar-media: cada minuto, busca en Supabase mensajes que el Visor marcó
+// con metadata.reprocesar_pending=true y los re-encola localmente.
+const REPROCESAR_TICK_NAME = 'ws_v2_reprocesar_tick';
+chrome.alarms.create(REPROCESAR_TICK_NAME, { periodInMinutes: 1 });
+
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_NAME) {
     drainQueue();
@@ -1872,7 +1877,72 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === BACKFILL_TICK_NAME) {
     await fireBackfillTicks();
   }
+  if (alarm.name === REPROCESAR_TICK_NAME) {
+    await procesarReprocesarPendientes();
+  }
 });
+
+// ─── Reprocesar media bajo demanda del Visor ──────────────────────
+// El Visor (panel Tarjeta V2 → sección Media) tiene un botón "Reprocesar"
+// que llama a /api/reprocesar-media. Ese endpoint marca en Supabase
+// metadata.reprocesar_pending=true sobre los mensajes objetivo. Acá los
+// detectamos y re-encolamos en la cola local (ai_process si los bytes están
+// en IndexedDB, download_media si los perdimos). Después limpiamos el flag.
+async function procesarReprocesarPendientes() {
+  try {
+    const { supabaseKey } = await getSettings();
+    if (!supabaseKey) return;
+    const url = `${SUPABASE_URL}/rest/v1/mensajes?select=id,canal_msg_id,chat_id,tipo,metadata`
+      + `&metadata->>reprocesar_pending=eq.true&deleted_at=is.null&limit=20`;
+    const res = await fetch(url, { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } });
+    if (!res.ok) { console.warn('[WS-BG-V2] reprocesar fetch:', res.status); return; }
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length === 0) return;
+    console.log(`[WS-BG-V2] reprocesar: ${rows.length} mensajes marcados por Jhon`);
+
+    for (const row of rows) {
+      try {
+        // Buscar en IndexedDB local por canal_msg_id (campo `id` en local).
+        const local = await tx('messages', 'readonly', s => reqAsync(s.get(row.canal_msg_id)));
+        if (!local) {
+          console.warn(`[WS-BG-V2] reprocesar #${row.id}: no está en IndexedDB local — no se puede recuperar`);
+          // Limpiar flag con motivo: el bytes del archivo no están en este browser.
+          await limpiarReprocesarFlag(supabaseKey, row.id, 'no_local_copy');
+          continue;
+        }
+        const tieneBytes = !!local.media?.sha256
+          && !!(await tx('media_blobs', 'readonly', s => reqAsync(s.get(local.media.sha256))));
+        const taskType = tieneBytes ? 'ai_process' : 'download_media';
+        await tx('pending_queue', 'readwrite', s => reqAsync(s.put({
+          taskType, messageId: row.canal_msg_id, attempts: 0, nextAt: Date.now(), createdAt: Date.now(),
+        })));
+        // Limpiar flag (best-effort — si falla, el próximo tick lo vuelve a tomar)
+        await limpiarReprocesarFlag(supabaseKey, row.id, 'enqueued');
+        console.log(`[WS-BG-V2] reprocesar #${row.id} → cola ${taskType}`);
+      } catch (e) {
+        console.warn(`[WS-BG-V2] reprocesar #${row.id} error: ${e.message}`);
+      }
+    }
+    drainQueue();
+  } catch (e) {
+    console.warn('[WS-BG-V2] procesarReprocesarPendientes:', e.message);
+  }
+}
+
+async function limpiarReprocesarFlag(supabaseKey, messageId, motivo) {
+  try {
+    const getRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/mensajes?select=metadata&id=eq.${messageId}`,
+      { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } },
+    );
+    const cur = (await getRes.json())[0]?.metadata ?? {};
+    const md = { ...cur, reprocesar_pending: false, reprocesar_result: motivo, reprocesar_result_at: new Date().toISOString() };
+    await fetch(
+      `${SUPABASE_URL}/rest/v1/mensajes?id=eq.${messageId}`,
+      { method: 'PATCH', headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify({ metadata: md }) },
+    );
+  } catch (e) { /* best-effort */ }
+}
 
 // Envía RAFAGA de tickets al content script de WA Web. Cada tick dispara
 // inmediatamente backfillCycle() en content.v2 — y como onMessage NO se

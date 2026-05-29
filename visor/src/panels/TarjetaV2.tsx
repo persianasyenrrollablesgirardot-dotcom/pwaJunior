@@ -20,6 +20,7 @@ interface TarjetaRow {
 interface Checklist { chat_id: number; estado_conversacion: EstadoConv; proximo_paso: string | null }
 interface Tarea { id: number; titulo: string; prioridad: number }
 interface Agenda { id: number; titulo: string; cuando: string; lugar: string }
+interface MediaRow { id: number; tipo: string; direccion: 'entrante' | 'saliente'; ts_canal: string; metadata: any }
 
 const TIPO_META: Record<string, { label: string; color: string }> = {
   comercial: { label: '💼 Comercial', color: '#2563eb' }, familiar: { label: '👪 Familiar', color: '#16a34a' },
@@ -50,6 +51,8 @@ export function TarjetaV2() {
   const [borrador, setBorrador] = useState('');
   const [guardando, setGuardando] = useState(false);
   const [cargado, setCargado] = useState(false);
+  const [media, setMedia] = useState<MediaRow[]>([]);
+  const [reprocesando, setReprocesando] = useState<number | null>(null);
   // Chat con Junior V2 (lee solo las tarjetas relevantes)
   const [jPregunta, setJPregunta] = useState('');
   const [jResp, setJResp] = useState<{ respuesta: string; tarjetas_usadas: number[]; via_indice: boolean; costo_usd: number } | null>(null);
@@ -91,7 +94,26 @@ export function TarjetaV2() {
     setTareas((tr as any) ?? []);
     const { data: ag } = await supabase.from('tarjeta_agenda').select('*').eq('chat_id', chatId);
     setAgenda((ag as any) ?? []);
+    const { data: md } = await supabase.from('mensajes')
+      .select('id, tipo, direccion, ts_canal, metadata')
+      .eq('chat_id', chatId).in('tipo', ['imagen','audio','documento','video'])
+      .is('deleted_at', null).order('ts_canal', { ascending: false }).limit(30);
+    setMedia((md as any) ?? []);
   }, []);
+
+  async function reprocesarMedia(body: { message_id?: number; chat_id?: number }) {
+    const key = body.message_id ?? -1;
+    setReprocesando(key);
+    try {
+      const res = await fetch('/api/reprocesar-media', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (data.error) alert('Error: ' + data.error);
+      else if (sel != null) await cargarDerivados(sel);
+    } finally { setReprocesando(null); }
+  }
 
   useEffect(() => {
     let cancel = false;
@@ -221,6 +243,65 @@ export function TarjetaV2() {
                     {(t.contexto ?? []).length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>(sin síntesis por módulo todavía)</div>}
                   </div>
                 </Seccion>
+
+                {media.length > 0 && (() => {
+                  const pendientes = media.filter(m => {
+                    const s = m.metadata?.ai_status;
+                    return s !== 'processed' && s !== 'skipped_cdn_lost';
+                  });
+                  return (
+                    <Seccion icono="📎" titulo="Media" sub={`${media.length} archivos · ${pendientes.length} sin transcribir`}>
+                      {pendientes.length > 0 && (
+                        <div style={{ marginBottom: 10 }}>
+                          <button
+                            onClick={() => reprocesarMedia({ chat_id: t.chat_id })}
+                            disabled={reprocesando !== null}
+                            style={{ padding: '7px 14px', borderRadius: 8, border: 'none', background: '#d97706', color: 'white', fontWeight: 600, fontSize: 12, cursor: 'pointer' }}
+                          >
+                            🔄 Reprocesar los {pendientes.length} pendientes
+                          </button>
+                        </div>
+                      )}
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+                        {media.map(m => {
+                          const md = m.metadata ?? {};
+                          const procesado = md.ai_status === 'processed';
+                          const perdido = md.ai_status === 'skipped_cdn_lost';
+                          const flagged = !!md.reprocesar_pending;
+                          const icono = m.tipo === 'imagen' ? '🖼' : m.tipo === 'audio' ? '🎤' : m.tipo === 'documento' ? '📄' : '🎬';
+                          const fecha = new Date(m.ts_canal).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' });
+                          return (
+                            <div key={m.id} style={{ background: 'var(--bg-page)', border: '1px solid var(--border-soft)', borderRadius: 8, padding: '8px 12px', display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                              <span style={{ fontSize: 18 }}>{icono}</span>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>
+                                  {m.direccion === 'saliente' ? '↗ vos enviaste' : '↙ entrante'} · {fecha} · #{m.id}
+                                  {procesado && <span style={{ marginLeft: 8, color: '#16a34a', fontWeight: 600 }}>✓ procesado</span>}
+                                  {perdido && <span style={{ marginLeft: 8, color: '#dc2626', fontWeight: 600 }}>✗ CDN perdido</span>}
+                                  {!procesado && !perdido && flagged && <span style={{ marginLeft: 8, color: '#d97706', fontWeight: 600 }}>⏳ en cola</span>}
+                                  {!procesado && !perdido && !flagged && <span style={{ marginLeft: 8, color: 'var(--text-muted)' }}>sin procesar</span>}
+                                </div>
+                                <div style={{ fontSize: 13, color: procesado ? 'var(--text)' : 'var(--text-muted)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                  {procesado ? (md.ai_text ?? '').slice(0, 250) : (perdido ? '(bytes no recuperables — la URL de WhatsApp expiró)' : '(sin transcripción)')}
+                                </div>
+                              </div>
+                              {!procesado && !perdido && (
+                                <button
+                                  onClick={() => reprocesarMedia({ message_id: m.id })}
+                                  disabled={reprocesando !== null}
+                                  style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer', fontSize: 11 }}
+                                  title="Marcar para que la extensión lo re-encole"
+                                >
+                                  🔄
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </Seccion>
+                  );
+                })()}
               </div>
 
               <div style={{ marginTop: 18 }}>
