@@ -169,6 +169,30 @@ export async function responderJuniorTarjeta(
     };
   }
 
+  // Atajo determinístico por teléfono: si la pregunta trae un número, lo buscamos
+  // en TODAS las tarjetas (incl. no-clientes). cargarDetalle ya filtra es_no_cliente
+  // y responde la verdad. Sin esto, el ruteo (que solo ve el índice comercial)
+  // cae al fallback genérico cuando preguntan por un colaborador / no-cliente.
+  let chatIdsByPhone: number[] = [];
+  const m = pregunta.match(/\+?\d{10,15}/);
+  if (m) {
+    const digits = m[0].replace(/\D/g, '');
+    let tel: string | null = null;
+    if (m[0].startsWith('+')) tel = '+' + digits;
+    else if (digits.length === 12 && digits.startsWith('57')) tel = '+' + digits;
+    else if (digits.length === 10 && digits.startsWith('3')) tel = '+57' + digits;
+    if (tel) {
+      const { data: hits } = await sb.from('tarjeta')
+        .select('chat_id, personas!inner(telefono_e164)').eq('personas.telefono_e164', tel);
+      chatIdsByPhone = (hits ?? []).map((h: any) => h.chat_id);
+    }
+  }
+  if (chatIdsByPhone.length && (!Array.isArray(plan.chat_ids) || plan.chat_ids.length === 0)) {
+    plan.chat_ids = chatIdsByPhone;
+    plan.puede_responder_con_indice = false;
+    plan.respuesta_directa = null;
+  }
+
   if (plan.puede_responder_con_indice && plan.respuesta_directa) {
     return { respuesta: String(plan.respuesta_directa), tarjetas_usadas: [], via_indice: true, costo_usd: costo };
   }
