@@ -90,7 +90,21 @@ export async function reconstruirTarjeta(
   await sb.from('tarjeta_agenda').delete().eq('chat_id', chatId);
   if (age.agendamientos.length) {
     await sb.from('tarjeta_agenda').insert(age.agendamientos.map(x => ({
-      chat_id: chatId, titulo: x.titulo, cuando: x.cuando, lugar: x.lugar, derivado_de_hash: inputHash,
+      chat_id: chatId, titulo: x.titulo,
+      cuando: x.fecha ? `${x.fecha} ${x.hora}` : 'por coordinar',
+      lugar: x.lugar, derivado_de_hash: inputHash,
+    })) as any);
+  }
+
+  // Calendario: alimentar la tabla canónica `agendamientos` con los que tienen
+  // FECHA. origen='agente_v2' → regenero solo lo mío, sin tocar las citas
+  // manuales (origen NULL). Así la visita aparece en el calendario de la UI.
+  await sb.from('agendamientos').delete().eq('persona_id', personaId).eq('origen', 'agente_v2');
+  const conFecha = age.agendamientos.filter(x => x.fecha);
+  if (conFecha.length) {
+    await sb.from('agendamientos').insert(conFecha.map(x => ({
+      persona_id: personaId, titulo: x.titulo, tipo: x.tipo, fecha: x.fecha,
+      hora_inicio: x.hora, direccion: x.lugar || null, origen: 'agente_v2',
     })) as any);
   }
 

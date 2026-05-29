@@ -17,7 +17,9 @@ export type EstadoConv = 'cerrado' | 'espera_jhon' | 'espera_cliente' | 'sin_res
 
 export interface ResChecklist { estado_conversacion: EstadoConv; proximo_paso: string; costo_usd: number }
 export interface ResTareas { tareas: { titulo: string; prioridad: number }[]; costo_usd: number }
-export interface ResAgenda { agendamientos: { titulo: string; cuando: string; lugar: string }[]; costo_usd: number }
+export type TipoAgenda = 'visita_medidas' | 'instalacion' | 'reunion_proveedor' | 'personal' | 'otro';
+export interface ItemAgenda { titulo: string; fecha: string | null; hora: string; tipo: TipoAgenda; lugar: string }
+export interface ResAgenda { agendamientos: ItemAgenda[]; costo_usd: number }
 
 function bloqueTarjeta(t: Tarjeta): string {
   const hechos = t.contexto_estructurado.map(c => `[${c.titulo}] ${c.sintesis}`).join('\n');
@@ -56,13 +58,25 @@ export async function derivarTareas(t: Tarjeta): Promise<ResTareas> {
   return { tareas, costo_usd: costo };
 }
 
-/** AGENDAMIENTO — qué hay que agendar (solo si hay algo concreto). */
+/** AGENDAMIENTO — qué hay que agendar (con fecha ESTRUCTURADA para el calendario). */
 export async function derivarAgenda(t: Tarjeta): Promise<ResAgenda> {
+  const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' }); // YYYY-MM-DD
+  const TIPOS: TipoAgenda[] = ['visita_medidas', 'instalacion', 'reunion_proveedor', 'personal', 'otro'];
   const { obj, costo } = await llmJson(
-    `Sos el agente AGENDAMIENTO del Visor de Persianas Girardot. Leé la tarjeta y detectá si hay algo concreto para agendar (visita de medidas, instalación, llamada con fecha/hora).\n\n` +
+    `Sos el agente AGENDAMIENTO del Visor de Persianas Girardot. HOY es ${hoy} (zona America/Bogota). ` +
+    `Leé la tarjeta y detectá si hay algo CONCRETO para agendar (visita de medidas/técnica, instalación, reunión, llamada con fecha).\n\n` +
     `${bloqueTarjeta(t)}\n\n` +
-    `Devolvé SOLO JSON: {"agendamientos": [{"titulo": "qué", "cuando": "fecha/hora si la hay, si no 'por coordinar'", "lugar": "si lo hay, si no ''"}]}. Si no hay nada concreto que agendar, [].`,
+    `Devolvé SOLO JSON: {"agendamientos": [{"titulo": "qué", "fecha": "YYYY-MM-DD o null si no hay fecha concreta", ` +
+    `"hora": "HH:MM — si dicen mañana/tarde/noche usá 09:00/14:00/18:00; si no hay, 09:00", ` +
+    `"tipo": "visita_medidas|instalacion|reunion_proveedor|personal|otro", "lugar": "si lo hay, si no ''"}]}. ` +
+    `Resolvé fechas relativas (mañana, el sábado, la semana que viene) CONTRA HOY. Si no hay nada concreto que agendar, [].`,
     'DERIV_AGENDA');
-  const ags = Array.isArray(obj.agendamientos) ? obj.agendamientos.map((x: any) => ({ titulo: String(x.titulo ?? ''), cuando: String(x.cuando ?? 'por coordinar'), lugar: String(x.lugar ?? '') })).filter((x: any) => x.titulo) : [];
+  const ags: ItemAgenda[] = Array.isArray(obj.agendamientos) ? obj.agendamientos.map((x: any) => ({
+    titulo: String(x.titulo ?? ''),
+    fecha: /^\d{4}-\d{2}-\d{2}$/.test(x.fecha ?? '') ? x.fecha : null,
+    hora: /^\d{1,2}:\d{2}/.test(x.hora ?? '') ? String(x.hora).slice(0, 5).padStart(5, '0') : '09:00',
+    tipo: TIPOS.includes(x.tipo) ? x.tipo : 'otro',
+    lugar: String(x.lugar ?? ''),
+  })).filter((x: ItemAgenda) => x.titulo) : [];
   return { agendamientos: ags, costo_usd: costo };
 }

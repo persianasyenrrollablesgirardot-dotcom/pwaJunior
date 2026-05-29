@@ -43,7 +43,7 @@ async function main() {
   if (!tar.tareas.length) console.log('     (ninguna)');
 
   console.log(`\n  📅 AGENDAMIENTO (agente derivado): ${age.agendamientos.length}`);
-  for (const x of age.agendamientos) console.log(`     • ${x.titulo} — ${x.cuando}${x.lugar ? ' · ' + x.lugar : ''}`);
+  for (const x of age.agendamientos) console.log(`     • ${x.titulo} — ${x.fecha ? `${x.fecha} ${x.hora}` : 'por coordinar'}${x.lugar ? ' · ' + x.lugar : ''}`);
   if (!age.agendamientos.length) console.log('     (nada concreto que agendar)');
 
   const total = t.costo_usd + chk.costo_usd + tar.costo_usd + age.costo_usd;
