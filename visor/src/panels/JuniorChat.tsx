@@ -4,10 +4,11 @@
  * Llama al endpoint /api/junior-v2 (responderJuniorTarjeta): Junior lee SOLO las
  * tarjetas relevantes, no las 75. Muestra qué tarjetas leyó y el costo del turno.
  *
- * Nota: por ahora cada pregunta es independiente (sin historial de conversación
- * en el server). El hilo de follow-ups llega en el Hito 3.
+ * Historial PERSISTIDO en BD (junior_sesiones + junior_chat, sesión dedicada V2):
+ * el hilo sobrevive a recargas y alimenta los follow-ups ("¿y de ese cuánto debe?").
  */
 import { useRef, useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
 
 interface Turno {
   rol: 'jhon' | 'junior';
@@ -15,21 +16,54 @@ interface Turno {
   meta?: { via_indice: boolean; tarjetas_usadas: number[]; costo_usd: number };
 }
 
+const SESION_TITULO = 'Junior V2 — Jhon';
+
+// Sesión V2 dedicada: la más reciente con ese título (o crear una).
+async function obtenerSesionId(): Promise<number> {
+  const { data } = await supabase.from('junior_sesiones')
+    .select('id').eq('titulo', SESION_TITULO).order('id', { ascending: false }).limit(1).maybeSingle();
+  if (data?.id) return data.id;
+  const { data: nueva } = await supabase.from('junior_sesiones').insert({ titulo: SESION_TITULO } as any).select('id').single();
+  return nueva!.id;
+}
+
 export function JuniorChat() {
   const [turnos, setTurnos] = useState<Turno[]>([]);
   const [pregunta, setPregunta] = useState('');
   const [cargando, setCargando] = useState(false);
+  const [sesionId, setSesionId] = useState<number | null>(null);
   const finRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { finRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [turnos, cargando]);
 
+  // Cargar el hilo persistido al abrir.
+  useEffect(() => {
+    (async () => {
+      const sid = await obtenerSesionId();
+      setSesionId(sid);
+      const { data } = await supabase.from('junior_chat')
+        .select('rol, mensaje').eq('sesion_id', sid).order('id', { ascending: true });
+      setTurnos((data ?? []).filter((m: any) => m.mensaje).map((m: any) => ({
+        rol: m.rol === 'junior' ? 'junior' : 'jhon', texto: m.mensaje,
+      })));
+    })();
+  }, []);
+
+  async function persistir(rol: 'usuario' | 'junior', mensaje: string, costo_usd = 0) {
+    if (sesionId == null) return;
+    await supabase.from('junior_chat').insert({
+      rol, mensaje, estado: 'completo', sesion_id: sesionId,
+      ...(rol === 'junior' ? { costo_usd, modelo: 'deepseek-chat' } : {}),
+    } as any).then(() => {}, () => {});  // best-effort: si falla, el chat sigue en memoria
+  }
+
   async function enviar() {
     const q = pregunta.trim();
     if (!q || cargando) return;
-    // Historial = turnos previos (para follow-ups: "¿y de ese cuánto debe?").
     const historial = turnos.map(t => ({ rol: t.rol, texto: t.texto }));
     setTurnos(t => [...t, { rol: 'jhon', texto: q }]);
     setPregunta(''); setCargando(true);
+    await persistir('usuario', q);
     try {
       const res = await fetch('/api/junior-v2', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -40,15 +74,29 @@ export function JuniorChat() {
         setTurnos(t => [...t, { rol: 'junior', texto: 'Tuve un problema: ' + data.error }]);
       } else {
         setTurnos(t => [...t, { rol: 'junior', texto: data.respuesta, meta: { via_indice: data.via_indice, tarjetas_usadas: data.tarjetas_usadas, costo_usd: data.costo_usd } }]);
+        await persistir('junior', data.respuesta, data.costo_usd);
       }
     } catch (e: any) {
       setTurnos(t => [...t, { rol: 'junior', texto: 'Error de red: ' + e.message }]);
     } finally { setCargando(false); }
   }
 
+  async function nuevaConversacion() {
+    if (cargando) return;
+    const { data } = await supabase.from('junior_sesiones').insert({ titulo: SESION_TITULO } as any).select('id').single();
+    setSesionId(data!.id);
+    setTurnos([]);
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ flex: 1, overflowY: 'auto', padding: '18px 24px' }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '8px 24px 0' }}>
+        <button onClick={nuevaConversacion} disabled={cargando} style={{
+          fontSize: 12, color: 'var(--text-muted)', background: 'transparent',
+          border: '1px solid var(--border-soft)', borderRadius: 8, padding: '4px 10px', cursor: 'pointer',
+        }}>🗑 Nueva conversación</button>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 24px' }}>
         {turnos.length === 0 && (
           <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '40px 0', fontSize: 13 }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}>🤖</div>
