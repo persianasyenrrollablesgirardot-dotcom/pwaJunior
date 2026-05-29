@@ -12,6 +12,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'node:crypto';
 import { leerInsumosTarjeta, redactarNarrativa, type Tarjeta } from './agregador.js';
 import { derivarChecklist, derivarTareas, derivarAgenda } from './derivados.js';
+import { arreglarNombreSiFeo } from './nombres.js';
 
 export interface ResultadoReconstruir {
   chat_id: number;
@@ -55,6 +56,10 @@ export async function reconstruirTarjeta(
     return { chat_id: chatId, persona_id: null, cambio: false, motivo: 'chat sin persona resoluble', hash: '', costo_usd: 0 };
   }
   const noCli = await verdictoNoCliente(sb, chatId);
+  // Si el contacto quedó con nombre feo (status de WhatsApp / solo número),
+  // intentar extraer un nombre útil de la conversación. Se auto-resuelve: una
+  // vez con nombre bueno, no se vuelve a intentar.
+  await arreglarNombreSiFeo(sb, personaId).catch(() => {});
 
   // 1) Leer insumos SIN LLM y calcular el hash del input (hechos + notas + tipo).
   const ins = await leerInsumosTarjeta(sb, personaId);
