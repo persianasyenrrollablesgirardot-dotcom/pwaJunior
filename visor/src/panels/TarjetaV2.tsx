@@ -53,6 +53,7 @@ export function TarjetaV2() {
   const [cargado, setCargado] = useState(false);
   const [media, setMedia] = useState<MediaRow[]>([]);
   const [reprocesando, setReprocesando] = useState<number | null>(null);
+  const [filtroEstado, setFiltroEstado] = useState<'activos' | 'cerrados' | 'todos'>('activos');
   // Chat con Junior V2 (lee solo las tarjetas relevantes)
   const [jPregunta, setJPregunta] = useState('');
   const [jResp, setJResp] = useState<{ respuesta: string; tarjetas_usadas: number[]; via_indice: boolean; costo_usd: number } | null>(null);
@@ -131,6 +132,19 @@ export function TarjetaV2() {
 
   const t = lista.find(x => x.chat_id === sel) ?? null;
 
+  // Si el filtro deja afuera a la tarjeta seleccionada, saltar a la primera visible.
+  useEffect(() => {
+    if (sel == null) return;
+    const visible = lista.filter(x => {
+      const est = checklists[x.chat_id]?.estado_conversacion;
+      if (filtroEstado === 'cerrados') return est === 'cerrado';
+      if (filtroEstado === 'activos') return est !== 'cerrado';
+      return true;
+    });
+    if (!visible.some(x => x.chat_id === sel)) setSel(visible[0]?.chat_id ?? null);
+  }, [filtroEstado, lista, checklists, sel]);
+
+
   async function guardarNota() {
     if (!t?.persona_id || !borrador.trim()) return;
     setGuardando(true);
@@ -180,11 +194,41 @@ export function TarjetaV2() {
         </div>
       )}
 
-      {lista.length > 0 && (
+      {lista.length > 0 && (() => {
+        const cerradas = lista.filter(x => checklists[x.chat_id]?.estado_conversacion === 'cerrado').length;
+        const activas = lista.length - cerradas;
+        const listaFiltrada = lista.filter(x => {
+          const est = checklists[x.chat_id]?.estado_conversacion;
+          if (filtroEstado === 'cerrados') return est === 'cerrado';
+          if (filtroEstado === 'activos') return est !== 'cerrado';
+          return true;
+        });
+        const filtroChip = (id: 'activos' | 'cerrados' | 'todos', label: string, n: number) => (
+          <button key={id} onClick={() => setFiltroEstado(id)} style={{
+            padding: '6px 12px', borderRadius: 999, fontSize: 12, fontWeight: 600,
+            background: filtroEstado === id ? 'var(--accent)' : 'transparent',
+            color: filtroEstado === id ? 'white' : 'var(--text-muted)',
+            border: `1px solid ${filtroEstado === id ? 'var(--accent)' : 'var(--border)'}`,
+            cursor: 'pointer',
+          }}>{label} ({n})</button>
+        );
+        return (
         <>
+          {/* Filtro por estado */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center' }}>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 700 }}>Filtro:</span>
+            {filtroChip('activos',  '🔥 Activos',  activas)}
+            {filtroChip('cerrados', '✅ Cerrados', cerradas)}
+            {filtroChip('todos',    'Todos',       lista.length)}
+          </div>
           {/* Selector de tarjetas */}
           <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-            {lista.map(x => {
+            {listaFiltrada.length === 0 && (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '6px 0' }}>
+                — Sin tarjetas en este filtro
+              </div>
+            )}
+            {listaFiltrada.map(x => {
               const tm = tipoMeta(x.tipo_contacto);
               const est = checklists[x.chat_id]?.estado_conversacion;
               const punto = est ? ESTADO_META[est].punto : '⚪';
@@ -333,7 +377,8 @@ export function TarjetaV2() {
             </>
           )}
         </>
-      )}
+        );
+      })()}
     </div>
   );
 }
