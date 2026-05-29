@@ -799,8 +799,13 @@ async function runDownloadTask(task) {
         result = await refreshMediaViaContent(msg);
       }
     }
+    // Defensa para outgoing: la captura de WA Web a veces no popula msg.media
+    // en outgoing aunque haya un archivo (msg.media queda null), y mi refresh
+    // SÍ trae los bytes. Inicializamos msg.media para no crashear al asignar.
+    if (!msg.media) msg.media = {};
     msg.media.sha256 = result.sha256;
     msg.media.download_status = 'downloaded';
+    if (!msg.media.mimetype) msg.media.mimetype = result.mimetype;
     await saveMediaBlob(result.sha256, result.bytes, result.mimetype);
     await tx('messages', 'readwrite', s => reqAsync(s.put(msg)));
 
