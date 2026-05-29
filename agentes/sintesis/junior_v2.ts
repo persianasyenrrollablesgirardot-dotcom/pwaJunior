@@ -85,6 +85,17 @@ export async function responderJuniorTarjeta(
   sb: SupabaseClient, pregunta: string, historial: TurnoHistorial[] = [],
 ): Promise<RespuestaJuniorV2> {
   const indice = await cargarIndice(sb);
+  // Defensa: si derivarChecklist coló una NO-ACCIÓN en estado=espera_jhon
+  // (mantenerse / esperar / observar / "decidir si X o Y" / reclasifi…/o mantener…),
+  // la bajamos a 'cerrado' en el índice IN-MEMORY para que ni el ruteo LLM ni el
+  // fallback la listen como pendiente. La fila sigue accesible por nombre, pero
+  // no contamina el listado de "te toca".
+  const NO_ACCION = /\b(mantener(se)?|esperar(\s+oportunidades)?|observar|monitorear|reclasifi|expectativa|atento|sin\s+acci[oó]n|ninguna\s+acci[oó]n|decidir\s+si\b[^.]*\bo\b)/i;
+  for (const f of indice) {
+    if (f.proximo && (f.estado === 'espera_jhon' || f.estado === 'sin_responder') && NO_ACCION.test(f.proximo)) {
+      f.estado = 'cerrado';
+    }
+  }
   const indiceTexto = indice.length
     ? indice.map(f => `chat ${f.chat_id} | ${f.nombre}${f.tel ? ` | ${f.tel}` : ''} | ${f.tipo} | estado:${f.estado} | próximo:${f.proximo}`).join('\n')
     : '(no hay tarjetas todavía)';
@@ -104,10 +115,10 @@ export async function responderJuniorTarjeta(
         `de tarjetas (una por chat, con nombre, tipo, estado y próximo paso). Resolvé referencias de la pregunta usando ` +
         `la conversación previa ("ese", "él", "el anterior", "ese cliente" → el cliente del que se venía hablando). Decidí:\n` +
         `- Si se responde con el índice (ej. "¿quién espera mi respuesta?") → puede_responder_con_indice=true + respuesta_directa.\n` +
-        `- Si Jhon pide algo AMPLIO u OPERATIVO sin nombrar un cliente ("organizá", "qué hago hoy", "actualizá", "guiame", ` +
-        `"ordená esto", "guiate por el checklist") → puede_responder_con_indice=true y en respuesta_directa armá un PLAN: ` +
-        `listá las tarjetas que necesitan la acción de Jhon (estado espera_jhon o sin_responder), cada una con su próximo paso, ` +
-        `ordenadas por urgencia.\n` +
+        `- Si Jhon pide algo AMPLIO u OPERATIVO sin nombrar un cliente ("organizá", "qué hago hoy", "qué tengo pendiente", ` +
+        `"dame los pendientes", "lista de tareas", "actualizá", "guiame", "ordená esto", "guiate por el checklist") → ` +
+        `puede_responder_con_indice=false y chat_ids=[]. El sistema arma un listado determinístico (AGENDA próxima + TE TOCA accionable) ` +
+        `desde el índice + agendamientos — NO lo redactés vos, no lo intentés con respuesta_directa. Solo devolvé puede_responder_con_indice=false, respuesta_directa=null, chat_ids=[].\n` +
         `- Si es sobre cliente(s) específico(s) → puede_responder_con_indice=false y listá los chat_ids relevantes (máx 5).\n` +
         `NUNCA digas que "no hay tarjetas seleccionadas" ni pidas que Jhon "seleccione" — no existe seleccionar, SIEMPRE tenés el índice. ` +
         `Si "actualizar" se refiere a las tarjetas: aclaramos que se actualizan solas con info nueva, y mostramos el estado actual. ` +
@@ -207,15 +218,49 @@ export async function responderJuniorTarjeta(
 
   // Fallback proactivo: si el ruteo no fijó ninguna tarjeta (pedido vago/operativo),
   // NO damos el callejón "no hay tarjetas seleccionadas" — armamos desde el índice
-  // lo que necesita la acción de Jhon. Determinístico, sin LLM extra.
+  // (a) próximos agendamientos y (b) pendientes accionables. Determinístico, sin LLM.
   if (chatIds.length === 0) {
-    const teToca = indice.filter(f => f.estado === 'espera_jhon' || f.estado === 'sin_responder');
-    if (!teToca.length) {
+    // Defensa: aunque derivarChecklist filtre no-acciones, hacemos un segundo
+    // pase acá para no mostrar a Jhon items de pura observación / indecisión.
+    const NO_ACCION = /(mantener(se)?|esperar|observar|monitorear|sin\s+acci[oó]n|ninguna\s+acci[oó]n|quedar\s+atento|atento\s+a|expectativa|reclasificar.*como.*o\s+mantener|decidir\s+si\s+\w+\s+o\s+\w+)/i;
+    const teToca = indice
+      .filter(f => f.estado === 'espera_jhon' || f.estado === 'sin_responder')
+      .filter(f => !f.proximo || !NO_ACCION.test(f.proximo));
+
+    // Próximos agendamientos (7 días) — para que la respuesta empiece con calendario.
+    const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const en7 = new Date(Date.now() + 7 * 86400_000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const { data: ags } = await sb.from('agendamientos')
+      .select('titulo, tipo, fecha, hora_inicio, persona_id, personas(nombre)')
+      .gte('fecha', hoy).lte('fecha', en7).order('fecha').order('hora_inicio').limit(60);
+    // Dedup: una entrada por (persona, fecha) — los agentes históricamente
+    // emitieron variaciones del mismo evento (ej. "Visita Patricia" x6).
+    const vistos = new Set<string>();
+    const dedup: any[] = [];
+    for (const a of (ags ?? []) as any[]) {
+      // Dedup por (nombre, fecha, hora) — agarra duplicados con persona_id distinto
+      // (dups previos sin merge) y variaciones de título del mismo evento.
+      const nombre = (a.personas?.nombre ?? '').trim().toLowerCase();
+      const k = `${nombre}|${a.fecha}|${a.hora_inicio ?? ''}`;
+      if (vistos.has(k)) continue;
+      vistos.add(k); dedup.push(a);
+    }
+    const agendaTxt = dedup.length
+      ? dedup.slice(0, 12).map((a: any) => `• ${a.fecha}${a.hora_inicio ? ' ' + String(a.hora_inicio).slice(0,5) : ''} — ${a.personas?.nombre ?? '?'}: ${a.titulo}`).join('\n')
+      : null;
+
+    if (!teToca.length && !agendaTxt) {
       return { respuesta: 'No tenés nada pendiente de tu lado ahora mismo. 👏 Si querés ver un caso puntual, nombrame el cliente.', tarjetas_usadas: [], via_indice: true, costo_usd: costo };
     }
-    const lista = teToca.slice(0, 25).map(f => `• ${f.nombre}${f.proximo ? ` — ${f.proximo}` : ''}`).join('\n');
-    const extra = teToca.length > 25 ? `\n…y ${teToca.length - 25} más` : '';
-    return { respuesta: `Esto es lo que te toca mover (según los checklists):\n${lista}${extra}`, tarjetas_usadas: [], via_indice: true, costo_usd: costo };
+
+    const partes: string[] = [];
+    if (agendaTxt) partes.push(`📅 AGENDA próxima (7 días):\n${agendaTxt}`);
+    if (teToca.length) {
+      const lista = teToca.slice(0, 25).map(f => `• ${f.nombre}${f.proximo ? ` — ${f.proximo}` : ''}`).join('\n');
+      const extra = teToca.length > 25 ? `\n…y ${teToca.length - 25} más` : '';
+      partes.push(`✅ TE TOCA (acciones concretas):\n${lista}${extra}`);
+    }
+    return { respuesta: partes.join('\n\n'), tarjetas_usadas: [], via_indice: true, costo_usd: costo };
   }
 
   const detalle = await cargarDetalle(sb, chatIds);
