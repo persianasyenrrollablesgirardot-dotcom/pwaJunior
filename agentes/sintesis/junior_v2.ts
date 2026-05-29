@@ -90,7 +90,13 @@ export async function responderJuniorTarjeta(
         `de tarjetas (una por chat, con nombre, tipo, estado y próximo paso). Resolvé referencias de la pregunta usando ` +
         `la conversación previa ("ese", "él", "el anterior", "ese cliente" → el cliente del que se venía hablando). Decidí:\n` +
         `- Si se responde con el índice (ej. "¿quién espera mi respuesta?") → puede_responder_con_indice=true + respuesta_directa.\n` +
+        `- Si Jhon pide algo AMPLIO u OPERATIVO sin nombrar un cliente ("organizá", "qué hago hoy", "actualizá", "guiame", ` +
+        `"ordená esto", "guiate por el checklist") → puede_responder_con_indice=true y en respuesta_directa armá un PLAN: ` +
+        `listá las tarjetas que necesitan la acción de Jhon (estado espera_jhon o sin_responder), cada una con su próximo paso, ` +
+        `ordenadas por urgencia.\n` +
         `- Si es sobre cliente(s) específico(s) → puede_responder_con_indice=false y listá los chat_ids relevantes (máx 5).\n` +
+        `NUNCA digas que "no hay tarjetas seleccionadas" ni pidas que Jhon "seleccione" — no existe seleccionar, SIEMPRE tenés el índice. ` +
+        `Si "actualizar" se refiere a las tarjetas: aclaramos que se actualizan solas con info nueva, y mostramos el estado actual.\n` +
         `Devolvé SOLO JSON: {"puede_responder_con_indice": bool, "respuesta_directa": string|null, "chat_ids": number[]}`,
     },
     { role: 'user', content: `CONVERSACIÓN PREVIA:\n${histTexto}\n\nÍNDICE DE TARJETAS:\n${indiceTexto}\n\nNUEVA PREGUNTA DE JHON: ${pregunta}` },
@@ -106,7 +112,21 @@ export async function responderJuniorTarjeta(
 
   // ── Paso 2: cargar solo las tarjetas relevantes y responder ─────────────
   const chatIds = Array.isArray(plan.chat_ids) ? plan.chat_ids.slice(0, 5) : [];
-  const detalle = chatIds.length ? await cargarDetalle(sb, chatIds) : '(no se seleccionaron tarjetas)';
+
+  // Fallback proactivo: si el ruteo no fijó ninguna tarjeta (pedido vago/operativo),
+  // NO damos el callejón "no hay tarjetas seleccionadas" — armamos desde el índice
+  // lo que necesita la acción de Jhon. Determinístico, sin LLM extra.
+  if (chatIds.length === 0) {
+    const teToca = indice.filter(f => f.estado === 'espera_jhon' || f.estado === 'sin_responder');
+    if (!teToca.length) {
+      return { respuesta: 'No tenés nada pendiente de tu lado ahora mismo. 👏 Si querés ver un caso puntual, nombrame el cliente.', tarjetas_usadas: [], via_indice: true, costo_usd: costo };
+    }
+    const lista = teToca.slice(0, 12).map(f => `• ${f.nombre}${f.proximo ? ` — ${f.proximo}` : ''}`).join('\n');
+    const extra = teToca.length > 12 ? `\n…y ${teToca.length - 12} más` : '';
+    return { respuesta: `Esto es lo que te toca mover (según los checklists):\n${lista}${extra}`, tarjetas_usadas: [], via_indice: true, costo_usd: costo };
+  }
+
+  const detalle = await cargarDetalle(sb, chatIds);
   const resp: ChatMessage[] = [
     {
       role: 'system',
