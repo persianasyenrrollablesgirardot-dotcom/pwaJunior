@@ -50,6 +50,25 @@ export function TarjetaV2() {
   const [borrador, setBorrador] = useState('');
   const [guardando, setGuardando] = useState(false);
   const [cargado, setCargado] = useState(false);
+  // Chat con Junior V2 (lee solo las tarjetas relevantes)
+  const [jPregunta, setJPregunta] = useState('');
+  const [jResp, setJResp] = useState<{ respuesta: string; tarjetas_usadas: number[]; via_indice: boolean; costo_usd: number } | null>(null);
+  const [jCargando, setJCargando] = useState(false);
+
+  async function preguntarJunior() {
+    if (!jPregunta.trim() || jCargando) return;
+    setJCargando(true); setJResp(null);
+    try {
+      const res = await fetch('/api/junior-v2', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pregunta: jPregunta.trim() }),
+      });
+      const data = await res.json();
+      setJResp(data.error ? { respuesta: 'Error: ' + data.error, tarjetas_usadas: [], via_indice: false, costo_usd: 0 } : data);
+    } catch (e: any) {
+      setJResp({ respuesta: 'Error de red: ' + e.message, tarjetas_usadas: [], via_indice: false, costo_usd: 0 });
+    } finally { setJCargando(false); }
+  }
 
   const cargarLista = useCallback(async () => {
     const { data } = await supabase.from('tarjeta')
@@ -106,6 +125,30 @@ export function TarjetaV2() {
     <div style={{ height: '100%', overflow: 'auto', padding: '18px 24px', maxWidth: 1100, margin: '0 auto' }}>
       <div style={{ background: '#eef6ff', border: '1px solid #bcdcff', borderRadius: 10, padding: '8px 14px', marginBottom: 16, fontSize: 12, color: '#0c4a6e' }}>
         🃏 <strong>Tarjeta V2 — datos reales.</strong> Las mantiene el worker de tarjetas. Agregá una nota abajo: marca la tarjeta para rehacerse y en unos segundos vas a ver cómo cambian narrativa, checklist, tareas y agenda. (Refresco automático cada 5s.)
+      </div>
+
+      {/* Chat con Junior — lee SOLO las tarjetas relevantes, no las 81 */}
+      <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-soft)', borderTop: '3px solid #5856d6', borderRadius: 12, padding: '14px 16px', marginBottom: 18, boxShadow: 'var(--shadow-sm)' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>💬 Preguntale a Junior</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input value={jPregunta} onChange={e => setJPregunta(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') preguntarJunior(); }}
+            placeholder="ej: ¿qué pasa con Pedidos Cubides? · ¿quién espera mi respuesta?" disabled={jCargando}
+            style={{ flex: 1, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 13 }} />
+          <button onClick={preguntarJunior} disabled={jCargando || !jPregunta.trim()} style={{ padding: '9px 18px', borderRadius: 8, border: 'none', background: jCargando ? '#9ca3af' : '#5856d6', color: 'white', fontWeight: 600, fontSize: 13 }}>
+            {jCargando ? 'Pensando…' : 'Preguntar'}
+          </button>
+        </div>
+        {jResp && (
+          <div style={{ marginTop: 10, background: 'var(--bg-page)', border: '1px solid var(--border-soft)', borderRadius: 8, padding: '10px 12px' }}>
+            <div style={{ fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{jResp.respuesta}</div>
+            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-muted)' }}>
+              {jResp.via_indice
+                ? '· respondió con el índice (sin leer tarjetas en detalle)'
+                : `· leyó ${jResp.tarjetas_usadas.length} tarjeta(s): ${jResp.tarjetas_usadas.map(c => `chat ${c}`).join(', ') || '—'}`}
+              {' · '}${jResp.costo_usd.toFixed(4)}
+            </div>
+          </div>
+        )}
       </div>
 
       {cargado && lista.length === 0 && (

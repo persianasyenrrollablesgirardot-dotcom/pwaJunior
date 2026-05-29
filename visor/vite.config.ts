@@ -224,11 +224,52 @@ function embeddedWorkerPlugin(): Plugin {
   };
 }
 
+/**
+ * V2 — endpoint /api/junior-v2 local (solo localhost).
+ * POST { pregunta } → responderJuniorTarjeta (Junior lee SOLO las tarjetas
+ * relevantes, no las 75). Corre server-side porque usa el service_role + la key
+ * de DeepSeek; no se expone fuera de localhost.
+ */
+function juniorV2ApiPlugin(env: Record<string, string>): Plugin {
+  return {
+    name: 'visor-pg-junior-v2-api',
+    configureServer(server) {
+      server.middlewares.use('/api/junior-v2', async (req: IncomingMessage, res: ServerResponse) => {
+        const addr = req.socket?.remoteAddress ?? '';
+        const esLocalhost = addr === '127.0.0.1' || addr === '::1' || addr.endsWith('127.0.0.1');
+        if (!esLocalhost) { res.statusCode = 403; res.end(JSON.stringify({ error: 'forbidden: solo localhost' })); return; }
+        if (req.method !== 'POST') { res.statusCode = 405; res.end(JSON.stringify({ error: 'use POST' })); return; }
+        try {
+          const chunks: Buffer[] = [];
+          for await (const c of req as any) chunks.push(c as Buffer);
+          const { pregunta } = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+          if (!pregunta || typeof pregunta !== 'string') { res.statusCode = 400; res.end(JSON.stringify({ error: 'falta pregunta' })); return; }
+          // Las keys deben estar en process.env ANTES de importar los módulos (llm.ts las lee al cargar).
+          process.env.DEEPSEEK_API_KEY = env.DEEPSEEK_API_KEY;
+          process.env.VITE_SUPABASE_URL = env.VITE_SUPABASE_URL;
+          process.env.SUPABASE_SERVICE_ROLE_KEY = env.SUPABASE_SERVICE_ROLE_KEY;
+          const { createClient } = await import('@supabase/supabase-js');
+          const sb = createClient(env.VITE_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+          const { responderJuniorTarjeta } = await import('../agentes/sintesis/junior_v2.js');
+          const r = await responderJuniorTarjeta(sb, pregunta);
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'no-store');
+          res.end(JSON.stringify(r));
+        } catch (e: any) {
+          console.error('[/api/junior-v2]', e.message);
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: e.message }));
+        }
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   // Cargar TODAS las variables (incluyendo las sin prefijo VITE_) del root del proyecto
   const env = loadEnv(mode, path.resolve(__dirname, '..'), '');
   return {
-    plugins: [react(), keysApiPlugin(env), transcribeApiPlugin(env), embeddedWorkerPlugin()],
+    plugins: [react(), keysApiPlugin(env), transcribeApiPlugin(env), juniorV2ApiPlugin(env), embeddedWorkerPlugin()],
     server: { port: 5180, strictPort: true, host: true },
     define: {
       // SOLO las VITE_ se inyectan en el bundle (públicas por diseño)
