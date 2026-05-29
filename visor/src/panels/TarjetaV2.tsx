@@ -1,0 +1,239 @@
+/**
+ * TARJETA V2 — vista REAL (Hito 1).
+ *
+ * Lee de las tablas V2 (tarjeta + tarjeta_checklist/tarea/agenda) que mantiene
+ * el worker de tarjetas. El input de notas escribe en notas_libres y marca la
+ * tarjeta dirty → el worker la rehace → el auto-refresh (5s) muestra el cambio.
+ *
+ * Foco Hito 1: que el FLUJO funcione (no la calidad del contenido).
+ */
+import { useCallback, useEffect, useState } from 'react';
+import { supabase } from '../lib/supabase';
+
+type EstadoConv = 'cerrado' | 'espera_jhon' | 'espera_cliente' | 'sin_responder';
+interface ModuloCtx { modulo: string; titulo: string; sintesis: string; alerta: string | null }
+interface TarjetaRow {
+  chat_id: number; persona_id: number | null; tipo_contacto: string;
+  narrativa: string | null; notas: string[]; contexto: ModuloCtx[];
+  actualizado_at: string; dirty: boolean; personas: { nombre: string | null } | null;
+}
+interface Checklist { chat_id: number; estado_conversacion: EstadoConv; proximo_paso: string | null }
+interface Tarea { id: number; titulo: string; prioridad: number }
+interface Agenda { id: number; titulo: string; cuando: string; lugar: string }
+
+const TIPO_META: Record<string, { label: string; color: string }> = {
+  comercial: { label: '💼 Comercial', color: '#2563eb' }, familiar: { label: '👪 Familiar', color: '#16a34a' },
+  proveedor: { label: '🏭 Proveedor', color: '#d97706' }, publicitario: { label: '📣 Publicitario', color: '#7c3aed' },
+  personal_otros: { label: '👤 Personal', color: '#6b7280' }, desconocido: { label: '❔ Desconocido', color: '#6b7280' },
+};
+const ESTADO_META: Record<EstadoConv, { label: string; punto: string; color: string }> = {
+  cerrado: { label: 'Cerrado', punto: '🟢', color: '#16a34a' },
+  espera_jhon: { label: 'Espera que vos contestes', punto: '🟠', color: '#ea580c' },
+  espera_cliente: { label: 'Espera al cliente', punto: '🔵', color: '#2563eb' },
+  sin_responder: { label: 'Sin responder', punto: '🔴', color: '#dc2626' },
+};
+const tipoMeta = (t: string) => TIPO_META[t] ?? TIPO_META.desconocido;
+const nombreDe = (t: TarjetaRow) => t.personas?.nombre || `Chat #${t.chat_id}`;
+function hace(iso: string): string {
+  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return 'recién'; if (s < 3600) return `hace ${Math.floor(s / 60)} min`;
+  if (s < 86400) return `hace ${Math.floor(s / 3600)} h`; return `hace ${Math.floor(s / 86400)} d`;
+}
+
+export function TarjetaV2() {
+  const [lista, setLista] = useState<TarjetaRow[]>([]);
+  const [checklists, setChecklists] = useState<Record<number, Checklist>>({});
+  const [sel, setSel] = useState<number | null>(null);
+  const [chkSel, setChkSel] = useState<Checklist | null>(null);
+  const [tareas, setTareas] = useState<Tarea[]>([]);
+  const [agenda, setAgenda] = useState<Agenda[]>([]);
+  const [borrador, setBorrador] = useState('');
+  const [guardando, setGuardando] = useState(false);
+  const [cargado, setCargado] = useState(false);
+
+  const cargarLista = useCallback(async () => {
+    const { data } = await supabase.from('tarjeta')
+      .select('chat_id, persona_id, tipo_contacto, narrativa, notas, contexto, actualizado_at, dirty, personas(nombre)')
+      .order('actualizado_at', { ascending: false });
+    const rows = (data as any as TarjetaRow[]) ?? [];
+    setLista(rows);
+    const { data: cks } = await supabase.from('tarjeta_checklist').select('chat_id, estado_conversacion, proximo_paso');
+    const map: Record<number, Checklist> = {};
+    for (const c of (cks as any as Checklist[]) ?? []) map[c.chat_id] = c;
+    setChecklists(map);
+    setCargado(true);
+    return rows;
+  }, []);
+
+  const cargarDerivados = useCallback(async (chatId: number) => {
+    const { data: ck } = await supabase.from('tarjeta_checklist').select('*').eq('chat_id', chatId).maybeSingle();
+    setChkSel((ck as any) ?? null);
+    const { data: tr } = await supabase.from('tarjeta_tarea').select('*').eq('chat_id', chatId).order('prioridad');
+    setTareas((tr as any) ?? []);
+    const { data: ag } = await supabase.from('tarjeta_agenda').select('*').eq('chat_id', chatId);
+    setAgenda((ag as any) ?? []);
+  }, []);
+
+  useEffect(() => {
+    let cancel = false;
+    (async () => { const rows = await cargarLista(); if (!cancel) setSel(s => s ?? rows[0]?.chat_id ?? null); })();
+    const t = setInterval(cargarLista, 5000);
+    return () => { cancel = true; clearInterval(t); };
+  }, [cargarLista]);
+
+  useEffect(() => {
+    if (sel == null) return;
+    cargarDerivados(sel);
+    const t = setInterval(() => cargarDerivados(sel), 5000);
+    return () => clearInterval(t);
+  }, [sel, cargarDerivados]);
+
+  const t = lista.find(x => x.chat_id === sel) ?? null;
+
+  async function guardarNota() {
+    if (!t?.persona_id || !borrador.trim()) return;
+    setGuardando(true);
+    try {
+      await supabase.from('notas_libres').insert({ persona_id: t.persona_id, contenido: borrador.trim(), visible_para: ['todos'], creado_por: 1 });
+      await supabase.from('personas').update({ sintesis_pendiente: true }).eq('id', t.persona_id);
+      await supabase.from('tarjeta').update({ dirty: true }).eq('chat_id', t.chat_id);
+      setBorrador('');
+      await cargarLista();
+    } finally { setGuardando(false); }
+  }
+
+  return (
+    <div style={{ height: '100%', overflow: 'auto', padding: '18px 24px', maxWidth: 1100, margin: '0 auto' }}>
+      <div style={{ background: '#eef6ff', border: '1px solid #bcdcff', borderRadius: 10, padding: '8px 14px', marginBottom: 16, fontSize: 12, color: '#0c4a6e' }}>
+        🃏 <strong>Tarjeta V2 — datos reales.</strong> Las mantiene el worker de tarjetas. Agregá una nota abajo: marca la tarjeta para rehacerse y en unos segundos vas a ver cómo cambian narrativa, checklist, tareas y agenda. (Refresco automático cada 5s.)
+      </div>
+
+      {cargado && lista.length === 0 && (
+        <div style={{ textAlign: 'center', padding: '50px 0', color: 'var(--text-muted)' }}>
+          <div style={{ fontSize: 34, marginBottom: 8 }}>⏳</div>
+          <p style={{ fontSize: 13 }}>Todavía no hay tarjetas. El worker (<code>worker_tarjetas</code>) las arma solo; esperá unos segundos y refrescá.</p>
+        </div>
+      )}
+
+      {lista.length > 0 && (
+        <>
+          {/* Selector de tarjetas */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+            {lista.map(x => {
+              const tm = tipoMeta(x.tipo_contacto);
+              const est = checklists[x.chat_id]?.estado_conversacion;
+              const punto = est ? ESTADO_META[est].punto : '⚪';
+              return (
+                <button key={x.chat_id} onClick={() => setSel(x.chat_id)} style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', borderRadius: 999, fontSize: 12,
+                  background: x.chat_id === sel ? tm.color : 'var(--bg-panel)', color: x.chat_id === sel ? 'white' : 'var(--text)',
+                  border: `1px solid ${x.chat_id === sel ? tm.color : 'var(--border-soft)'}`,
+                }}>{punto} {nombreDe(x)}</button>
+              );
+            })}
+          </div>
+
+          {t && (
+            <>
+              <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-soft)', borderTop: `3px solid ${chkSel ? ESTADO_META[chkSel.estado_conversacion].color : '#999'}`, borderRadius: 12, padding: '16px 18px', boxShadow: 'var(--shadow-sm)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <h2 style={{ margin: 0, fontSize: 20 }}>{nombreDe(t)}</h2>
+                  <Chip texto={tipoMeta(t.tipo_contacto).label} color={tipoMeta(t.tipo_contacto).color} />
+                  {chkSel && <Chip texto={`${ESTADO_META[chkSel.estado_conversacion].punto} ${ESTADO_META[chkSel.estado_conversacion].label}`} color={ESTADO_META[chkSel.estado_conversacion].color} />}
+                  <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-muted)' }}>
+                    chat #{t.chat_id} · {hace(t.actualizado_at)}{t.dirty ? ' · 🔄 actualizando…' : ''}
+                  </span>
+                </div>
+
+                <Seccion icono="🧠" titulo="Estado general" sub="narrativa del agregador">
+                  <p style={{ margin: 0, fontSize: 14, lineHeight: 1.55 }}>{t.narrativa || '(sin narrativa todavía)'}</p>
+                </Seccion>
+
+                <Seccion icono="📝" titulo="Notas libres" sub="verdad humana — al guardar, la tarjeta se rehace">
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+                    {(t.notas ?? []).length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>— sin notas</div>}
+                    {(t.notas ?? []).map((n, i) => (
+                      <div key={i} style={{ background: 'var(--bg-page)', border: '1px solid var(--border-soft)', borderRadius: 8, padding: '7px 11px', fontSize: 13 }}>{n}</div>
+                    ))}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input value={borrador} onChange={e => setBorrador(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') guardarNota(); }}
+                      placeholder="Escribí una nota y Enter…" disabled={guardando}
+                      style={{ flex: 1, padding: '9px 12px', borderRadius: 8, border: '1px solid var(--border)', fontSize: 13 }} />
+                    <button onClick={guardarNota} disabled={guardando || !borrador.trim()} style={{ padding: '9px 16px', borderRadius: 8, border: 'none', background: guardando ? '#9ca3af' : 'var(--accent)', color: 'white', fontWeight: 600, fontSize: 13 }}>
+                      {guardando ? 'Guardando…' : 'Guardar nota'}
+                    </button>
+                  </div>
+                </Seccion>
+
+                <Seccion icono="🗂" titulo="Contexto estructurado" sub={`${(t.contexto ?? []).length} módulos · verbatim de los 32 agentes`}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
+                    {(t.contexto ?? []).map(c => (
+                      <div key={c.modulo} style={{ background: 'var(--bg-page)', border: '1px solid var(--border-soft)', borderRadius: 8, padding: '9px 12px' }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: 'var(--text-muted)', marginBottom: 5 }}>{c.modulo} · {c.titulo}</div>
+                        <div style={{ fontSize: 13 }}>{c.sintesis}</div>
+                        {c.alerta && <div style={{ fontSize: 12, color: '#d97706', marginTop: 4 }}>⚠ {c.alerta}</div>}
+                      </div>
+                    ))}
+                    {(t.contexto ?? []).length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>(sin síntesis por módulo todavía)</div>}
+                  </div>
+                </Seccion>
+              </div>
+
+              <div style={{ marginTop: 18 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6, color: 'var(--text-muted)', marginBottom: 10 }}>⬇ Derivado de esta tarjeta por los 3 agentes</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
+                  <Derivado icono="✅" titulo="Checklist" color={chkSel ? ESTADO_META[chkSel.estado_conversacion].color : '#999'}>
+                    {chkSel ? (<>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: ESTADO_META[chkSel.estado_conversacion].color, marginBottom: 4 }}>{ESTADO_META[chkSel.estado_conversacion].punto} {ESTADO_META[chkSel.estado_conversacion].label}</div>
+                      <div style={{ fontSize: 13 }}>→ {chkSel.proximo_paso || 'sin próximo paso'}</div>
+                    </>) : <Vacio />}
+                  </Derivado>
+                  <Derivado icono="📋" titulo="Tareas" color="#7c3aed">
+                    {tareas.length === 0 ? <Vacio /> : tareas.map(x => (
+                      <div key={x.id} style={{ fontSize: 13, padding: '3px 0', display: 'flex', gap: 6 }}>
+                        <span>{x.prioridad === 1 ? '🔴' : x.prioridad === 2 ? '🟡' : '⚪'}</span><span>{x.titulo}</span>
+                      </div>
+                    ))}
+                  </Derivado>
+                  <Derivado icono="📅" titulo="Agendamiento" color="#0891b2">
+                    {agenda.length === 0 ? <Vacio /> : agenda.map(x => (
+                      <div key={x.id} style={{ fontSize: 13, padding: '3px 0' }}>
+                        <div style={{ fontWeight: 600 }}>{x.titulo}</div>
+                        <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{x.cuando}{x.lugar ? ' · ' + x.lugar : ''}</div>
+                      </div>
+                    ))}
+                  </Derivado>
+                </div>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function Chip({ texto, color }: { texto: string; color: string }) {
+  return <span style={{ padding: '3px 10px', borderRadius: 999, fontSize: 12, fontWeight: 600, color, background: 'var(--bg-page)', border: `1px solid ${color}33` }}>{texto}</span>;
+}
+function Seccion({ icono, titulo, sub, children }: { icono: string; titulo: string; sub: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--border-soft)' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }}>
+        <h3 style={{ margin: 0, fontSize: 13 }}>{icono} {titulo}</h3>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>— {sub}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+function Derivado({ icono, titulo, color, children }: { icono: string; titulo: string; color: string; children: React.ReactNode }) {
+  return (
+    <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-soft)', borderTop: `3px solid ${color}`, borderRadius: 10, padding: '12px 14px' }}>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: 'var(--text-muted)', marginBottom: 8 }}>{icono} {titulo}</div>
+      {children}
+    </div>
+  );
+}
+function Vacio() { return <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>— nada por ahora</div>; }

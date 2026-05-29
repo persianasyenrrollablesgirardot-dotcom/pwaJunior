@@ -33,6 +33,25 @@
 
 ## ESTADO ACTUAL
 
+### 🔄 REDISEÑO V2 — APROBADO 2026-05-28 (en construcción)
+
+Decisión de Jhon: rediseñar la capa de Junior. El modelo actual (Junior hace todo + carga el contexto de los 75 chats en cada llamada) alucina, pierde contexto y es caro. **Diseño completo en `ARQUITECTURA_V2.md`.**
+
+Modelo nuevo gira en torno a la **tarjeta** (contexto materializado por chat): un **agregador** que ensambla (no resume) + **3 agentes derivados** (checklist / tareas / agendamiento) que leen la tarjeta y escriben en sus tablas + **Junior delgado** que consulta con filtros. Detección de cambio por hash (idempotencia, menos costo y menos alucinación).
+
+**Plan de construcción (VERTICAL primero — validar punta a punta antes de escalar):**
+- **Hito 0 — Mockup** (en curso): tarjeta con datos fake → Jhon valida la experiencia. Vista `🃏 Tarjeta V2` en el sidebar.
+- **Hito 1 — Rebanada vertical sobre UN cliente real** (Pedidos Cubides): tablas + agregador + 3 derivados mínimos + Junior lee esa tarjeta. End-to-end, datos reales, test por LLM real, Jhon valida la rebanada.
+- **Hito 2 — Escalar y endurecer a las 75**: triggers realtime + coalescing 30s + hash + backfill + derivados completos.
+- **Hito 3 — Junior delgado completo** (tools de consulta + agregar_nota, recuperar-y-razonar).
+- **Hito 4 — Corte**: jubilar JSON monolítico + guards. Viejo Junior en git como respaldo, sin paralelismo.
+
+5 decisiones validadas: tipo_contacto≠estado_conversacion · derivados híbridos · coalescing 30s · notas vía Junior directas · histórico se reclasifica (no se borra). Costo aceptado ~$30–50/mes neto.
+
+**Reglas de construcción vinculantes (lecciones de la experiencia, en `ARQUITECTURA_V2.md` §9):** (1) el riesgo está en las costuras, no en los agentes; (2) ningún "verde" cuenta si no pasó por el LLM real; (3) regla del tercer guard = frenar y revisar el contrato; (4) toda red de seguridad se prueba; (5) diagnosticar antes de tocar; (6) refactor, no rewrite (conservar los 32 agentes); (7) costo y latencia = presupuesto de diseño.
+
+**Lección madre:** todos los bugs de este proyecto estuvieron en las UNIONES, no en los agentes (cascada con id equivocado → commit `85c08ee`; revert incompleto; worker que bloquea a Junior; ARRAY que no verificaba). V2 trata las costuras como el producto.
+
 ### Fase activa
 **FASE 9 — Procesamiento en tiempo real** (2026-05-22, ✅ COMPLETA — falta validación de Jhon)
 

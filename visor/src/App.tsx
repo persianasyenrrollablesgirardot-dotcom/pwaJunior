@@ -15,6 +15,7 @@ import { Captura } from './panels/Captura';
 import { Clientes } from './panels/Clientes';
 import { VistasGlobales } from './panels/VistasGlobales';
 import { Junior } from './panels/Junior';
+import { TarjetaV2 } from './panels/TarjetaV2';
 import { sincronizarKeysExtension } from './lib/extension';
 import { ContextoActivoProvider } from './lib/contexto_activo';
 import { NavegacionProvider } from './lib/navegacion';
@@ -34,6 +35,7 @@ const MODULOS: { id: ModuloId; nombre: string }[] = [
   { id: 'm8', nombre: '8 · Agentes' },
   { id: 'm9', nombre: '9 · Control y seguridad' },
   { id: 'm10', nombre: '10 · Gerencial' },
+  { id: 'tarjeta_v2', nombre: '🃏 Tarjeta V2 (mockup)' },
   { id: 'junior', nombre: 'Junior · asistente' },
 ];
 
@@ -69,8 +71,9 @@ export default function App() {
             {modulo === 'm6' && <Modulo6 />}
             {modulo === 'm7' && <Modulo7 />}
             {modulo === 'm8' && <Modulo8 />}
+            {modulo === 'tarjeta_v2' && <TarjetaV2 />}
             {modulo === 'junior' && <Junior />}
-            {modulo !== 'centro_control' && modulo !== 'captura' && modulo !== 'clientes' && modulo !== 'vistas_globales' && modulo !== 'junior' && modulo !== 'm1' && modulo !== 'm2' && modulo !== 'm3' && modulo !== 'm4' && modulo !== 'm5' && modulo !== 'm6' && modulo !== 'm7' && modulo !== 'm8' && (
+            {modulo !== 'centro_control' && modulo !== 'captura' && modulo !== 'clientes' && modulo !== 'vistas_globales' && modulo !== 'junior' && modulo !== 'tarjeta_v2' && modulo !== 'm1' && modulo !== 'm2' && modulo !== 'm3' && modulo !== 'm4' && modulo !== 'm5' && modulo !== 'm6' && modulo !== 'm7' && modulo !== 'm8' && (
               <ModuloPlaceholder
                 titulo={MODULOS.find(m => m.id === modulo)?.nombre ?? '?'}
                 subtitulo="Pendiente — se construye después del MÓDULO 7"
