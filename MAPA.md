@@ -42,8 +42,8 @@ Modelo nuevo gira en torno a la **tarjeta** (contexto materializado por chat): u
 **Plan de construcción (VERTICAL primero — validar punta a punta antes de escalar):**
 - **Hito 0 — Mockup** (en curso): tarjeta con datos fake → Jhon valida la experiencia. Vista `🃏 Tarjeta V2` en el sidebar.
 - **Hito 1 — Rebanada vertical sobre UN cliente real** (Pedidos Cubides): tablas + agregador + 3 derivados mínimos + Junior lee esa tarjeta. End-to-end, datos reales, test por LLM real, Jhon valida la rebanada.
-- **Hito 2 — Escalar y endurecer a las 75**: triggers realtime + coalescing 30s + hash + backfill + derivados completos.
-- **Hito 3 — Junior delgado completo** (tools de consulta + agregar_nota, recuperar-y-razonar).
+- **Hito 2 — Escalar y endurecer a las 75**: triggers realtime + coalescing 30s + hash + backfill + derivados completos. **+ Recablear Tareas y Agendamientos a V2**: los agentes V2 alimentan las tablas canónicas estructuradas (`tareas`/`agendamientos`, origen='agente_v2', regenerando solo lo suyo) — el agente de agenda debe extraer **fechas estructuradas** para el calendario — y se apagan los agentes viejos de tareas/agenda a la vez (corte sin duplicados). Hasta entonces esas dos pestañas siguen sobre las tablas reales (funcionando, old-driven).
+- **Hito 3 — Junior delgado completo** (tools de consulta + agregar_nota, recuperar-y-razonar). *Avance:* chat de Junior ya lee solo las tarjetas relevantes vía `/api/junior-v2`; checklist board lee `tarjeta_checklist`; pestaña Instrucciones eliminada.
 - **Hito 4 — Corte**: jubilar JSON monolítico + guards. Viejo Junior en git como respaldo, sin paralelismo.
 
 5 decisiones validadas: tipo_contacto≠estado_conversacion · derivados híbridos · coalescing 30s · notas vía Junior directas · histórico se reclasifica (no se borra). Costo aceptado ~$30–50/mes neto.
