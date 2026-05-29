@@ -22,6 +22,8 @@ export interface RespuestaJuniorV2 {
   costo_usd: number;
 }
 
+export interface TurnoHistorial { rol: 'jhon' | 'junior'; texto: string }
+
 interface FilaIndice { chat_id: number; nombre: string; tipo: string; estado: string; proximo: string }
 
 async function cargarIndice(sb: SupabaseClient): Promise<FilaIndice[]> {
@@ -65,26 +67,33 @@ async function cargarDetalle(sb: SupabaseClient, chatIds: number[]): Promise<str
   return bloques.join('\n\n');
 }
 
-export async function responderJuniorTarjeta(sb: SupabaseClient, pregunta: string): Promise<RespuestaJuniorV2> {
+export async function responderJuniorTarjeta(
+  sb: SupabaseClient, pregunta: string, historial: TurnoHistorial[] = [],
+): Promise<RespuestaJuniorV2> {
   const indice = await cargarIndice(sb);
   const indiceTexto = indice.length
     ? indice.map(f => `chat ${f.chat_id} | ${f.nombre} | ${f.tipo} | estado:${f.estado} | próximo:${f.proximo}`).join('\n')
     : '(no hay tarjetas todavía)';
+
+  // Historial reciente (para resolver follow-ups: "¿y de ese cuánto debe?").
+  const hist = historial.slice(-6);
+  const histTexto = hist.length
+    ? hist.map(h => `${h.rol === 'jhon' ? 'JHON' : 'JUNIOR'}: ${h.texto}`).join('\n')
+    : '(sin conversación previa)';
 
   // ── Paso 1: ruteo ──────────────────────────────────────────────────────
   const ruteo: ChatMessage[] = [
     {
       role: 'system',
       content:
-        `Sos el RUTEO de Junior, asistente de Jhon (Persianas Girardot, COP). Tenés el ÍNDICE de tarjetas ` +
-        `(una por chat, con nombre, tipo, estado de conversación y próximo paso). Dada la pregunta de Jhon, decidí:\n` +
-        `- Si se responde con el índice (ej. "¿quién espera mi respuesta?", "cuántos clientes en X estado") → ` +
-        `puede_responder_con_indice=true y escribí la respuesta_directa.\n` +
-        `- Si es sobre cliente(s) específico(s) y necesitás el detalle → puede_responder_con_indice=false y ` +
-        `listá los chat_ids relevantes (máx 5).\n` +
+        `Sos el RUTEO de Junior, asistente de Jhon (Persianas Girardot, COP). Tenés la CONVERSACIÓN PREVIA y el ÍNDICE ` +
+        `de tarjetas (una por chat, con nombre, tipo, estado y próximo paso). Resolvé referencias de la pregunta usando ` +
+        `la conversación previa ("ese", "él", "el anterior", "ese cliente" → el cliente del que se venía hablando). Decidí:\n` +
+        `- Si se responde con el índice (ej. "¿quién espera mi respuesta?") → puede_responder_con_indice=true + respuesta_directa.\n` +
+        `- Si es sobre cliente(s) específico(s) → puede_responder_con_indice=false y listá los chat_ids relevantes (máx 5).\n` +
         `Devolvé SOLO JSON: {"puede_responder_con_indice": bool, "respuesta_directa": string|null, "chat_ids": number[]}`,
     },
-    { role: 'user', content: `ÍNDICE DE TARJETAS:\n${indiceTexto}\n\nPREGUNTA DE JHON: ${pregunta}` },
+    { role: 'user', content: `CONVERSACIÓN PREVIA:\n${histTexto}\n\nÍNDICE DE TARJETAS:\n${indiceTexto}\n\nNUEVA PREGUNTA DE JHON: ${pregunta}` },
   ];
   const r1 = await deepseekChat({ messages: ruteo, agente: 'JUNIOR_V2_RUTEO', max_tokens: 300, response_format: { type: 'json_object' } });
   let plan: any = {};
@@ -103,9 +112,11 @@ export async function responderJuniorTarjeta(sb: SupabaseClient, pregunta: strin
       role: 'system',
       content:
         `Sos JUNIOR, el asistente personal de Jhon (Persianas Girardot, Girardot, Colombia · pesos COP). ` +
-        `Respondé la pregunta de Jhon usando SOLO las tarjetas de abajo. No inventes datos que no estén. ` +
+        `Respondé la pregunta de Jhon usando SOLO las tarjetas de abajo y la conversación previa. No inventes datos que no estén. ` +
         `Si las NOTAS DE JHON contradicen un hecho, las notas mandan. Sé concreto y breve, en su tono.`,
     },
+    // Conversación previa (para follow-ups coherentes).
+    ...hist.map(h => ({ role: (h.rol === 'jhon' ? 'user' : 'assistant') as 'user' | 'assistant', content: h.texto })),
     { role: 'user', content: `TARJETAS RELEVANTES:\n\n${detalle}\n\n────\nPREGUNTA DE JHON: ${pregunta}` },
   ];
   const r2 = await deepseekChat({ messages: resp, agente: 'JUNIOR_V2_RESP', max_tokens: 500 });

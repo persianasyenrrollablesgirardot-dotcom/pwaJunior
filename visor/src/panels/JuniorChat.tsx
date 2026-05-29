@@ -26,12 +26,14 @@ export function JuniorChat() {
   async function enviar() {
     const q = pregunta.trim();
     if (!q || cargando) return;
+    // Historial = turnos previos (para follow-ups: "¿y de ese cuánto debe?").
+    const historial = turnos.map(t => ({ rol: t.rol, texto: t.texto }));
     setTurnos(t => [...t, { rol: 'jhon', texto: q }]);
     setPregunta(''); setCargando(true);
     try {
       const res = await fetch('/api/junior-v2', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pregunta: q }),
+        body: JSON.stringify({ pregunta: q, historial }),
       });
       const data = await res.json();
       if (data.error) {

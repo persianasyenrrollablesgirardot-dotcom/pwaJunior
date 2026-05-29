@@ -1,0 +1,14 @@
+import 'dotenv/config';
+import { createClient } from '@supabase/supabase-js';
+import { responderJuniorTarjeta } from '../agentes/sintesis/junior_v2.js';
+const sb = createClient(process.env.VITE_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+let fallos = 0; const ok = (c,m)=>{console.log(`  ${c?'✓':'❌'} ${m}`); if(!c)fallos++;};
+console.log('[Turno 1] "¿qué pasa con Pedidos Cubides?"');
+const r1 = await responderJuniorTarjeta(sb, '¿qué pasa con Pedidos Cubides?');
+console.log(`  → tarjetas=[${r1.tarjetas_usadas}] · "${r1.respuesta.slice(0,110)}"`);
+console.log('\n[Turno 2 follow-up] "¿y de ese cuánto debe?" (con historial)');
+const hist = [{rol:'jhon',texto:'¿qué pasa con Pedidos Cubides?'},{rol:'junior',texto:r1.respuesta}];
+const r2 = await responderJuniorTarjeta(sb, '¿y de ese cuánto debe?', hist);
+console.log(`  → via_indice=${r2.via_indice} tarjetas=[${r2.tarjetas_usadas}] · "${r2.respuesta.slice(0,170)}"`);
+ok(r2.tarjetas_usadas.includes(162) || /cubides|saldo|debe|\$/i.test(r2.respuesta), 'resolvió "ese" → Cubides (saldo)');
+console.log(fallos===0?'\n✅ FOLLOW-UP OK':`\n❌ ${fallos} fallos`);

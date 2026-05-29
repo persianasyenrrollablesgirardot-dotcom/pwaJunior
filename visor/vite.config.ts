@@ -242,7 +242,7 @@ function juniorV2ApiPlugin(env: Record<string, string>): Plugin {
         try {
           const chunks: Buffer[] = [];
           for await (const c of req as any) chunks.push(c as Buffer);
-          const { pregunta } = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+          const { pregunta, historial } = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
           if (!pregunta || typeof pregunta !== 'string') { res.statusCode = 400; res.end(JSON.stringify({ error: 'falta pregunta' })); return; }
           // Las keys deben estar en process.env ANTES de importar los módulos (llm.ts las lee al cargar).
           process.env.DEEPSEEK_API_KEY = env.DEEPSEEK_API_KEY;
@@ -251,7 +251,8 @@ function juniorV2ApiPlugin(env: Record<string, string>): Plugin {
           const { createClient } = await import('@supabase/supabase-js');
           const sb = createClient(env.VITE_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
           const { responderJuniorTarjeta } = await import('../agentes/sintesis/junior_v2.js');
-          const r = await responderJuniorTarjeta(sb, pregunta);
+          const hist = Array.isArray(historial) ? historial.slice(-6) : [];
+          const r = await responderJuniorTarjeta(sb, pregunta, hist);
           res.setHeader('Content-Type', 'application/json');
           res.setHeader('Cache-Control', 'no-store');
           res.end(JSON.stringify(r));
