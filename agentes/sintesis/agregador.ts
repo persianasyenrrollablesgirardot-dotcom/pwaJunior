@@ -87,6 +87,8 @@ export async function redactarNarrativa(ins: Insumos): Promise<{ narrativa: stri
       `Te paso los HECHOS ya extraídos por los analistas sobre un cliente. NO inventes nada nuevo ni agregues datos que no estén abajo. ` +
       `Redactá SOLO un párrafo corto (máx 4 frases) de "estado general": en qué punto está el caso y de quién es la pelota (Jhon o el cliente). ` +
       `Si las notas de Jhon contradicen un hecho, las notas mandan.\n\n` +
+      `❌ PROHIBIDO editorializar la AUSENCIA de algo. NO escribas "no hay cotización registrada, lo que contradice…", "falta pago, sugiriendo…", ni interpretaciones tipo "esto indica que…". Un hecho ausente NO es una contradicción ni un problema por sí solo — un cambio simple, una garantía o un servicio operativo NUNCA requieren cotización/pago previo nuevo. Solo decí "no hay cotización" si es FÁCTICAMENTE relevante (cliente nuevo pidiendo precios), no como crítica.\n` +
+      `❌ PROHIBIDO redactar instrucciones para el siguiente agente o para Jhon ("Jhon debe confirmar X", "Jhon debe decidir Y", "es necesario verificar Z"). Vos describís el ESTADO ACTUAL, no decidís qué hacer — eso lo hacen los derivados (checklist, tareas, agenda).\n\n` +
       `CLIENTE: ${ins.nombre}\n\nHECHOS:\n${bloqueHechos}${bloqueNotas}`,
   }];
   const r = await deepseekChat({ messages, agente: 'AGREGADOR_V2', max_tokens: 320 });

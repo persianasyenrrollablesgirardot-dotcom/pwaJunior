@@ -34,13 +34,24 @@ async function llmJson(content: string, agente: string): Promise<{ obj: any; cos
   catch { return { obj: {}, costo: r.costo_usd }; }
 }
 
-/** CHECKLIST — ¿de quién es la pelota? + próximo paso. */
+/** CHECKLIST — ¿de quién es la pelota? + próximo paso concreto. */
 export async function derivarChecklist(t: Tarjeta): Promise<ResChecklist> {
   const { obj, costo } = await llmJson(
-    `Sos el agente CHECKLIST del Visor de Persianas Girardot. Leé la tarjeta y decidí de quién es la pelota.\n\n` +
+    `Sos el agente CHECKLIST del Visor de Persianas Girardot (Girardot, COP). Leé la tarjeta y decidí (a) de quién es la pelota y (b) cuál es el próximo paso CONCRETO.\n\n` +
     `${bloqueTarjeta(t)}\n\n` +
-    `Devolvé SOLO JSON: {"estado_conversacion": uno de ["cerrado","espera_jhon","espera_cliente","sin_responder"], "proximo_paso": "frase corta"}.\n` +
-    `Criterio: "espera_jhon" si el negocio/equipo debe mover algo · "espera_cliente" si esperamos respuesta del cliente · "sin_responder" si el cliente escribió y nadie contestó · "cerrado" si el caso terminó (vendido+instalado+pagado o cancelado).`,
+    `IDENTIFICÁ EL ESCENARIO antes de elegir próximo paso. Buscá señales positivas para clasificarlo:\n` +
+    `  · POST-VENTA / OPERATIVO (DEFAULT cuando hay agendamiento próximo): la tarjeta menciona "cambio", "cambiar", "mantenimiento", "garantía", "reparar", "ajustar", "visita técnica", "instalación de X" sin precio nuevo, o el cliente coordina logística (acceso, hora, persona presente). NO requiere cotización, medidas ni pago previo nuevo (la relación / venta ya existe en otro momento). proximo_paso = acción operativa concreta (ej. "Confirmar hora final con cliente y ejecutar instalación sábado 30/05").\n` +
+    `  · VENTA NUEVA (SOLO si hay señales explícitas de venta nueva): el cliente pide cotización, pregunta precios, discute productos a comprar, o claramente está en fase inicial sin haber comprado. proximo_paso = la próxima etapa concreta (cotizar / medir / pagar / fabricar / instalar).\n` +
+    `  · INSTALADOR / PROVEEDOR / COLABORADOR (tipo_contacto ≠ comercial o las notas lo dicen): coordinación operativa, NO flujo comercial.\n` +
+    `  · TERMINADO: vendido+instalado+pagado, cancelado, o Jhon dejó nota de cierre → "cerrado".\n\n` +
+    `Heurística clave: la ausencia de cotización/pago en la tarjeta NO implica venta nueva ni un pendiente — un cambio o servicio operativo NUNCA los requiere. Solo es venta nueva si VES explícitamente lenguaje de cotizar/comprar/precios/producto-nuevo.\n\n` +
+    `REGLAS DURAS:\n` +
+    `1. Las NOTAS DE JHON son VERDAD y mandan. Si dicen "ya está coordinado", "ya hablé y cerré", "es mi instalador", honralo y NO pidas confirmar lo que ya está decidido.\n` +
+    `2. ❌ "Si hay cotización/pago/medidas" NUNCA es una decisión pendiente. Es un HECHO observable de la tarjeta. NO escribas proximo_paso tipo "Jhon debe confirmar/decidir si hay cotización/pago/medidas" ni "Jhon debe confirmar si el servicio se ejecuta sin ellos" (ni reformulaciones equivalentes). Si el caso es operativo y ya está coordinado, no requerir cotización/pago previo NO es una pregunta — es un hecho normal. La narrativa puede editorializar ("contradice que esté avanzada"); IGNORÁ ese editorial y mirá los hechos: ¿hay fecha agendada? ¿hay nota de coordinación? → entonces se ejecuta, punto.\n` +
+    `3. Si hay agendamiento futuro y el caso es operativo (cambio/garantía/postventa/instalación), estado normal es espera_cliente (esperando la fecha) o espera_jhon SOLO si hay algo OPERATIVO por hacer antes (verificar hora puntual, confirmar acceso, asignar instalador, despachar materiales).\n` +
+    `4. proximo_paso debe ser ACCIONABLE y CONCRETO (verbo + objeto + cuándo si aplica), no filosófico ni pregunta abstracta. Ejemplos buenos: "Confirmar hora final con cliente y ejecutar instalación sábado 30/05", "Solicitar a William fecha concreta para el cambio en garantía", "Enviar cotización de 6 cortinas blackout". Ejemplos malos: "Decidir si proceder", "Confirmar si hay cotización", "Evaluar el caso".\n\n` +
+    `Estados: espera_jhon = el negocio debe mover algo accionable · espera_cliente = esperamos respuesta o fecha del cliente · sin_responder = el cliente escribió y nadie contestó · cerrado = terminó.\n\n` +
+    `Devolvé SOLO JSON: {"estado_conversacion": "cerrado|espera_jhon|espera_cliente|sin_responder", "proximo_paso": "frase corta y accionable"}.`,
     'DERIV_CHECKLIST');
   const estados: EstadoConv[] = ['cerrado', 'espera_jhon', 'espera_cliente', 'sin_responder'];
   const estado = estados.includes(obj.estado_conversacion) ? obj.estado_conversacion : 'espera_jhon';
