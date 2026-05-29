@@ -33,32 +33,40 @@ function limpiarTexto(s: string): string {
 export async function arreglarNombreSiFeo(
   sb: SupabaseClient, personaId: number,
 ): Promise<{ cambiado: boolean; nombre?: string; costo_usd: number }> {
-  const { data: p } = await sb.from('personas').select('nombre').eq('id', personaId).maybeSingle();
+  const { data: p } = await sb.from('personas').select('nombre, notas').eq('id', personaId).maybeSingle();
   if (!p || !esNombreFeo(p.nombre)) return { cambiado: false, costo_usd: 0 };
 
   const { data: proys } = await sb.from('proyectos').select('id').eq('persona_id', personaId);
   const proyIds = (proys ?? []).map((x: any) => x.id);
-  if (!proyIds.length) return { cambiado: false, costo_usd: 0 };
-  const { data: chats } = await sb.from('chats').select('id').in('proyecto_id', proyIds).is('deleted_at', null);
+  const { data: chats } = proyIds.length
+    ? await sb.from('chats').select('id').in('proyecto_id', proyIds).is('deleted_at', null)
+    : { data: [] as any[] };
   const chatIds = (chats ?? []).map((x: any) => x.id);
-  if (!chatIds.length) return { cambiado: false, costo_usd: 0 };
-  const { data: msgs } = await sb.from('mensajes')
-    .select('direccion, texto').in('chat_id', chatIds).is('deleted_at', null).not('texto', 'is', null)
-    .order('ts_canal').limit(30);
+  const { data: msgs } = chatIds.length
+    ? await sb.from('mensajes').select('direccion, texto').in('chat_id', chatIds).is('deleted_at', null).not('texto', 'is', null).order('ts_canal').limit(30)
+    : { data: [] as any[] };
   const conv = (msgs ?? [])
     .map((m: any) => ({ dir: m.direccion, t: limpiarTexto(m.texto) }))
     .filter((m: any) => m.t.length > 1)
     .map((m: any) => `${m.dir === 'saliente' ? 'NEGOCIO' : 'CONTACTO'}: ${m.t.slice(0, 160)}`).join('\n');
-  if (!conv.trim()) return { cambiado: false, costo_usd: 0 };
+
+  // Notas de Jhon (verdad) — suelen tener el nombre explícito ("es William, mi instalador").
+  const { data: nl } = await sb.from('notas_libres').select('contenido').eq('persona_id', personaId).is('deleted_at', null);
+  const notas = [p.notas, ...((nl ?? []).map((n: any) => n.contenido))]
+    .filter(Boolean).map((x: any) => limpiarTexto(String(x))).filter((x: string) => x.length > 1);
+  const bloqueNotas = notas.length ? `\n\nNOTAS DE JHON (VERDAD — si acá dicen el nombre del contacto, usá ESE): ${notas.join(' · ')}` : '';
+
+  if (!conv.trim() && !notas.length) return { cambiado: false, costo_usd: 0 };
 
   const messages: ChatMessage[] = [{
     role: 'user',
     content:
       `Conversación de WhatsApp de Persianas Girardot (Girardot, Colombia). El "NEGOCIO" es Persianas Girardot (Jhon, el dueño); el CONTACTO es la otra persona. Dame el MEJOR nombre para mostrar al CONTACTO:\n` +
-      `- Si el contacto dice su nombre real, usalo (ej. "Walter Estancia", "Doña Marta").\n` +
-      `- Si no aparece el nombre, una etiqueta corta y específica del contexto del contacto: qué pidió o su ubicación (ej. "Cliente Heliconias A10", "Cliente cortinas blackout", "Proveedor telas Melgar").\n` +
+      `- Si las NOTAS DE JHON dicen cómo se llama, usá ESE nombre (mandan sobre todo).\n` +
+      `- Si el contacto dice su nombre real en la conversación, usalo (ej. "Walter Estancia", "Doña Marta").\n` +
+      `- Si no aparece el nombre, una etiqueta corta y específica del contexto del contacto: qué pidió o su ubicación (ej. "Cliente Heliconias A10", "Proveedor telas Melgar").\n` +
       `- PROHIBIDO devolver: "NEGOCIO", "Jhon", "Cliente WhatsApp", "Contacto sin nombre", "Cliente" o "Contacto" a secas, el status de WhatsApp, o solo el número.\n` +
-      `Devolvé SOLO JSON: {"nombre": "..."} (máx 40 caracteres, en español).\n\nCONVERSACIÓN:\n${conv}`,
+      `Devolvé SOLO JSON: {"nombre": "..."} (máx 40 caracteres, en español).\n\nCONVERSACIÓN:\n${conv || '(sin mensajes con texto)'}${bloqueNotas}`,
   }];
   const r = await deepseekChat({ messages, agente: 'NOMBRE_REAL', max_tokens: 60, response_format: { type: 'json_object' } });
   let nombre = '';
