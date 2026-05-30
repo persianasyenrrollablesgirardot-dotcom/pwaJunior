@@ -167,7 +167,23 @@ export async function responderJuniorTarjeta(
     {
       role: 'system',
       content:
-        `Sos el RUTEO de Junior, asistente de Jhon (Persianas Girardot, COP). Tenés la CONVERSACIÓN PREVIA y el ÍNDICE ` +
+        `Sos el RUTEO de Junior, asistente de Jhon (Persianas Girardot, COP).\n` +
+        `\n` +
+        `═══ EL ÍNDICE ES SUPERFICIAL — NO MIENTAS A PARTIR DE ÉL ═══\n` +
+        `El ÍNDICE que ves abajo es UNA LÍNEA por tarjeta: nombre, teléfono, tipo, estado, próximo paso. NADA más. ` +
+        `NO tenés la narrativa, NO tenés las notas, NO tenés el historial de la conversación, NO tenés la cotización ni los pagos. ` +
+        `Esos datos viven en la TARJETA PROCESADA — para acceder los tenés que cargar chat_ids (puede_responder_con_indice=false). ` +
+        `PROHIBIDO responder "no hay registro de X" / "no hay conversación con X" / "no tengo info de X" usando SOLO el índice. ` +
+        `Si la persona aparece en el índice, su tarjeta procesada existe — cargala. Caso reportado: "dame resumen de Lorena" → respondiste "sin conversación" basándote en el índice, cuando su tarjeta TIENE narrativa completa. ESO ES MENTIRA.\n` +
+        `\n` +
+        `═══ QUERIES DE LECTURA → SIEMPRE cargar tarjeta(s), NUNCA índice ═══\n` +
+        `Si la query incluye verbos de LECTURA — "resumen", "leeme", "contame de", "dame info de", "qué pasa con", "qué dice la tarjeta de", ` +
+        `"cómo va", "dame contexto", "dame historial", "buscame info de", "qué sabés de", "dame detalles", "leé la tarjeta", "abrime", ` +
+        `"mostrame", "dame todo lo de" — Y menciona un CONTACTO específico (nombre o teléfono): ` +
+        `OBLIGATORIO devolvé puede_responder_con_indice=false + chat_ids=[esa_tarjeta]. Sin excepciones. El paso 2 carga la tarjeta y responde con la narrativa.\n` +
+        `Si la query es "leeme las tarjetas" / "puedes leer las tarjetas" SIN nombre específico → cargá los 5 chat_ids más relevantes (estado=espera_jhon o con tareas activas) y respondé con resumen estratégico. NO listes el índice plano — eso es lo opuesto a "leer".\n` +
+        `\n` +
+        `Tenés la CONVERSACIÓN PREVIA y el ÍNDICE ` +
         `de tarjetas (una por chat, con nombre, TELÉFONO, tipo, estado y próximo paso). Resolvé referencias de la pregunta usando ` +
         `la conversación previa ("ese", "él", "el anterior", "ese cliente" → el cliente del que se venía hablando).\n` +
         `Cuando armes una respuesta_directa que LISTE varios contactos (pendientes, agenda, "te toca", etc), incluí el TELÉFONO entre paréntesis al lado del nombre cuando esté disponible — formato: "Nombre (+57XXX…)". Si no hay tel en el índice, omitilo silencioso.\n` +
@@ -582,6 +598,49 @@ export async function responderJuniorTarjeta(
     plan.puede_responder_con_indice = false;
     plan.respuesta_directa = null;
     plan.chat_ids = [];
+  }
+
+  // ── GUARD DE LECTURA: forzar carga de tarjeta procesada ───────────────────
+  // Caso reportado: "dame resumen de Lorena mi ex" → el LLM eligió responder con
+  // el índice ("sin conversación comercial") sin cargar la tarjeta — MENTIRA, la
+  // narrativa existía. El LLM tiene sesgo natural a usar el índice (más barato).
+  // Detectamos verbos de LECTURA + nombre conocido y forzamos chat_ids para que
+  // el paso 2 cargue la tarjeta y responda con la narrativa real.
+  const lexicoLectura = /\b(res[uú]men|le[eé]me|le[eé]r|contame|cont[áa]me|dame\s+(info|contexto|historial|detalles|todo)|qu[eé]\s+(pasa|sabes|sab[eé]s|hay|dice\s+la\s+tarjeta)|c[oó]mo\s+(va|est[aá])|busca[mn]e\s+info|abr[ií]me|mostr[áa]me|dame\s+todo\s+lo\s+de|info\s+de|datos\s+de|historia\s+de|conversaci[oó]n\s+con)\b/i.test(pregunta);
+  if (lexicoLectura && !queryEsPedidoExplicitoDeLista) {
+    // Caso A: hay teléfono → ya el match-por-teléfono más abajo lo resuelve.
+    // Caso B: hay nombre conocido → forzar esa tarjeta.
+    // Caso C: "leeme las tarjetas" sin nombre → cargar 5 más relevantes.
+    if (tieneTelefono) {
+      // El bloque chatIdsByPhone más abajo se encarga; acá solo aseguramos
+      // que no caigamos en respuesta_directa basura.
+      plan.puede_responder_con_indice = false;
+      plan.respuesta_directa = null;
+    } else if (mencionaContactoConocido) {
+      // Encontrar la tarjeta cuyo nombre matchea mejor a la query.
+      const palabrasMin4 = palabrasPregunta;
+      const matches = indice
+        .map(f => {
+          const nombreLow = f.nombre.toLowerCase();
+          const score = palabrasMin4.filter(p => nombreLow.includes(p)).length;
+          return { f, score };
+        })
+        .filter(x => x.score > 0)
+        .sort((a, b) => b.score - a.score);
+      if (matches.length) {
+        plan.puede_responder_con_indice = false;
+        plan.respuesta_directa = null;
+        plan.chat_ids = matches.slice(0, 3).map(m => m.f.chat_id);
+      }
+    } else {
+      // "leeme las tarjetas" / "puedes leer las tarjetas" sin nombre → cargar
+      // las 5 con estado activo (espera_jhon o sin_responder).
+      plan.puede_responder_con_indice = false;
+      plan.respuesta_directa = null;
+      plan.chat_ids = indice
+        .filter(f => f.estado === 'espera_jhon' || f.estado === 'sin_responder')
+        .slice(0, 5).map(f => f.chat_id);
+    }
   }
   // Sub-clasificación: dentro del pedido de lista, ¿pidió SOLO tareas, SOLO
   // agenda, o ambos? Si dice "tareas" sin "agenda" → solo TE TOCA. Si dice
