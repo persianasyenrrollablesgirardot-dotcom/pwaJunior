@@ -64,17 +64,48 @@ async function cargarDetalle(sb: SupabaseClient, chatIds: number[]): Promise<str
       continue;
     }
     const { data: ck } = await sb.from('tarjeta_checklist').select('estado_conversacion, proximo_paso').eq('chat_id', id).maybeSingle();
-    const { data: tar } = await sb.from('tarjeta_tarea').select('titulo, prioridad').eq('chat_id', id).order('prioridad');
-    const { data: ag } = await sb.from('tarjeta_agenda').select('titulo, cuando, lugar').eq('chat_id', id);
+    // Tareas: leer tareas V1 (la tabla que muestra el panel) Y las del agente
+    // V2 (tarjeta_tarea). Antes solo leía V2 — no veía las que Junior crea ni
+    // las que el agente M5 deriva como tareas comerciales.
+    const { data: tarV1 } = tt.persona_id
+      ? await sb.from('tareas').select('titulo').eq('persona_id', tt.persona_id)
+          .is('deleted_at', null).eq('completada', false).eq('shadow', false)
+      : { data: [] };
+    const { data: tarV2 } = await sb.from('tarjeta_tarea').select('titulo, prioridad').eq('chat_id', id).order('prioridad');
+    // Agenda: la fuente canónica es `agendamientos` por persona_id (lo que ve
+    // el panel UI, lo que crea el detector_citas). Antes leía tarjeta_agenda
+    // (derivado V2 que solo se llena con derivarAgenda → ignoraba citas
+    // detectadas por detector_citas y manuales). Caso reportado: cita con
+    // Lorena 31/05 10am existía en `agendamientos` pero NO en tarjeta_agenda.
+    const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const { data: ag } = tt.persona_id
+      ? await sb.from('agendamientos')
+          .select('titulo, fecha, hora_inicio, direccion').eq('persona_id', tt.persona_id)
+          .is('deleted_at', null).gte('fecha', hoy)
+          .order('fecha').order('hora_inicio').limit(20)
+      : { data: [] };
     const ctx = (tt.contexto ?? []).map((c: any) => `  [${c.titulo}] ${c.sintesis}`).join('\n');
+    // Unificar tareas V1 + V2 sin duplicar por título.
+    const titulosVistos = new Set<string>();
+    const tareasUnif: string[] = [];
+    for (const x of [...(tarV2 ?? []), ...(tarV1 ?? [])] as any[]) {
+      const k = String(x.titulo).toLowerCase().trim();
+      if (titulosVistos.has(k)) continue;
+      titulosVistos.add(k); tareasUnif.push(String(x.titulo));
+    }
+    const agendaStr = (ag ?? []).map((x: any) => {
+      const cuando = `${x.fecha}${x.hora_inicio ? ' ' + String(x.hora_inicio).slice(0, 5) : ''}`;
+      const lugar = x.direccion ? ` @ ${x.direccion}` : '';
+      return `${x.titulo} (${cuando}${lugar})`;
+    }).join(' · ') || '(nada agendado en próximos 20 eventos)';
     bloques.push(
       `### ${tt.personas?.nombre ?? `Chat #${id}`} (chat ${id}, ${tt.tipo_contacto})\n` +
       (contacto ? `CONTACTO: ${contacto}\n` : '') +
       `ESTADO GENERAL: ${tt.narrativa ?? '(sin narrativa)'}\n` +
       (tt.notas?.length ? `NOTAS DE JHON (verdad): ${tt.notas.join(' · ')}\n` : '') +
       `CHECKLIST: ${ck?.estado_conversacion ?? '?'} → ${ck?.proximo_paso ?? '-'}\n` +
-      `TAREAS: ${(tar ?? []).map((x: any) => x.titulo).join(' · ') || '(ninguna)'}\n` +
-      `AGENDA: ${(ag ?? []).map((x: any) => `${x.titulo} (${x.cuando})`).join(' · ') || '(nada)'}\n` +
+      `TAREAS: ${tareasUnif.join(' · ') || '(ninguna)'}\n` +
+      `AGENDA: ${agendaStr}\n` +
       `CONTEXTO POR MÓDULO:\n${ctx || '  (sin detalle)'}`
     );
   }
@@ -932,6 +963,10 @@ export async function responderJuniorTarjeta(
         `3. Si Jhon afirma algo que la tarjeta NO muestra, decilo claro: "la tarjeta no lo refleja todavía (puede estar actualizándose)" — ` +
         `NO inventes el dato para coincidir con él.\n` +
         `4. Las NOTAS DE JHON (verdad) mandan sobre los hechos de los agentes.\n` +
+        `4b. La AGENDA que ves en cada tarjeta SON las citas DE ESE CONTACTO — la query las filtró por persona_id antes de pasártelas. ` +
+        `Si la sección AGENDA de la tarjeta de X dice "Encuentro con cliente (2026-05-31 10:00)", eso ES una cita CON X, aunque el título ` +
+        `sea genérico. NUNCA digas "esa cita no está vinculada a esta persona" cuando aparece bajo su sección AGENDA — sí lo está, ` +
+        `por construcción de la query. Caso reportado: respondiste "no tenés cita con Lorena" cuando su tarjeta SÍ mostraba la cita en AGENDA.\n` +
         `5. ⚠ ACCIONES — sos READ-ONLY en este paso. NO podés cerrar, marcar, ajustar, cambiar estado, actualizar checklist, ni nada ` +
         `parecido desde acá. PROHIBIDO escribir frases que afirmen una acción hecha: "voy a actualizar", "ya cerré", "marqué", ` +
         `"ya quedó reflejado", "actualicé la tarjeta", "lo guardé", "completé". Las ÚNICAS escrituras que el sistema acepta son ` +

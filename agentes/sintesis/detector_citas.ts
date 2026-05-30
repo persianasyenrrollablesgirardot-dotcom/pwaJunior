@@ -45,6 +45,12 @@ export async function detectarCitasUniversales(
     citas_detectadas: 0, citas_insertadas: 0, citas_saltadas_por_dedup: 0, llm_costo_usd: 0,
   };
 
+  // 0. Nombre del contacto (para que el LLM redacte títulos descriptivos en
+  //    lugar de "Encuentro con cliente" genérico — caso reportado: Lorena Morales
+  //    quedó con título "Encuentro con cliente" cuando es la expareja, no clienta).
+  const { data: pers } = await sb.from('personas').select('nombre').eq('id', personaId).maybeSingle();
+  const nombreContacto = pers?.nombre ?? 'contacto';
+
   // 1. Cargar últimos 25 mensajes con texto del chat (últimos 7 días).
   const hace7d = new Date(Date.now() - 7 * 86400_000).toISOString();
   const { data: msgs } = await sb.from('mensajes')
@@ -67,8 +73,8 @@ export async function detectarCitasUniversales(
     {
       role: 'system',
       content:
-        `Sos el DETECTOR DE CITAS del Visor PG. Tu único trabajo: leer una conversación y extraer agendamientos concretos ` +
-        `(visitas, reuniones, encuentros, llamadas con hora) que estén CONFIRMADOS o ACORDADOS. NO inventes citas.\n` +
+        `Sos el DETECTOR DE CITAS del Visor PG. Tu único trabajo: leer una conversación entre Jhon y ${nombreContacto} y extraer ` +
+        `agendamientos concretos (visitas, reuniones, encuentros, llamadas con hora) que estén CONFIRMADOS o ACORDADOS. NO inventes citas.\n` +
         `HOY es ${hoy} (zona America/Bogota). Resolvé fechas relativas contra HOY:\n` +
         `  • "mañana" → ${new Date(Date.now() + 86400_000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })}\n` +
         `  • "pasado mañana" → ${new Date(Date.now() + 2 * 86400_000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })}\n` +
@@ -76,8 +82,14 @@ export async function detectarCitasUniversales(
         `Una cita está CONFIRMADA si: una parte la propone Y la otra confirma ("ok", "dale", "perfecto", "confirmado", "listo", emoji 👍, etc) ` +
         `O Jhon mismo dice "agendá X" / "anotame X". Si solo hubo propuesta sin confirmación, NO la incluyas.\n` +
         `Tipo de cita: instalacion, visita_medidas, reunion_proveedor, personal (encuentros personales/familia), otro.\n` +
+        `\n` +
+        `⚠ TÍTULO DESCRIPTIVO Y ESPECÍFICO — NO genérico:\n` +
+        `Mal: "Encuentro con cliente", "Cita", "Reunión", "Visita programada".\n` +
+        `Bien: "Encuentro con ${nombreContacto}", "Instalación cortinas en casa de ${nombreContacto}", "${nombreContacto} viene al local", ` +
+        `"Visita técnica medidas ${nombreContacto}". USÁ el nombre real del contacto en el título — la cita será visible para Jhon y ` +
+        `debe poder identificar a quién se refiere de un vistazo.\n` +
         `Si NO hay citas claras, devolvé citas:[].\n` +
-        `Devolvé SOLO JSON: {"citas": [{"titulo": "qué (≤80 chars)", "fecha": "YYYY-MM-DD", "hora": "HH:MM (24h)", "tipo": "personal|otro|...", "lugar": "si lo hay"}]}`,
+        `Devolvé SOLO JSON: {"citas": [{"titulo": "qué (≤80 chars, INCLUÍ '${nombreContacto}')", "fecha": "YYYY-MM-DD", "hora": "HH:MM (24h)", "tipo": "personal|otro|...", "lugar": "si lo hay"}]}`,
     },
     { role: 'user', content: `CONVERSACIÓN (últimos mensajes, orden cronológico):\n${conversacion}` },
   ];
