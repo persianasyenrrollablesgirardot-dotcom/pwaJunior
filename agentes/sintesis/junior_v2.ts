@@ -131,8 +131,15 @@ export async function responderJuniorTarjeta(
         `Si "actualizar" se refiere a las tarjetas: aclaramos que se actualizan solas con info nueva, y mostramos el estado actual. ` +
         `En respuesta_directa NUNCA inventes datos (horas/montos/fechas) que no estén en el índice; si Jhon insiste con algo que no ves, no se lo confirmes inventando.\n` +
         `- Si Jhon te da una INSTRUCCIÓN para recordar/anotar algo sobre un contacto ("este es mi instalador William", "anotá que X", ` +
-        `"recordá que Y", "tené en cuenta que Z") → devolvé nota={"chat_id": <chat del contacto del índice>, "texto": "<la instrucción ` +
+        `"recordá que Y", "tené en cuenta que Z", "crea una tarea para X") → devolvé nota={"chat_id": <chat del contacto del índice>, "texto": "<la instrucción ` +
         `redactada como nota>"}. Identificá el contacto por nombre/teléfono/contexto previo. Es para GUARDAR, no una pregunta.\n` +
+        `   ⚠ REGLA ANTI-ASUMIR: si el contacto se describe por un FRAGMENTO ambiguo (apellido común, nombre de CONJUNTO/edificio/calle, ` +
+        `referencia geográfica como "la del peñón", "el del cortijo", "señora de Madeira"), NO crees la nota a la primera tarjeta que ` +
+        `matchee. Frases tipo "señora/señor/cliente DE <Lugar>" casi siempre refieren al LUGAR (conjunto residencial donde vive el cliente) ` +
+        `y no a un apellido — y puede haber varios clientes en ese lugar. En esos casos: devolvé puede_responder_con_indice=true + ` +
+        `respuesta_directa pidiendo aclaración ("¿te referís a Constanza Madeiras (+573108377932), o a otra clienta del conjunto Madeira? ` +
+        `Pasame el nombre o el teléfono y la creo"). NO crees nota=null hasta que Jhon confirme. Mejor preguntar que asumir y crearla en ` +
+        `el contacto equivocado — caso reportado: nota terminó en la tarjeta de Constanza cuando era otra persona del mismo conjunto.\n` +
         `- Si Jhon dice CÓMO SE LLAMA un contacto ("se llama Germán", "es Germán el socio", "este es William") → devolvé ` +
         `nuevo_nombre={"chat_id": <chat del contacto>, "nombre": "<el nombre, ej. 'Germán (socio)'>"} para actualizar el nombre de la tarjeta. ` +
         `Puede ir JUNTO con nota (la instrucción) en el mismo mensaje.\n` +
@@ -156,8 +163,41 @@ export async function responderJuniorTarjeta(
   // verdad, sólo después de guardar. Las dos pueden venir en el mismo mensaje.
   const accNombre = plan.nuevo_nombre && typeof plan.nuevo_nombre.chat_id === 'number'
     && typeof plan.nuevo_nombre.nombre === 'string' && plan.nuevo_nombre.nombre.trim() ? plan.nuevo_nombre : null;
-  const accNota = plan.nota && typeof plan.nota.chat_id === 'number'
+  let accNota = plan.nota && typeof plan.nota.chat_id === 'number'
     && typeof plan.nota.texto === 'string' && plan.nota.texto.trim() ? plan.nota : null;
+
+  // Guard determinístico ANTI-ASUMIR: si Jhon describe al contacto con un
+  // patrón ambiguo ("señor/señora/cliente DE <Lugar>", "del conjunto X",
+  // "de la calle Y"), bloqueamos la creación de nota y pedimos aclaración. El
+  // LLM ignora la regla en el system prompt cuando hay un match obvio — el
+  // guard determinístico es el último filtro. Caso reportado: "señora de
+  // Madeira" → la nota terminaba en Constanza Madeiras cuando era OTRA persona
+  // del mismo conjunto residencial llamado Madeira.
+  if (accNota) {
+    // Patrón "señor/señora/cliente/don/doña DE <Lugar-o-fragmento>". El "DE" es
+    // la señal — indica relación con un LUGAR (conjunto residencial, calle), no
+    // un apellido. Aunque haya 1 sola tarjeta que matchee el fragmento, igual
+    // preguntamos: el caso real fue "señora DE Madeira" → Constanza Madeiras
+    // matcheaba, pero el target era OTRA clienta del mismo conjunto Madeira.
+    const matchAmbiguo = pregunta.match(/\b(?:se(?:ñ|n)or[a]?|cliente[a]?s?|don|do(?:ñ|n)a)\s+de(?:l|\s+la|\s+los|\s+las|\s+conjunto|\s+edificio|\s+calle|\s+carrera|\s+avenida|\s+barrio)?\s+([A-Za-zÁÉÍÓÚÑáéíóúñ][\wÁÉÍÓÚÑáéíóúñ'·-]+)/i);
+    if (matchAmbiguo) {
+      const fragmento = matchAmbiguo[1].trim();
+      // Listar todos los candidatos cuyo nombre o próximo_paso contiene el
+      // fragmento — Jhon puede elegir o confirmar que es otra persona.
+      const candidatos = indice.filter(f =>
+        f.nombre.toLowerCase().includes(fragmento.toLowerCase()) ||
+        (f.proximo ?? '').toLowerCase().includes(fragmento.toLowerCase())
+      );
+      const lista = candidatos.slice(0, 4).map(c => `${c.nombre}${c.tel ? ` (${c.tel})` : ''}`).join(', ');
+      const sugerencia = candidatos.length
+        ? `Posibles: ${lista}. ¿Es alguno de esos o es otra persona del mismo lugar?`
+        : `No encontré a nadie llamado "${fragmento}" — puede que sea un lugar y la persona tenga otro nombre.`;
+      accNota = null;
+      plan.respuesta_directa = `Antes de crearla quiero confirmar: cuando decís "${fragmento}", ¿quién es exactamente? ${sugerencia} Pasame el nombre completo o el teléfono y la creo en la tarjeta correcta.`;
+      plan.puede_responder_con_indice = true;
+      plan.chat_ids = [];
+    }
+  }
   if (accNombre || accNota) {
     const chatId = (accNombre?.chat_id ?? accNota?.chat_id) as number;
     let personaId: number | null = null;
@@ -247,6 +287,12 @@ export async function responderJuniorTarjeta(
   // pregunta "por qué me das todo" / "que te pasa" y Junior vuelve a listar.
   const ultimoJunior = [...historial].reverse().find(h => h.rol === 'junior')?.texto ?? '';
   const ultimoFueListado = ultimoJunior.startsWith('📅 AGENDA próxima') || ultimoJunior.startsWith('✅ TE TOCA');
+  // Detectar si el último turno de Junior fue una ACCIÓN (creó/actualizó nota o
+  // nombre). Caso reportado: Jhon dice "es otra señora del conjunto Madeira" tras
+  // una nota mal asignada → Junior contestó con AGENDA completa en vez de pedir
+  // aclaración. Frases de confirmación: "Listo, en la tarjeta de X: anoté/actualicé".
+  const ultimoFueAccion = /^Listo,?\s+en\s+la\s+tarjeta\s+de\b/i.test(ultimoJunior)
+    || /\b(anot[eé]|actualic[eé]|guard[eé])\b.*tarjeta/i.test(ultimoJunior);
   if (ultimoFueListado && !queryEsPedidoExplicitoDeLista &&
       !plan.respuesta_directa && (!Array.isArray(plan.chat_ids) || plan.chat_ids.length === 0)) {
     // Construir 5 chat_ids más relevantes (espera_jhon o sin_responder) para que el
@@ -254,6 +300,21 @@ export async function responderJuniorTarjeta(
     plan.chat_ids = indice
       .filter(f => f.estado === 'espera_jhon' || f.estado === 'sin_responder')
       .slice(0, 5).map(f => f.chat_id);
+  }
+  // Si el último fue una acción y Jhon está aclarando/corrigiendo ("es otra
+  // señora", "no, era X", "te equivocaste"), NO disparar el fallback de listado.
+  // Forzamos respuesta conversacional cargando la tarjeta donde se hizo la acción.
+  if (ultimoFueAccion && !queryEsPedidoExplicitoDeLista &&
+      !plan.respuesta_directa && (!Array.isArray(plan.chat_ids) || plan.chat_ids.length === 0)) {
+    // Extraer el nombre del contacto del mensaje de confirmación: "Listo, en la
+    // tarjeta de <NOMBRE>: ...". Match laxo.
+    const m = ultimoJunior.match(/tarjeta\s+de\s+([^:]+?):/i);
+    const nombreAccionado = m ? m[1].trim() : null;
+    const tarjetaAccion = nombreAccionado
+      ? indice.find(f => f.nombre.toLowerCase().includes(nombreAccionado.toLowerCase().split(/\s+/)[0]))
+      : null;
+    if (tarjetaAccion) plan.chat_ids = [tarjetaAccion.chat_id];
+    else plan.chat_ids = indice.filter(f => f.estado === 'espera_jhon').slice(0, 3).map(f => f.chat_id);
   }
 
   // ── Paso 2: cargar solo las tarjetas relevantes y responder ─────────────
