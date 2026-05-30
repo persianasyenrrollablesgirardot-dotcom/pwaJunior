@@ -112,8 +112,10 @@ export async function responderJuniorTarjeta(
       role: 'system',
       content:
         `Sos el RUTEO de Junior, asistente de Jhon (Persianas Girardot, COP). Tenés la CONVERSACIÓN PREVIA y el ÍNDICE ` +
-        `de tarjetas (una por chat, con nombre, tipo, estado y próximo paso). Resolvé referencias de la pregunta usando ` +
-        `la conversación previa ("ese", "él", "el anterior", "ese cliente" → el cliente del que se venía hablando). Decidí:\n` +
+        `de tarjetas (una por chat, con nombre, TELÉFONO, tipo, estado y próximo paso). Resolvé referencias de la pregunta usando ` +
+        `la conversación previa ("ese", "él", "el anterior", "ese cliente" → el cliente del que se venía hablando).\n` +
+        `Cuando armes una respuesta_directa que LISTE varios contactos (pendientes, agenda, "te toca", etc), incluí el TELÉFONO entre paréntesis al lado del nombre cuando esté disponible — formato: "Nombre (+57XXX…)". Si no hay tel en el índice, omitilo silencioso.\n` +
+        `Decidí:\n` +
         `- Si se responde con el índice (ej. "¿quién espera mi respuesta?") → puede_responder_con_indice=true + respuesta_directa.\n` +
         `- Si Jhon pide algo AMPLIO u OPERATIVO sin nombrar un cliente ("organizá", "qué hago hoy", "qué tengo pendiente", ` +
         `"dame los pendientes", "lista de tareas", "actualizá", "guiame", "ordená esto", "guiate por el checklist") → ` +
@@ -231,7 +233,7 @@ export async function responderJuniorTarjeta(
     const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
     const en7 = new Date(Date.now() + 7 * 86400_000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
     const { data: ags } = await sb.from('agendamientos')
-      .select('titulo, tipo, fecha, hora_inicio, persona_id, personas(nombre, deleted_at)')
+      .select('titulo, tipo, fecha, hora_inicio, persona_id, personas(nombre, telefono_e164, deleted_at)')
       .gte('fecha', hoy).lte('fecha', en7).order('fecha').order('hora_inicio').limit(60);
     // Set de personas con tarjeta cerrada o no-cliente → filtrar sus agendamientos.
     // Esto cierra el círculo: cuando Jhon dice "cerralo" a Junior, el checklist
@@ -263,8 +265,11 @@ export async function responderJuniorTarjeta(
       if (vistos.has(k)) continue;
       vistos.add(k); dedup.push(a);
     }
+    // Helper: tel entre paréntesis si existe (solo nro, sin texto extra).
+    const conTel = (nombre: string | undefined, tel: string | undefined | null) =>
+      `${nombre ?? '?'}${tel ? ` (${tel})` : ''}`;
     const agendaTxt = dedup.length
-      ? dedup.slice(0, 12).map((a: any) => `• ${a.fecha}${a.hora_inicio ? ' ' + String(a.hora_inicio).slice(0,5) : ''} — ${a.personas?.nombre ?? '?'}: ${a.titulo}`).join('\n')
+      ? dedup.slice(0, 12).map((a: any) => `• ${a.fecha}${a.hora_inicio ? ' ' + String(a.hora_inicio).slice(0,5) : ''} — ${conTel(a.personas?.nombre, a.personas?.telefono_e164)}: ${a.titulo}`).join('\n')
       : null;
 
     if (!teToca.length && !agendaTxt) {
@@ -274,7 +279,7 @@ export async function responderJuniorTarjeta(
     const partes: string[] = [];
     if (agendaTxt) partes.push(`📅 AGENDA próxima (7 días):\n${agendaTxt}`);
     if (teToca.length) {
-      const lista = teToca.slice(0, 25).map(f => `• ${f.nombre}${f.proximo ? ` — ${f.proximo}` : ''}`).join('\n');
+      const lista = teToca.slice(0, 25).map(f => `• ${conTel(f.nombre, f.tel)}${f.proximo ? ` — ${f.proximo}` : ''}`).join('\n');
       const extra = teToca.length > 25 ? `\n…y ${teToca.length - 25} más` : '';
       partes.push(`✅ TE TOCA (acciones concretas):\n${lista}${extra}`);
     }
