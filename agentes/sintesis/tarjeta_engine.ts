@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import { leerInsumosTarjeta, redactarNarrativa, type Tarjeta } from './agregador.js';
 import { derivarChecklist, derivarTareas, derivarAgenda } from './derivados.js';
 import { arreglarNombreSiFeo } from './nombres.js';
+import { detectarCitasUniversales } from './detector_citas.js';
 
 export interface ResultadoReconstruir {
   chat_id: number;
@@ -172,10 +173,18 @@ export async function reconstruirTarjeta(
     })) as any);
   }
 
+  // Detector universal de citas: corre DESPUÉS de derivarAgenda para capturar
+  // citas que los agentes M1-M7 ignoran (chats personal_familia, eventos no
+  // comerciales). Tiene su propio dedup vs lo ya agendado — nunca pisa lo del
+  // agente_v2 ni manual_edit. Caso reportado: Lorena "nos vemos mañana 10am"
+  // que derivarAgenda no capturó porque la narrativa decía "pausa comercial".
+  const detCitas = await detectarCitasUniversales(sb, chatId, personaId);
+
   return {
     chat_id: chatId, persona_id: personaId, cambio: true, hash: inputHash,
-    estado_conversacion: chk.estado_conversacion, n_tareas: tar.tareas.length, n_agenda: age.agendamientos.length,
-    costo_usd: t.costo_usd + chk.costo_usd + tar.costo_usd + age.costo_usd,
+    estado_conversacion: chk.estado_conversacion, n_tareas: tar.tareas.length,
+    n_agenda: age.agendamientos.length + detCitas.citas_insertadas,
+    costo_usd: t.costo_usd + chk.costo_usd + tar.costo_usd + age.costo_usd + detCitas.llm_costo_usd,
   };
 }
 
