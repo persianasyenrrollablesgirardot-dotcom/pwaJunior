@@ -126,7 +126,10 @@ export async function responderJuniorTarjeta(
         `Para esas: puede_responder_con_indice=true y armá vos la respuesta_directa filtrando del índice por esa fecha.\n` +
         `   ❌ SI el ÚLTIMO turno de Junior en la conversación previa fue un listado completo (empieza con "📅 AGENDA próxima"), ` +
         `NO vuelvas a tirar listado salvo que Jhon lo pida explícitamente otra vez. Si pregunta algo conexo, respondé conversacional.\n` +
-        `- Si es sobre cliente(s) específico(s) → puede_responder_con_indice=false y listá los chat_ids relevantes (máx 5).\n` +
+        `- Si es sobre cliente(s) específico(s) → puede_responder_con_indice=false y listá los chat_ids relevantes (máx 5). ` +
+        `⚠ CRÍTICO: si la pregunta MENCIONA un nombre o teléfono (aunque también diga "tareas/pendientes"), es ESPECÍFICA, NO genérica. ` +
+        `Ej: "dame las tareas de Constanza Madeiras (+573108377932)" → cargá SOLO esa tarjeta, NO devuelvas chat_ids=[]. ` +
+        `"qué pasa con Pedro" → cargá la tarjeta de Pedro. NO conviertas queries con nombre en listados completos.\n` +
         `NUNCA digas que "no hay tarjetas seleccionadas" ni pidas que Jhon "seleccione" — no existe seleccionar, SIEMPRE tenés el índice. ` +
         `Si "actualizar" se refiere a las tarjetas: aclaramos que se actualizan solas con info nueva, y mostramos el estado actual. ` +
         `En respuesta_directa NUNCA inventes datos (horas/montos/fechas) que no estén en el índice; si Jhon insiste con algo que no ves, no se lo confirmes inventando.\n` +
@@ -313,12 +316,25 @@ export async function responderJuniorTarjeta(
     plan.respuesta_directa = null;
   }
 
-  // Bypass determinístico para pedidos explícitos de lista. El LLM del ruteo a
-  // veces no los detecta como "amplio" e improvisa una respuesta truncada (vi
-  // "Dame tareas pendientes" → solo 5 items). Si la pregunta matchea claramente
-  // un pedido de lista completa, IGNORAMOS lo que dijo el LLM y vamos al
-  // fallback determinístico que arma TODA la lista.
-  const queryEsPedidoExplicitoDeLista = /\b(dame.*(pendientes|tareas|agenda|lista)|qu[eé]\s+tengo\s+(pendiente|hoy|que\s+hacer)|tareas?\s+pendientes|lista\s+de\s+(tareas|pendientes)|pendientes(\s+actualizados?)?|s[oó]lo\s+(las\s+|los\s+)?(tareas|pendientes|agenda)|organiz[aá]\s+mi|gu[ií]ate\s+por\s+el\s+checklist|dame\s+(la\s+)?agenda|agenda\s+(pr[oó]xima|completa))\b/i.test(pregunta);
+  // Bypass MÍNIMO: solo se dispara cuando la query es GENÉRICA — sin nombre de
+  // contacto y sin teléfono. Antes era agresivo y agarraba cosas como "dame las
+  // tareas de Constanza (+573108377932)" forzando listado completo, ignorando a
+  // Constanza. Ahora confiamos en el LLM para queries específicas; solo
+  // intervenimos cuando claramente no hay forma de saber qué contacto cargar.
+  //
+  // Condiciones para disparar bypass:
+  //   1) NO hay teléfono en la pregunta (sin +57XXX ni 10 dígitos sueltos).
+  //   2) NO hay match obvio con el nombre de algún contacto del índice (≥3 chars).
+  //   3) La pregunta usa léxico de "lista completa" muy explícito.
+  const tieneTelefono = /\+?\d{10,15}/.test(pregunta);
+  const palabrasPregunta = pregunta.toLowerCase().split(/[\s,.;:!?¿¡()]+/).filter(p => p.length >= 4);
+  const mencionaContactoConocido = indice.some(f => {
+    const nombre = f.nombre.toLowerCase();
+    // Match si alguna palabra de la pregunta (≥4 chars) está contenida en el nombre.
+    return palabrasPregunta.some(p => nombre.includes(p));
+  });
+  const lexicoListaCompleta = /\b(dame\s+(todos?\s+(los\s+|las\s+)?|las\s+|los\s+)?(tareas|pendientes|agenda|lista)|qu[eé]\s+tengo\s+(pendiente|hoy|para\s+hacer)|tareas?\s+pendientes|lista\s+(completa\s+)?de\s+(tareas|pendientes)|todos?\s+(los\s+|las\s+)?(pendientes|tareas)|organiz[aá]\s+mi|gu[ií]ate\s+por\s+el\s+checklist|dame\s+(la\s+)?agenda|agenda\s+(pr[oó]xima|completa|de\s+la\s+semana))\b/i.test(pregunta);
+  const queryEsPedidoExplicitoDeLista = lexicoListaCompleta && !tieneTelefono && !mencionaContactoConocido;
   if (queryEsPedidoExplicitoDeLista) {
     plan.puede_responder_con_indice = false;
     plan.respuesta_directa = null;
