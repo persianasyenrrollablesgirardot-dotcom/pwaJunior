@@ -183,6 +183,19 @@ export async function responderJuniorTarjeta(
         `OBLIGATORIO devolvé puede_responder_con_indice=false + chat_ids=[esa_tarjeta]. Sin excepciones. El paso 2 carga la tarjeta y responde con la narrativa.\n` +
         `Si la query es "leeme las tarjetas" / "puedes leer las tarjetas" SIN nombre específico → cargá los 5 chat_ids más relevantes (estado=espera_jhon o con tareas activas) y respondé con resumen estratégico. NO listes el índice plano — eso es lo opuesto a "leer".\n` +
         `\n` +
+        `═══ REFERENCIAS RELACIONALES — "mi ex / mi novia / mi mamá / mi hijo" ═══\n` +
+        `Si la query usa una referencia RELACIONAL en vez del nombre — "mi ex", "mi expareja", "mi exnovia", "mi exmarido", "mi novia/o", ` +
+        `"mi pareja", "mi mamá / papá / madre / padre", "mi hijo / hija", "mi hermano / hermana", "mi socio", "mi instalador", "mi proveedor", ` +
+        `"mi cuñado", "mis hijos" — NO digas "no encuentro a esa persona". Esa referencia NO viene del nombre, viene del tipo/contexto. ` +
+        `Acción: cargá TODAS las tarjetas con tipo_contacto !== 'comercial' (personal_familia, proveedor, instalador, colaborador) ` +
+        `y dejá que el paso 2 lea las narrativas — ahí está la verdad sobre quién es quién. Devolvé chat_ids con TODAS las tarjetas no-comerciales (máx 8).\n` +
+        `Caso reportado: "dame resumen de la tarjeta de mi ex" → respondiste "no aparece ninguna con nombre 'ex'", cuando Lorena MORALES (personal_familia) está en el índice y su narrativa dice "expareja". MENTISTE por no asociar la relación.\n` +
+        `\n` +
+        `═══ DUPLICADOS POR TELÉFONO — siempre mencionarlos ═══\n` +
+        `Si en el índice hay DOS o más contactos con el MISMO teléfono, son personas distintas en el sistema (puede haber bug de WhatsApp o dedup pendiente). ` +
+        `Cuando reportes uno, MENCIONÁ que existe el otro y pedí aclaración: ` +
+        `"Atento: hay OTRA tarjeta con el mismo tel +57XXX — <Nombre2> (<tipo>). ¿Te referís a esa otra?". NUNCA reportes solo uno como si fuera único.\n` +
+        `\n` +
         `Tenés la CONVERSACIÓN PREVIA y el ÍNDICE ` +
         `de tarjetas (una por chat, con nombre, TELÉFONO, tipo, estado y próximo paso). Resolvé referencias de la pregunta usando ` +
         `la conversación previa ("ese", "él", "el anterior", "ese cliente" → el cliente del que se venía hablando).\n` +
@@ -607,7 +620,57 @@ export async function responderJuniorTarjeta(
   // Detectamos verbos de LECTURA + nombre conocido y forzamos chat_ids para que
   // el paso 2 cargue la tarjeta y responda con la narrativa real.
   const lexicoLectura = /\b(res[uú]men|le[eé]me|le[eé]r|contame|cont[áa]me|dame\s+(info|contexto|historial|detalles|todo)|qu[eé]\s+(pasa|sabes|sab[eé]s|hay|dice\s+la\s+tarjeta)|c[oó]mo\s+(va|est[aá])|busca[mn]e\s+info|abr[ií]me|mostr[áa]me|dame\s+todo\s+lo\s+de|info\s+de|datos\s+de|historia\s+de|conversaci[oó]n\s+con)\b/i.test(pregunta);
-  if (lexicoLectura && !queryEsPedidoExplicitoDeLista) {
+  // Referencia relacional: "mi ex / novia / mamá / hijo / etc." → cargar todas
+  // las tarjetas no-comerciales para que el LLM lea narrativas y encuentre quién
+  // es esa relación. Caso reportado: "tarjeta de mi ex" → solo encontraba a
+  // "Rocio" por nombre (false), no a Lorena MORALES (personal_familia, en
+  // narrativa dice "expareja").
+  const lexicoRelacionalMatch = pregunta.match(/\b(?:mi|el|la|mis|los|las)\s+(ex|expareja|exnovi[ao]|exmarido|exesposo|exesposa|novi[ao]|pareja|esposo|esposa|marido|mam[aá]|pap[aá]|madre|padre|hij[ao]s?|hermano|hermana|t[ií]o|t[ií]a|primo|prima|cu[nñ]ado|cu[nñ]ada|sobrino|sobrina|socio|socia|instalador|instaladora|proveedor|proveedora|jefe|jefa|empleado|empleada|abogado|abogada|contador|contadora|amigo|amiga)\b/i);
+  if (lexicoRelacionalMatch && lexicoLectura && !queryEsPedidoExplicitoDeLista) {
+    // Búsqueda dirigida: buscar en NARRATIVA y NOTAS de las tarjetas la
+    // palabra relacional. Si "mi ex", buscar narrativas con "ex"/"expareja".
+    // Si no hay match, fallback a todas las no-comerciales. Esto evita que el
+    // slice(0,5) del paso 2 deje afuera la tarjeta correcta. Caso reportado:
+    // "tarjeta de mi ex" → cargaba 5 no-comerciales sin Lorena (chat 154).
+    const termRel = lexicoRelacionalMatch[1].toLowerCase();
+    // Variantes de búsqueda por término. Las narrativas y notas son texto libre.
+    const variantesPorTerm: Record<string, string[]> = {
+      ex: ['expareja', 'ex pareja', 'exnovi', 'exmarido', 'exesposo', 'mi ex'],
+      expareja: ['expareja', 'ex pareja', 'mi ex'],
+      mama: ['madre', 'mamá', 'mama', 'mami'], 'mamá': ['madre', 'mamá', 'mama', 'mami'],
+      papa: ['padre', 'papá', 'papa', 'papi'], 'papá': ['padre', 'papá', 'papa', 'papi'],
+      madre: ['madre', 'mamá', 'mami'], padre: ['padre', 'papá', 'papi'],
+      hijo: ['hijo'], hija: ['hija'], hijos: ['hijo', 'hija'],
+      hermano: ['hermano'], hermana: ['hermana'],
+      socio: ['socio'], socia: ['socia'],
+      instalador: ['instalador'], proveedor: ['proveedor'],
+      pareja: ['pareja', 'novi', 'esposo', 'esposa'],
+      novia: ['novia', 'pareja'], novio: ['novio', 'pareja'],
+    };
+    const variantes = variantesPorTerm[termRel] ?? [termRel];
+
+    // Buscar tarjetas con esas palabras en narrativa o notas. Cargo solo persona_id
+    // de tarjetas no-comerciales (filtro previo) y matcheo por texto.
+    const noComercialesIds = indice.filter(f => f.tipo !== 'comercial').map(f => f.chat_id);
+    let matchesPorTexto: number[] = [];
+    if (noComercialesIds.length) {
+      // OR de ILIKE para cada variante. Postgres permite construir con .or
+      const orCond = variantes.map(v => `narrativa.ilike.%${v}%,notas_libres_str.ilike.%${v}%`).join(',');
+      const { data: tjMatches } = await sb.from('tarjeta')
+        .select('chat_id, narrativa, notas').in('chat_id', noComercialesIds);
+      matchesPorTexto = (tjMatches ?? [])
+        .filter((t: any) => {
+          const blob = (String(t.narrativa ?? '') + ' ' + (Array.isArray(t.notas) ? t.notas.join(' ') : '')).toLowerCase();
+          return variantes.some(v => blob.includes(v));
+        })
+        .map((t: any) => t.chat_id);
+    }
+    plan.puede_responder_con_indice = false;
+    plan.respuesta_directa = null;
+    // Si encontré match exacto en narrativa, priorizo esas (cargo todas, hasta 5).
+    // Si no, fallback a todas las no-comerciales (hasta 5 para no pasar el slice).
+    plan.chat_ids = (matchesPorTexto.length ? matchesPorTexto : noComercialesIds).slice(0, 5);
+  } else if (lexicoLectura && !queryEsPedidoExplicitoDeLista) {
     // Caso A: hay teléfono → ya el match-por-teléfono más abajo lo resuelve.
     // Caso B: hay nombre conocido → forzar esa tarjeta.
     // Caso C: "leeme las tarjetas" sin nombre → cargar 5 más relevantes.
