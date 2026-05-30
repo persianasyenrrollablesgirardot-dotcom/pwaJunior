@@ -4,11 +4,11 @@
   "outputDirectory": "visor/dist",
   "installCommand": "echo 'install se hace en buildCommand'",
   "functions": {
-    "visor/api/junior-v2.ts": {
+    "api/junior-v2.ts": {
       "runtime": "@vercel/node@3.2.7",
       "maxDuration": 30
     },
-    "visor/api/ping.ts": {
+    "api/ping.ts": {
       "runtime": "@vercel/node@3.2.7"
     }
   },

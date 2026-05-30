@@ -38,8 +38,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     process.env.DEEPSEEK_API_KEY = dsk;
     const { createClient } = await import('@supabase/supabase-js');
     const sb = createClient(url, srk);
-    // Path relativo desde visor/api/junior-v2.ts hasta agentes/sintesis/junior_v2.ts
-    const { responderJuniorTarjeta } = await import('../../agentes/sintesis/junior_v2.js');
+    // Path relativo desde /api/junior-v2.ts (raíz) hasta /agentes/sintesis/junior_v2.ts
+    const { responderJuniorTarjeta } = await import('../agentes/sintesis/junior_v2.js');
     const hist = Array.isArray(historial) ? historial.slice(-6) : [];
     const r = await responderJuniorTarjeta(sb, pregunta, hist);
     res.setHeader('Cache-Control', 'no-store');
