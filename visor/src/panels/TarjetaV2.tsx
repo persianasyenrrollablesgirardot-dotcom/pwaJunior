@@ -41,6 +41,11 @@ const ESTADO_META: Record<EstadoConv, { label: string; punto: string; color: str
 };
 const tipoMeta = (t: string) => TIPO_META[t] ?? TIPO_META.desconocido;
 const nombreDe = (t: TarjetaRow) => t.personas?.nombre || `Chat #${t.chat_id}`;
+// Placeholder de contactos @lid que WA Web no logró resolver (FASE 9.1).
+const esSinIdentificar = (t: TarjetaRow) => {
+  const n = (t.personas?.nombre ?? '').trim();
+  return n.startsWith('⏳') || /^identificando/i.test(n);
+};
 function hace(iso: string): string {
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
   if (s < 60) return 'recién'; if (s < 3600) return `hace ${Math.floor(s / 60)} min`;
@@ -61,6 +66,7 @@ export function TarjetaV2() {
   const [reprocesando, setReprocesando] = useState<number | null>(null);
   const [filtroEstado, setFiltroEstado] = useState<'activos' | 'cerrados' | 'todos'>('activos');
   const [filtroTipo, setFiltroTipo] = useState<string | null>(null); // null = todos
+  const [verSinIdentificar, setVerSinIdentificar] = useState(false);
   // Chat con Junior V2 (lee solo las tarjetas relevantes)
   const [jPregunta, setJPregunta] = useState('');
   const [jResp, setJResp] = useState<{ respuesta: string; tarjetas_usadas: number[]; via_indice: boolean; costo_usd: number } | null>(null);
@@ -147,10 +153,11 @@ export function TarjetaV2() {
       if (filtroEstado === 'cerrados' && est !== 'cerrado') return false;
       if (filtroEstado === 'activos'  && est === 'cerrado') return false;
       if (filtroTipo && x.tipo_contacto !== filtroTipo) return false;
+      if (!verSinIdentificar && esSinIdentificar(x)) return false;
       return true;
     });
     if (!visible.some(x => x.chat_id === sel)) setSel(visible[0]?.chat_id ?? null);
-  }, [filtroEstado, filtroTipo, lista, checklists, sel]);
+  }, [filtroEstado, filtroTipo, verSinIdentificar, lista, checklists, sel]);
 
 
   async function guardarNota() {
@@ -212,7 +219,10 @@ export function TarjetaV2() {
         });
         // 2do filtro: tipo_contacto (sobre el resultado del 1ro, así los conteos del 2do
         // reflejan lo realmente disponible).
-        const listaFiltrada = filtroTipo ? tras1.filter(x => x.tipo_contacto === filtroTipo) : tras1;
+        const tras2 = filtroTipo ? tras1.filter(x => x.tipo_contacto === filtroTipo) : tras1;
+        // 3er filtro: ocultar placeholders "⏳ Identificando…" salvo que verSinIdentificar.
+        const sinIdentificarN = tras2.filter(esSinIdentificar).length;
+        const listaFiltrada = verSinIdentificar ? tras2 : tras2.filter(x => !esSinIdentificar(x));
         // Conteos para chips estado (sobre TODA la lista — los counts no dependen del tipo).
         const cerradas = lista.filter(x => checklists[x.chat_id]?.estado_conversacion === 'cerrado').length;
         const activas = lista.length - cerradas;
@@ -255,6 +265,14 @@ export function TarjetaV2() {
               const tm = tipoMeta(tipo);
               return chipTipo(tipo, tm.label, n, tm.color);
             })}
+            {sinIdentificarN > 0 && (
+              <button onClick={() => setVerSinIdentificar(v => !v)} title="Contactos @lid que la extensión no logró identificar — generalmente destinatarios sin nombre en tu libreta" style={{
+                marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)', background: 'transparent',
+                border: '1px dashed var(--border-soft)', borderRadius: 6, padding: '4px 8px', cursor: 'pointer',
+              }}>
+                {verSinIdentificar ? `✕ ocultar ${sinIdentificarN} sin identificar` : `+ ${sinIdentificarN} sin identificar`}
+              </button>
+            )}
           </div>
           {/* Selector de tarjetas */}
           <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
