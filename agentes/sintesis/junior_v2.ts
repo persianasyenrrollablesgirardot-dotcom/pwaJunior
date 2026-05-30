@@ -265,10 +265,38 @@ export async function responderJuniorTarjeta(
   if (chatIds.length === 0) {
     // Defensa: aunque derivarChecklist filtre no-acciones, hacemos un segundo
     // pase acá para no mostrar a Jhon items de pura observación / indecisión.
-    const NO_ACCION = /(mantener(se)?|esperar|observar|monitorear|sin\s+acci[oó]n|ninguna\s+acci[oó]n|quedar\s+atento|atento\s+a|expectativa|reclasificar.*como.*o\s+mantener|decidir\s+si\s+\w+\s+o\s+\w+)/i;
-    const teToca = indice
-      .filter(f => f.estado === 'espera_jhon' || f.estado === 'sin_responder')
-      .filter(f => !f.proximo || !NO_ACCION.test(f.proximo));
+    const NO_ACCION = /(mantener(se)?|esperar(\s+contacto|\s+a\s+que|\s+oportunidades)?|observar|monitorear|sin\s+acci[oó]n|ninguna\s+acci[oó]n|quedar\s+atento|atento\s+a|expectativa|reclasificar.*como.*o\s+mantener|decidir\s+si\s+\w+\s+o\s+\w+|bloquear\s+contacto|cerrar\s+(caso|contacto|cliente)|verificar\s+si.*lista\s+de\s+contactos)/i;
+    // TE TOCA reescrito: leemos las TAREAS REALES (tarjeta_tarea, 86 items en BD)
+    // en vez del 'proximo_paso' (un resumen, 1 por tarjeta). Antes solo veíamos 11;
+    // ahora vemos todas las pendientes excepto cerradas / no-cliente / no-acción.
+    const { data: todasTareas } = await sb.from('tarjeta_tarea')
+      .select('chat_id, titulo, prioridad').order('prioridad');
+    const { data: estadosCks } = await sb.from('tarjeta_checklist').select('chat_id, estado_conversacion');
+    const estadoPorChat = new Map((estadosCks ?? []).map((c: any) => [c.chat_id, c.estado_conversacion]));
+    const infoPorChat = new Map(indice.map(f => [f.chat_id, f]));
+    type GrupoTareas = { nombre: string; tel: string; estado: string; items: string[] };
+    const grupos = new Map<number, GrupoTareas>();
+    for (const t of (todasTareas ?? []) as any[]) {
+      const info = infoPorChat.get(t.chat_id);
+      if (!info) continue;  // tarjeta no-cliente (ya filtrada por cargarIndice)
+      const estado = estadoPorChat.get(t.chat_id);
+      if (estado === 'cerrado') continue;  // ruido: "Cerrar caso de X"
+      if (NO_ACCION.test(t.titulo)) continue;  // "Esperar contacto", "Bloquear", etc.
+      if (!grupos.has(t.chat_id)) {
+        grupos.set(t.chat_id, { nombre: info.nombre, tel: info.tel, estado: estado ?? '?', items: [] });
+      }
+      grupos.get(t.chat_id)!.items.push(String(t.titulo).trim());
+    }
+    // Para tarjetas con estado activo (espera_jhon/sin_responder) que NO tienen
+    // entries en tarjeta_tarea, caemos al 'proximo_paso' como respaldo — así no
+    // perdemos casos donde el agente puso el resumen pero no derivó tareas.
+    for (const f of indice) {
+      if (grupos.has(f.chat_id)) continue;
+      if (f.estado !== 'espera_jhon' && f.estado !== 'sin_responder') continue;
+      if (!f.proximo || NO_ACCION.test(f.proximo)) continue;
+      grupos.set(f.chat_id, { nombre: f.nombre, tel: f.tel, estado: f.estado, items: [f.proximo] });
+    }
+    const teToca = [...grupos.values()];
 
     // Próximos agendamientos (7 días) — para que la respuesta empiece con calendario.
     const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
@@ -322,9 +350,15 @@ export async function responderJuniorTarjeta(
     const partes: string[] = [];
     if (agendaTxt && !pidioSoloTareas) partes.push(`📅 AGENDA próxima (7 días):\n${agendaTxt}`);
     if (teToca.length && !pidioSoloAgenda) {
-      const lista = teToca.slice(0, 25).map(f => `• ${conTel(f.nombre, f.tel)}${f.proximo ? ` — ${f.proximo}` : ''}`).join('\n');
-      const extra = teToca.length > 25 ? `\n…y ${teToca.length - 25} más` : '';
-      partes.push(`✅ TE TOCA (acciones concretas):\n${lista}${extra}`);
+      // Agrupado por cliente: una sola entrada por contacto, todas sus tareas
+      // debajo con guión. Sin truncar (Jhon pidió completas). Si un día son 200,
+      // ya veremos cómo paginar — hoy ~50 tras filtros.
+      const bloques = teToca.map(g => {
+        const cab = `• ${conTel(g.nombre, g.tel)}`;
+        if (g.items.length === 1) return `${cab} — ${g.items[0]}`;
+        return `${cab}\n${g.items.map(it => `   – ${it}`).join('\n')}`;
+      });
+      partes.push(`✅ TE TOCA (acciones concretas):\n${bloques.join('\n')}`);
     }
     if (!partes.length) {
       const msg = pidioSoloTareas
