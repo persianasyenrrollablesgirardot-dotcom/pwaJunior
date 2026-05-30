@@ -11,6 +11,19 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { fetchTareasGlobalConPersona, TareaConPersona } from '../lib/queries';
 
+// Hook responsive: detecta viewport móvil para re-layout. Usado en este panel
+// porque el layout de 2 columnas (calendario + agenda) y los grids del modal
+// (Tipo+Cliente, Fecha+Hora) no caben en pantallas <768px.
+function useIsMobile(): boolean {
+  const [is, setIs] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
+  useEffect(() => {
+    const onResize = () => setIs(window.innerWidth < 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return is;
+}
+
 // ─── Tipos ──────────────────────────────────────────────────────────────────
 type TipoEvento = 'visita_medidas' | 'instalacion' | 'reunion_proveedor' | 'personal' | 'otro';
 
@@ -41,6 +54,7 @@ const TIPO_META: Record<TipoEvento, { label: string; color: string; emoji: strin
 };
 
 export function JuniorAgendamientos() {
+  const isMobile = useIsMobile();
   const [agendamientos, setAgendamientos] = useState<Agendamiento[]>([]);
   const [backlogTareas, setBacklogTareas] = useState<TareaConPersona[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
@@ -48,6 +62,8 @@ export function JuniorAgendamientos() {
   const [fechaSeleccionada, setFechaSeleccionada] = useState<Date>(new Date());
   const [mesActivo, setMesActivo] = useState<number>(new Date().getMonth());
   const [anioActivo, setAnioActivo] = useState<number>(new Date().getFullYear());
+  // Móvil: el backlog arranca colapsado (mucho contenido para un viewport chico).
+  const [backlogAbiertoMobile, setBacklogAbiertoMobile] = useState(false);
   
   // Estados de Modal / Formulario
   const [modalAbierto, setModalAbierto] = useState(false);
@@ -240,26 +256,36 @@ export function JuniorAgendamientos() {
   }
 
   return (
-    <div style={{ display: 'flex', height: '100%', overflow: 'hidden', padding: '18px 24px', gap: 24 }}>
+    <div style={{
+      display: 'flex',
+      flexDirection: isMobile ? 'column' : 'row',
+      height: '100%',
+      overflow: isMobile ? 'auto' : 'hidden',
+      padding: isMobile ? 12 : '18px 24px',
+      gap: isMobile ? 12 : 24,
+    }}>
       {/* Columna Izquierda: Calendario */}
       <div style={{
-        flex: '1.2', background: 'white', borderRadius: 12, border: '1px solid var(--border-soft)',
-        boxShadow: '0 4px 12px rgba(0,0,0,0.02)', padding: 20, display: 'flex', flexDirection: 'column'
+        flex: isMobile ? '0 0 auto' : '1.2',
+        background: 'white', borderRadius: 12, border: '1px solid var(--border-soft)',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.02)',
+        padding: isMobile ? 12 : 20,
+        display: 'flex', flexDirection: 'column',
       }}>
         {/* Encabezado Calendario */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <h2 style={{ margin: 0, fontSize: isMobile ? 15 : 16, fontWeight: 700 }}>
             {meses[mesActivo]} {anioActivo}
           </h2>
           <div style={{ display: 'flex', gap: 6 }}>
-            <button onClick={() => cambiarMes('prev')} style={btnNav}>◀</button>
+            <button onClick={() => cambiarMes('prev')} style={isMobile ? btnNavMobile : btnNav}>◀</button>
             <button onClick={() => {
               const h = new Date();
               setMesActivo(h.getMonth());
               setAnioActivo(h.getFullYear());
               setFechaSeleccionada(h);
-            }} style={btnHoy}>Hoy</button>
-            <button onClick={() => cambiarMes('next')} style={btnNav}>▶</button>
+            }} style={isMobile ? btnHoyMobile : btnHoy}>Hoy</button>
+            <button onClick={() => cambiarMes('next')} style={isMobile ? btnNavMobile : btnNav}>▶</button>
           </div>
         </div>
 
@@ -273,7 +299,7 @@ export function JuniorAgendamientos() {
         </div>
 
         {/* Cuadrícula días del mes */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 6, flex: 1 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: isMobile ? 3 : 6, flex: isMobile ? '0 0 auto' : 1 }}>
           {/* Celdas vacías previas */}
           {Array.from({ length: primerDiaMes }).map((_, idx) => (
             <div key={`empty-${idx}`} style={{ border: '1px solid transparent' }} />
@@ -294,14 +320,14 @@ export function JuniorAgendamientos() {
                 style={{
                   border: '1px solid var(--border-soft)',
                   borderRadius: 8,
-                  padding: '6px 4px',
+                  padding: isMobile ? '4px 2px' : '6px 4px',
                   display: 'flex',
                   flexDirection: 'column',
                   alignItems: 'center',
                   justifyContent: 'space-between',
                   cursor: 'pointer',
                   position: 'relative',
-                  minHeight: 52,
+                  minHeight: isMobile ? 44 : 52,
                   transition: 'all 0.2s',
                   background: esSeleccionado ? 'var(--accent-soft)' : esHoy ? '#eff6ff' : 'var(--bg-panel)',
                   borderColor: esSeleccionado ? 'var(--accent)' : esHoy ? '#3b82f6' : 'var(--border-soft)',
@@ -309,7 +335,7 @@ export function JuniorAgendamientos() {
                 }}
               >
                 <span style={{
-                  fontSize: 12,
+                  fontSize: isMobile ? 13 : 12,
                   fontWeight: esHoy || esSeleccionado ? 700 : 500,
                   color: esSeleccionado ? 'var(--accent-dark)' : esHoy ? '#1d4ed8' : 'var(--text)',
                 }}>{dia}</span>
@@ -348,17 +374,26 @@ export function JuniorAgendamientos() {
       </div>
 
       {/* Columna Derecha: Agenda Diaria */}
-      <div style={{ flex: '0.8', display: 'flex', flexDirection: 'column', gap: 24, overflow: 'hidden' }}>
+      <div style={{
+        flex: isMobile ? '0 0 auto' : '0.8',
+        display: 'flex', flexDirection: 'column',
+        gap: isMobile ? 12 : 24,
+        overflow: isMobile ? 'visible' : 'hidden',
+      }}>
         {/* PANEL 1: AGENDA DEL DÍA */}
         <div style={{
-          flex: 1, background: 'white', borderRadius: 12, border: '1px solid var(--border-soft)',
-          boxShadow: '0 4px 12px rgba(0,0,0,0.02)', padding: 20, display: 'flex', flexDirection: 'column', overflow: 'hidden'
+          flex: isMobile ? '0 0 auto' : 1,
+          background: 'white', borderRadius: 12, border: '1px solid var(--border-soft)',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.02)',
+          padding: isMobile ? 14 : 20,
+          display: 'flex', flexDirection: 'column',
+          overflow: isMobile ? 'visible' : 'hidden',
         }}>
         {/* Encabezado Agenda Diaria */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid var(--border-soft)', paddingBottom: 10 }}>
-          <div>
-            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700 }}>Agenda del día</h3>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 14, borderBottom: '1px solid var(--border-soft)', paddingBottom: 10 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <h3 style={{ margin: 0, fontSize: isMobile ? 15 : 14, fontWeight: 700 }}>Agenda del día</h3>
+            <span style={{ fontSize: isMobile ? 12 : 11, color: 'var(--text-muted)' }}>
               {fechaSeleccionada.toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long' })}
             </span>
           </div>
@@ -366,11 +401,15 @@ export function JuniorAgendamientos() {
             setEditandoId(null);
             setForm({ ...form, fecha: selectFechaStr });
             setModalAbierto(true);
-          }} style={btnCrear}>📅 Agendar</button>
+          }} style={isMobile ? btnCrearMobile : btnCrear}>📅 Agendar</button>
         </div>
 
         {/* Lista de compromisos agendados */}
-        <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{
+          flex: isMobile ? '0 0 auto' : 1,
+          overflowY: isMobile ? 'visible' : 'auto',
+          display: 'flex', flexDirection: 'column', gap: 10,
+        }}>
           {cargando ? (
             <p style={{ textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>Cargando agenda...</p>
           ) : agendaDelDia.length === 0 ? (
@@ -416,8 +455,8 @@ export function JuniorAgendamientos() {
                           gap: 6,
                           position: 'relative'
                         }}>
-                          <button onClick={() => iniciarEdit(a)} title="Editar fecha/hora" style={{ ...btnCancelEvent, right: 32, color: 'var(--text-muted)', fontSize: 12 }}>✏️</button>
-                          <button onClick={() => handleCancelar(a.id)} style={btnCancelEvent}>×</button>
+                          <button onClick={() => iniciarEdit(a)} title="Editar fecha/hora" style={{ ...btnCancelEvent, right: isMobile ? 44 : 32, color: 'var(--text-muted)', fontSize: isMobile ? 16 : 12, padding: isMobile ? 4 : 0 }}>✏️</button>
+                          <button onClick={() => handleCancelar(a.id)} style={{ ...btnCancelEvent, fontSize: isMobile ? 22 : 16, padding: isMobile ? 4 : 0 }}>×</button>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ fontSize: 12 }}>{meta.emoji}</span>
                             <strong style={{ fontSize: 13, color: 'var(--text)' }}>{a.titulo}</strong>
@@ -445,16 +484,43 @@ export function JuniorAgendamientos() {
 
         {/* PANEL 2: BACKLOG / PENDIENTES DE AGENDAR */}
         <div style={{
-          flex: 1, background: '#f8fafc', borderRadius: 12, border: '1px solid var(--border-soft)',
-          boxShadow: '0 4px 12px rgba(0,0,0,0.02)', padding: 20, display: 'flex', flexDirection: 'column', overflow: 'hidden'
+          flex: isMobile ? '0 0 auto' : 1,
+          background: '#f8fafc', borderRadius: 12, border: '1px solid var(--border-soft)',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.02)',
+          padding: isMobile ? 14 : 20,
+          display: 'flex', flexDirection: 'column',
+          overflow: isMobile ? 'visible' : 'hidden',
         }}>
-          <div style={{ marginBottom: 12, borderBottom: '1px solid var(--border-soft)', paddingBottom: 8 }}>
-            <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: '#475569' }}>📥 Pendientes de Agendar</h3>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-              Tareas críticas sin fecha definida (Backlog)
-            </span>
+          <div
+            onClick={() => { if (isMobile) setBacklogAbiertoMobile(b => !b); }}
+            style={{
+              marginBottom: isMobile && !backlogAbiertoMobile ? 0 : 12,
+              borderBottom: isMobile && !backlogAbiertoMobile ? 'none' : '1px solid var(--border-soft)',
+              paddingBottom: isMobile && !backlogAbiertoMobile ? 0 : 8,
+              cursor: isMobile ? 'pointer' : 'default',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
+            }}
+          >
+            <div style={{ minWidth: 0 }}>
+              <h3 style={{ margin: 0, fontSize: isMobile ? 15 : 14, fontWeight: 700, color: '#475569' }}>
+                📥 Pendientes de Agendar {isMobile && backlogTareas.length > 0 ? `(${backlogTareas.length})` : ''}
+              </h3>
+              <span style={{ fontSize: isMobile ? 12 : 11, color: 'var(--text-muted)' }}>
+                Tareas críticas sin fecha definida
+              </span>
+            </div>
+            {isMobile && (
+              <span style={{ fontSize: 18, color: 'var(--text-muted)', flexShrink: 0 }}>
+                {backlogAbiertoMobile ? '▴' : '▾'}
+              </span>
+            )}
           </div>
-          <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, paddingRight: 4 }}>
+          <div style={{
+            flex: isMobile ? '0 0 auto' : 1,
+            overflowY: isMobile ? 'visible' : 'auto',
+            display: isMobile && !backlogAbiertoMobile ? 'none' : 'flex',
+            flexDirection: 'column', gap: 8, paddingRight: 4,
+          }}>
             {cargando ? (
               <p style={{ textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>Cargando backlog...</p>
             ) : backlogTareas.length === 0 ? (
@@ -500,14 +566,27 @@ export function JuniorAgendamientos() {
       {/* MODAL / FORMULARIO CREACIÓN MANUAL */}
       {modalAbierto && (
         <div style={modalOverlay} onClick={() => { setModalAbierto(false); setEditandoId(null); }}>
-          <div style={modalBody} onClick={e => e.stopPropagation()}>
+          <div style={{
+            ...modalBody,
+            width: isMobile ? '94%' : '90%',
+            maxWidth: isMobile ? 'none' : 500,
+            maxHeight: isMobile ? '92vh' : '90vh',
+            overflowY: 'auto',
+            padding: isMobile ? 18 : 24,
+          }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
               <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>{editandoId != null ? '✏️ Editar Agendamiento' : '📅 Nuevo Agendamiento'}</h2>
               <button onClick={() => { setModalAbierto(false); setEditandoId(null); }} style={btnCerrarModal}>×</button>
             </div>
 
             <form onSubmit={handleCrear} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <label style={labelStyle}>
+              {(() => {
+                // En móvil: inputs más altos + font 16px (evita el zoom-auto de iOS),
+                // labels un puntito más grandes.
+                const inp = isMobile ? { ...inputStyle, padding: '11px 12px', fontSize: 16 } : inputStyle;
+                const lbl = isMobile ? { ...labelStyle, fontSize: 13 } : labelStyle;
+                return (<>
+              <label style={lbl}>
                 <span>Título del Evento *</span>
                 <input
                   type="text"
@@ -515,17 +594,17 @@ export function JuniorAgendamientos() {
                   placeholder="ej. Visita toma de medidas Don Walter"
                   value={form.titulo}
                   onChange={e => setForm({ ...form, titulo: e.target.value })}
-                  style={inputStyle}
+                  style={inp}
                 />
               </label>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <label style={labelStyle}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
+                <label style={lbl}>
                   <span>Tipo *</span>
                   <select
                     value={form.tipo}
                     onChange={e => setForm({ ...form, tipo: e.target.value as TipoEvento })}
-                    style={inputStyle}
+                    style={inp}
                   >
                     {(Object.keys(TIPO_META) as TipoEvento[]).map(k => (
                       <option key={k} value={k}>{TIPO_META[k].label}</option>
@@ -533,12 +612,12 @@ export function JuniorAgendamientos() {
                   </select>
                 </label>
 
-                <label style={labelStyle}>
+                <label style={lbl}>
                   <span>Cliente (Opcional)</span>
                   <select
                     value={form.persona_id}
                     onChange={e => setForm({ ...form, persona_id: e.target.value })}
-                    style={inputStyle}
+                    style={inp}
                   >
                     <option value="">- Transversal (Sin cliente) -</option>
                     {personas.map(p => (
@@ -548,56 +627,58 @@ export function JuniorAgendamientos() {
                 </label>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <label style={labelStyle}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
+                <label style={lbl}>
                   <span>Fecha *</span>
                   <input
                     type="date"
                     required
                     value={form.fecha}
                     onChange={e => setForm({ ...form, fecha: e.target.value })}
-                    style={inputStyle}
+                    style={inp}
                   />
                 </label>
 
-                <label style={labelStyle}>
+                <label style={lbl}>
                   <span>Hora de Inicio *</span>
                   <input
                     type="time"
                     required
                     value={form.hora}
                     onChange={e => setForm({ ...form, hora: e.target.value })}
-                    style={inputStyle}
+                    style={inp}
                   />
                 </label>
               </div>
 
-              <label style={labelStyle}>
+              <label style={lbl}>
                 <span>Dirección / Ubicación</span>
                 <input
                   type="text"
                   placeholder="ej. Conjunto Altos del Peñón, Casa 2"
                   value={form.direccion}
                   onChange={e => setForm({ ...form, direccion: e.target.value })}
-                  style={inputStyle}
+                  style={inp}
                 />
               </label>
 
-              <label style={labelStyle}>
+              <label style={lbl}>
                 <span>Notas / Especificaciones</span>
                 <textarea
                   rows={2}
                   placeholder="ej. Llevar muestras de blackout y catálogo de enrollables..."
                   value={form.notas}
                   onChange={e => setForm({ ...form, notas: e.target.value })}
-                  style={{ ...inputStyle, fontFamily: 'inherit' }}
+                  style={{ ...inp, fontFamily: 'inherit' }}
                 />
               </label>
 
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
-                <button type="button" onClick={() => { setModalAbierto(false); setEditandoId(null); }} style={btnCancel}>Cancelar</button>
-                <button type="submit" style={btnSubmit}>{editandoId != null ? 'Guardar cambios' : 'Guardar compromiso'}</button>
+                <button type="button" onClick={() => { setModalAbierto(false); setEditandoId(null); }} style={isMobile ? { ...btnCancel, padding: '11px 18px', fontSize: 14 } : btnCancel}>Cancelar</button>
+                <button type="submit" style={isMobile ? { ...btnSubmit, padding: '11px 18px', fontSize: 14 } : btnSubmit}>{editandoId != null ? 'Guardar cambios' : 'Guardar compromiso'}</button>
               </div>
+                </>);
+              })()}
             </form>
           </div>
         </div>
@@ -615,6 +696,12 @@ const btnNav: React.CSSProperties = {
   borderRadius: 6,
   cursor: 'pointer',
 };
+const btnNavMobile: React.CSSProperties = {
+  ...btnNav,
+  padding: '8px 14px',
+  fontSize: 14,
+  minWidth: 40,
+};
 const btnHoy: React.CSSProperties = {
   padding: '4px 10px',
   fontSize: 11,
@@ -623,6 +710,11 @@ const btnHoy: React.CSSProperties = {
   background: 'white',
   borderRadius: 6,
   cursor: 'pointer',
+};
+const btnHoyMobile: React.CSSProperties = {
+  ...btnHoy,
+  padding: '8px 14px',
+  fontSize: 13,
 };
 const btnCrear: React.CSSProperties = {
   padding: '5px 12px',
@@ -633,6 +725,12 @@ const btnCrear: React.CSSProperties = {
   border: 'none',
   borderRadius: 6,
   cursor: 'pointer',
+};
+const btnCrearMobile: React.CSSProperties = {
+  ...btnCrear,
+  padding: '9px 14px',
+  fontSize: 13,
+  flexShrink: 0,
 };
 const btnCancelEvent: React.CSSProperties = {
   position: 'absolute',
