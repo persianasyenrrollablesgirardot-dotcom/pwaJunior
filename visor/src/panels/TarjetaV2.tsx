@@ -9,6 +9,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { linkifyTelefonos } from '../lib/linkify';
 
 type EstadoConv = 'cerrado' | 'espera_jhon' | 'espera_cliente' | 'sin_responder';
 interface ModuloCtx { modulo: string; titulo: string; sintesis: string; alerta: string | null }
@@ -191,7 +192,7 @@ export function TarjetaV2() {
         </div>
         {jResp && (
           <div style={{ marginTop: 10, background: 'var(--bg-page)', border: '1px solid var(--border-soft)', borderRadius: 8, padding: '10px 12px' }}>
-            <div style={{ fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{jResp.respuesta}</div>
+            <div style={{ fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{linkifyTelefonos(jResp.respuesta)}</div>
             <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-muted)' }}>
               {jResp.via_indice
                 ? '· respondió con el índice (sin leer tarjetas en detalle)'

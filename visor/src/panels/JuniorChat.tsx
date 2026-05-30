@@ -9,6 +9,7 @@
  */
 import { useRef, useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
+import { linkifyTelefonos } from '../lib/linkify';
 
 interface Turno {
   rol: 'jhon' | 'junior';
@@ -112,7 +113,7 @@ export function JuniorChat() {
               color: t.rol === 'jhon' ? 'white' : 'var(--text)',
               border: t.rol === 'jhon' ? 'none' : '1px solid var(--border-soft)',
             }}>
-              {t.texto}
+              {t.rol === 'junior' ? linkifyTelefonos(t.texto) : t.texto}
               {t.meta && (
                 <div style={{ marginTop: 6, fontSize: 10, color: 'var(--text-muted)' }}>
                   {t.meta.via_indice ? '· respondió con el índice' : `· leyó ${t.meta.tarjetas_usadas.length} tarjeta(s): ${t.meta.tarjetas_usadas.map(c => 'chat ' + c).join(', ') || '—'}`}
