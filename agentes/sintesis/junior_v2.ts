@@ -157,15 +157,23 @@ export async function responderJuniorTarjeta(
         `Junior NO puede cambiar el estado de la tarjeta directamente, pero la nota queda registrada y los agentes re-derivan el checklist en el próximo ciclo. ` +
         `Si Jhon insiste varias veces que lo cierres, NO inventes que ya lo hiciste — convertilo en nota acá y respondé honesto en respuesta_directa: "anoté el cierre por tu indicación; los agentes lo procesan en el próximo ciclo".\n` +
         `\n` +
+        `- Si Jhon pide BORRAR / ELIMINAR algo concreto ("borrá la nota de X sobre Y", "eliminá la tarea de Z", "borrá la tarea transversal #N", ` +
+        `"sacá esa anotación"), identificá QUÉ borrar y devolvé el campo correspondiente:\n` +
+        `  • borrar_nota={"chat_id": <chat del contacto>, "texto_match": "<fragmento del texto de la nota para identificarla>"} → busca en notas_libres del contacto.\n` +
+        `  • borrar_tarea={"chat_id": <chat>, "titulo_match": "<fragmento del título>"} → busca en tarjeta_tarea del contacto (solo borra las origen='junior').\n` +
+        `  • borrar_tarea_transversal={"id": <id si te lo dieron, ej #2>, "titulo_match": "<o fragmento del título>"} → busca en tareas_transversales.\n` +
+        `Si Jhon NO especifica qué borrar ("borrá lo de Constanza" sin más), devolvé respuesta_directa pidiendo aclaración ("¿la nota sobre X o la tarea de Y?"). ` +
+        `El sistema verifica unicidad y NO borra si hay 0 o ≥2 matches — te avisa para pedir aclaración.\n` +
+        `\n` +
         `═══ HONESTIDAD SOBRE LO QUE NO PODÉS HACER ═══\n` +
-        `Tus capacidades de escritura son CUATRO Y NADA MÁS: (1) crear nota libre en una persona, (2) cambiar el nombre del contacto, ` +
-        `(3) crear tarea en tarjeta_tarea de un contacto (origen='junior'), (4) crear tarea_transversal (sin contacto).\n` +
+        `Tus capacidades de escritura son SEIS Y NADA MÁS: (1) crear nota libre en una persona, (2) cambiar el nombre del contacto, ` +
+        `(3) crear tarea en tarjeta_tarea de un contacto (origen='junior'), (4) crear tarea_transversal (sin contacto), ` +
+        `(5) BORRAR nota libre identificándola por texto (busca por persona_id + match), (6) BORRAR tarea (origen='junior' o transversal) por título/id.\n` +
         `Si Jhon te pide CUALQUIER OTRA COSA de escritura, NO MIENTAS confirmando. Devolvé puede_responder_con_indice=true + ` +
         `respuesta_directa explicando honestamente que no podés Y ofreciendo lo más cercano que sí podés. Lista de pedidos que NO podés ejecutar:\n` +
-        `  • "borrá esta nota / esta tarea" → no puedo borrar desde acá. Opciones: te dejo otra nota anotando que está CANCELADA, o vos la borrás en la UI de la tarjeta.\n` +
-        `  • "moveme esta tarea a otro contacto" → no puedo mover. Si querés, creo la tarea en el contacto nuevo y dejo nota CANCELADA en el viejo.\n` +
-        `  • "marcala como hecha / completada / dale check" → no puedo marcar tareas como hechas. Te dejo nota "Completada el <fecha>" en la tarjeta o vos le hacés check en la UI.\n` +
-        `  • "editá esta tarea / cambiale el título" → no puedo editar tareas existentes. Te creo una nueva con el título correcto y dejo nota que reemplaza a la anterior.\n` +
+        `  • "moveme esta tarea a otro contacto" → no puedo mover, pero PUEDO crearla en el nuevo y BORRAR la del viejo (si origen=junior) o dejar nota CANCELADA si la creó el agente.\n` +
+        `  • "marcala como hecha / completada / dale check" → no puedo marcar tareas como hechas. Si fue creada por mí (origen=junior) puedo BORRARLA. Si la creó el agente, te dejo nota "Completada el <fecha>" o vos le hacés check en la UI.\n` +
+        `  • "editá esta tarea / cambiale el título" → no puedo editar. Pero PUEDO borrar la vieja (si origen=junior) y crear una nueva con el título correcto, lo hago en un solo paso.\n` +
         `  • "agendá visita el <fecha> a las <hora>" / "crea agendamiento" → no puedo escribir en el calendario. Andá al panel Agendamientos y agregala ahí (botón 📅 Agendar).\n` +
         `  • "borrá esta cita / cancelá agendamiento" → no puedo. Andá a Agendamientos y borrala desde ahí.\n` +
         `  • "editá esta cita" → no puedo. Tocá ✏️ en la cita del panel Agendamientos.\n` +
@@ -173,13 +181,16 @@ export async function responderJuniorTarjeta(
         `  • "borrá este contacto / este cliente" → no puedo. Andá al panel del cliente y archivalo ahí.\n` +
         `  • "mandale un mensaje / WhatsApp a X" → no puedo enviar mensajes por vos. Te puedo abrir el link de WhatsApp con clic en el teléfono.\n` +
         `Cuando respondas con "no puedo X, pero puedo Y", sé BREVE, claro y ofreceme la opción Y como pregunta directa para que diga sí/no. ` +
-        `NUNCA inventes que ejecutaste algo. NUNCA digas "listo" si no creaste una de las 4 cosas. Mentir es peor que negarte.\n` +
+        `NUNCA inventes que ejecutaste algo. NUNCA digas "listo" si no creaste/borraste una de las 6 cosas. Mentir es peor que negarte.\n` +
         `\n` +
         `Devolvé SOLO JSON: {"puede_responder_con_indice": bool, "respuesta_directa": string|null, "chat_ids": number[], ` +
         `"nota": {"chat_id": number, "texto": string} | null, ` +
         `"nuevo_nombre": {"chat_id": number, "nombre": string} | null, ` +
         `"nueva_tarea": {"chat_id": number, "titulo": string} | null, ` +
-        `"nueva_tarea_transversal": {"titulo": string, "descripcion": string} | null}`,
+        `"nueva_tarea_transversal": {"titulo": string, "descripcion": string} | null, ` +
+        `"borrar_nota": {"chat_id": number, "texto_match": string} | null, ` +
+        `"borrar_tarea": {"chat_id": number, "titulo_match": string} | null, ` +
+        `"borrar_tarea_transversal": {"id": number|null, "titulo_match": string} | null}`,
     },
     { role: 'user', content: `CONVERSACIÓN PREVIA:\n${histTexto}\n\nÍNDICE DE TARJETAS:\n${indiceTexto}\n\nNUEVA PREGUNTA DE JHON: ${pregunta}` },
   ];
@@ -233,6 +244,104 @@ export async function responderJuniorTarjeta(
     && typeof plan.nueva_tarea.titulo === 'string' && plan.nueva_tarea.titulo.trim() ? plan.nueva_tarea : null;
   const accTareaTransv = plan.nueva_tarea_transversal && typeof plan.nueva_tarea_transversal.titulo === 'string'
     && plan.nueva_tarea_transversal.titulo.trim() ? plan.nueva_tarea_transversal : null;
+
+  // ── Acciones de BORRADO ────────────────────────────────────────────────────
+  // Los 3 borrar_X requieren UNICIDAD: borramos solo si hay exactamente 1 match.
+  // 0 matches → "no encontré"; ≥2 → "encontré varias, ¿cuál?". Nunca borra al voleo.
+  const accBorrarNota = plan.borrar_nota && typeof plan.borrar_nota.chat_id === 'number'
+    && typeof plan.borrar_nota.texto_match === 'string' && plan.borrar_nota.texto_match.trim() ? plan.borrar_nota : null;
+  const accBorrarTarea = plan.borrar_tarea && typeof plan.borrar_tarea.chat_id === 'number'
+    && typeof plan.borrar_tarea.titulo_match === 'string' && plan.borrar_tarea.titulo_match.trim() ? plan.borrar_tarea : null;
+  const accBorrarTareaTransv = plan.borrar_tarea_transversal && (
+    typeof plan.borrar_tarea_transversal.id === 'number' ||
+    (typeof plan.borrar_tarea_transversal.titulo_match === 'string' && plan.borrar_tarea_transversal.titulo_match.trim())
+  ) ? plan.borrar_tarea_transversal : null;
+
+  if (accBorrarNota) {
+    // Resolver persona_id desde el chat_id (mismo helper que el bloque de escritura).
+    const { data: cl } = await sb.from('chat_checklist').select('persona_id').eq('chat_id', accBorrarNota.chat_id).maybeSingle();
+    let personaId = (cl?.persona_id as number) ?? null;
+    if (!personaId) {
+      const { data: ch } = await sb.from('chats').select('proyecto_id').eq('id', accBorrarNota.chat_id).maybeSingle();
+      if (ch?.proyecto_id) {
+        const { data: pr } = await sb.from('proyectos').select('persona_id').eq('id', ch.proyecto_id).maybeSingle();
+        personaId = (pr?.persona_id as number) ?? null;
+      }
+    }
+    if (!personaId) {
+      return { respuesta: `No identifiqué el contacto para borrar la nota. Decime de qué cliente es.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    const fragmento = String(accBorrarNota.texto_match).trim();
+    const { data: notas } = await sb.from('notas_libres')
+      .select('id, contenido').eq('persona_id', personaId).ilike('contenido', `%${fragmento}%`);
+    const nombreContacto = indice.find(f => f.chat_id === accBorrarNota.chat_id)?.nombre ?? `chat ${accBorrarNota.chat_id}`;
+    if (!notas || notas.length === 0) {
+      return { respuesta: `No encontré ninguna nota de ${nombreContacto} que contenga "${fragmento}". Probá con otro fragmento del texto.`, tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo };
+    }
+    if (notas.length > 1) {
+      const previa = notas.slice(0, 4).map((n: any) => `• [#${n.id}] ${String(n.contenido).slice(0, 80)}${n.contenido.length > 80 ? '…' : ''}`).join('\n');
+      return { respuesta: `Encontré ${notas.length} notas de ${nombreContacto} que matchean "${fragmento}":\n${previa}\n¿Cuál borrar? Decime el ID o un fragmento más específico.`, tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo };
+    }
+    const { error } = await sb.from('notas_libres').delete().eq('id', notas[0].id);
+    if (error) {
+      return { respuesta: `No pude borrar la nota: ${error.message}`, tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo };
+    }
+    await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', personaId);
+    await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', accBorrarNota.chat_id);
+    return { respuesta: `Listo, borré la nota de ${nombreContacto}: «${String(notas[0].contenido).slice(0, 120)}${notas[0].contenido.length > 120 ? '…' : ''}». La tarjeta se actualiza en unos segundos.`, tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo };
+  }
+
+  if (accBorrarTarea) {
+    const fragmento = String(accBorrarTarea.titulo_match).trim();
+    // Solo borramos tareas que Junior creó (origen='junior'). Las del agente
+    // se regeneran al rato — borrarlas sería inútil y peligroso.
+    const { data: tareas } = await sb.from('tarjeta_tarea')
+      .select('id, titulo, origen').eq('chat_id', accBorrarTarea.chat_id).ilike('titulo', `%${fragmento}%`);
+    const nombreContacto = indice.find(f => f.chat_id === accBorrarTarea.chat_id)?.nombre ?? `chat ${accBorrarTarea.chat_id}`;
+    if (!tareas || tareas.length === 0) {
+      return { respuesta: `No encontré tareas de ${nombreContacto} con "${fragmento}". Probá con otro fragmento.`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    }
+    const borrables = tareas.filter((t: any) => t.origen === 'junior');
+    if (borrables.length === 0) {
+      const lista = tareas.slice(0, 3).map((t: any) => `• ${t.titulo}`).join('\n');
+      return { respuesta: `Esa(s) tarea(s) la creó el agente, no yo — no las puedo borrar (se regeneran solas al rato). Si querés que no aparezca, te dejo nota "Completada" o vos le hacés check en la UI:\n${lista}`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    }
+    if (borrables.length > 1) {
+      const previa = borrables.slice(0, 4).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
+      return { respuesta: `Encontré ${borrables.length} tareas mías de ${nombreContacto} con "${fragmento}":\n${previa}\n¿Cuál borrar? Decime el ID o un fragmento más específico.`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    }
+    const { error } = await sb.from('tarjeta_tarea').delete().eq('id', borrables[0].id);
+    if (error) {
+      return { respuesta: `No pude borrar la tarea: ${error.message}`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    }
+    await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', accBorrarTarea.chat_id);
+    return { respuesta: `Listo, borré la tarea de ${nombreContacto}: «${borrables[0].titulo}».`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+  }
+
+  if (accBorrarTareaTransv) {
+    let candidatas: any[] = [];
+    if (typeof accBorrarTareaTransv.id === 'number') {
+      const { data } = await sb.from('tareas_transversales').select('id, titulo').eq('id', accBorrarTareaTransv.id);
+      candidatas = data ?? [];
+    } else {
+      const { data } = await sb.from('tareas_transversales').select('id, titulo')
+        .ilike('titulo', `%${String(accBorrarTareaTransv.titulo_match).trim()}%`).is('completada_at', null);
+      candidatas = data ?? [];
+    }
+    const ref = accBorrarTareaTransv.id ? `#${accBorrarTareaTransv.id}` : `"${accBorrarTareaTransv.titulo_match}"`;
+    if (!candidatas.length) {
+      return { respuesta: `No encontré tarea transversal ${ref}.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    if (candidatas.length > 1) {
+      const previa = candidatas.slice(0, 4).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
+      return { respuesta: `Encontré ${candidatas.length} transversales con "${accBorrarTareaTransv.titulo_match}":\n${previa}\n¿Cuál? Decime el ID.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    const { error } = await sb.from('tareas_transversales').delete().eq('id', candidatas[0].id);
+    if (error) {
+      return { respuesta: `No pude borrar la transversal: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    return { respuesta: `Listo, borré la tarea transversal #${candidatas[0].id}: «${candidatas[0].titulo}».`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+  }
 
   // Misma regla anti-asumir aplica para nueva_tarea con contacto. Si la pregunta
   // tiene patrón ambiguo "señora DE Lugar", la convertimos a tarea TRANSVERSAL
