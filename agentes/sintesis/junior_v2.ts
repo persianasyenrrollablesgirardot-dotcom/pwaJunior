@@ -130,16 +130,21 @@ export async function responderJuniorTarjeta(
         `NUNCA digas que "no hay tarjetas seleccionadas" ni pidas que Jhon "seleccione" — no existe seleccionar, SIEMPRE tenés el índice. ` +
         `Si "actualizar" se refiere a las tarjetas: aclaramos que se actualizan solas con info nueva, y mostramos el estado actual. ` +
         `En respuesta_directa NUNCA inventes datos (horas/montos/fechas) que no estén en el índice; si Jhon insiste con algo que no ves, no se lo confirmes inventando.\n` +
-        `- Si Jhon te da una INSTRUCCIÓN para recordar/anotar algo sobre un contacto ("este es mi instalador William", "anotá que X", ` +
-        `"recordá que Y", "tené en cuenta que Z", "crea una tarea para X") → devolvé nota={"chat_id": <chat del contacto del índice>, "texto": "<la instrucción ` +
-        `redactada como nota>"}. Identificá el contacto por nombre/teléfono/contexto previo. Es para GUARDAR, no una pregunta.\n` +
-        `   ⚠ REGLA ANTI-ASUMIR: si el contacto se describe por un FRAGMENTO ambiguo (apellido común, nombre de CONJUNTO/edificio/calle, ` +
-        `referencia geográfica como "la del peñón", "el del cortijo", "señora de Madeira"), NO crees la nota a la primera tarjeta que ` +
+        `- Si Jhon pide CREAR UNA TAREA / agendá esto / hay que hacer X (acción concreta y verbalizada con verbo de acción: ` +
+        `"crea una tarea para llamar a X", "hay que cortar las telas", "agendá llamar a Y", "tareita: confirmar pago") → ` +
+        `devolvé nueva_tarea={"chat_id": <chat>, "titulo": "<la acción concreta, ≤120 chars, en infinitivo o imperativo: 'Cortar las telas y programar mantenimiento'>"}. ` +
+        `Si el contacto NO está claro o es ambiguo (ver REGLA ANTI-ASUMIR abajo), o si Jhon dice "transversal / general / sin cliente / sin contacto / no asignada", ` +
+        `devolvé nueva_tarea_transversal={"titulo": "<acción>", "descripcion": "<contexto opcional, ej: 'Señora del conjunto Madeira, sin teléfono todavía'>"}. ` +
+        `IMPORTANTE: tarea ≠ nota. Tarea es acción pendiente que aparecerá listada cuando Jhon pida "tareas pendientes". Nota es contexto.\n` +
+        `- Si Jhon te da una INSTRUCCIÓN para recordar/anotar contexto sobre un contacto ("este es mi instalador William", "anotá que X es socio", ` +
+        `"recordá que Y siempre llega tarde", "tené en cuenta que Z prefiere efectivo") → devolvé nota={"chat_id": <chat del contacto del índice>, "texto": "<la instrucción ` +
+        `redactada como nota>"}. Es CONTEXTO para guardar, no una tarea.\n` +
+        `   ⚠ REGLA ANTI-ASUMIR (aplica a nueva_tarea Y nota): si el contacto se describe por un FRAGMENTO ambiguo (apellido común, nombre de CONJUNTO/edificio/calle, ` +
+        `referencia geográfica como "la del peñón", "el del cortijo", "señora de Madeira"), NO crees nada a la primera tarjeta que ` +
         `matchee. Frases tipo "señora/señor/cliente DE <Lugar>" casi siempre refieren al LUGAR (conjunto residencial donde vive el cliente) ` +
-        `y no a un apellido — y puede haber varios clientes en ese lugar. En esos casos: devolvé puede_responder_con_indice=true + ` +
-        `respuesta_directa pidiendo aclaración ("¿te referís a Constanza Madeiras (+573108377932), o a otra clienta del conjunto Madeira? ` +
-        `Pasame el nombre o el teléfono y la creo"). NO crees nota=null hasta que Jhon confirme. Mejor preguntar que asumir y crearla en ` +
-        `el contacto equivocado — caso reportado: nota terminó en la tarjeta de Constanza cuando era otra persona del mismo conjunto.\n` +
+        `y no a un apellido — y puede haber varios clientes en ese lugar. En esos casos: para TAREAS, devolvé nueva_tarea_transversal con descripción que mencione la pista ` +
+        `("Señora del conjunto Madeira — pedir nombre/tel a Jhon"). Para NOTAS, devolvé puede_responder_con_indice=true + respuesta_directa pidiendo aclaración. ` +
+        `Mejor crear transversal o preguntar que asumir y meter en el contacto equivocado — caso real: tarea terminó en Constanza Madeiras cuando era OTRA persona del conjunto Madeira.\n` +
         `- Si Jhon dice CÓMO SE LLAMA un contacto ("se llama Germán", "es Germán el socio", "este es William") → devolvé ` +
         `nuevo_nombre={"chat_id": <chat del contacto>, "nombre": "<el nombre, ej. 'Germán (socio)'>"} para actualizar el nombre de la tarjeta. ` +
         `Puede ir JUNTO con nota (la instrucción) en el mismo mensaje.\n` +
@@ -149,7 +154,10 @@ export async function responderJuniorTarjeta(
         `Junior NO puede cambiar el estado de la tarjeta directamente, pero la nota queda registrada y los agentes re-derivan el checklist en el próximo ciclo. ` +
         `Si Jhon insiste varias veces que lo cierres, NO inventes que ya lo hiciste — convertilo en nota acá y respondé honesto en respuesta_directa: "anoté el cierre por tu indicación; los agentes lo procesan en el próximo ciclo".\n` +
         `Devolvé SOLO JSON: {"puede_responder_con_indice": bool, "respuesta_directa": string|null, "chat_ids": number[], ` +
-        `"nota": {"chat_id": number, "texto": string} | null, "nuevo_nombre": {"chat_id": number, "nombre": string} | null}`,
+        `"nota": {"chat_id": number, "texto": string} | null, ` +
+        `"nuevo_nombre": {"chat_id": number, "nombre": string} | null, ` +
+        `"nueva_tarea": {"chat_id": number, "titulo": string} | null, ` +
+        `"nueva_tarea_transversal": {"titulo": string, "descripcion": string} | null}`,
     },
     { role: 'user', content: `CONVERSACIÓN PREVIA:\n${histTexto}\n\nÍNDICE DE TARJETAS:\n${indiceTexto}\n\nNUEVA PREGUNTA DE JHON: ${pregunta}` },
   ];
@@ -198,8 +206,48 @@ export async function responderJuniorTarjeta(
       plan.chat_ids = [];
     }
   }
-  if (accNombre || accNota) {
-    const chatId = (accNombre?.chat_id ?? accNota?.chat_id) as number;
+  // Validar y normalizar las nuevas acciones de creación de tareas reales.
+  const accTarea = plan.nueva_tarea && typeof plan.nueva_tarea.chat_id === 'number'
+    && typeof plan.nueva_tarea.titulo === 'string' && plan.nueva_tarea.titulo.trim() ? plan.nueva_tarea : null;
+  const accTareaTransv = plan.nueva_tarea_transversal && typeof plan.nueva_tarea_transversal.titulo === 'string'
+    && plan.nueva_tarea_transversal.titulo.trim() ? plan.nueva_tarea_transversal : null;
+
+  // Misma regla anti-asumir aplica para nueva_tarea con contacto. Si la pregunta
+  // tiene patrón ambiguo "señora DE Lugar", la convertimos a tarea TRANSVERSAL
+  // automáticamente (la descripción guarda la pista para que Jhon la asocie luego).
+  let accTareaFinal = accTarea;
+  let accTareaTransvFinal = accTareaTransv;
+  if (accTarea) {
+    const matchAmbiguo = pregunta.match(/\b(?:se(?:ñ|n)or[a]?|cliente[a]?s?|don|do(?:ñ|n)a)\s+de(?:l|\s+la|\s+los|\s+las|\s+conjunto|\s+edificio|\s+calle|\s+carrera|\s+avenida|\s+barrio)?\s+([A-Za-zÁÉÍÓÚÑáéíóúñ][\wÁÉÍÓÚÑáéíóúñ'·-]+)/i);
+    if (matchAmbiguo) {
+      const fragmento = matchAmbiguo[1].trim();
+      accTareaFinal = null;
+      accTareaTransvFinal = {
+        titulo: accTarea.titulo,
+        descripcion: `Pista del contacto: "${fragmento}" (no identificado todavía — pedir nombre/teléfono a Jhon antes de mover a tarjeta).`,
+      };
+    }
+  }
+
+  // Tarea transversal: NO requiere contacto, es independiente. Va directo.
+  if (accTareaTransvFinal) {
+    const titulo = String(accTareaTransvFinal.titulo).trim().slice(0, 200);
+    const descripcion = String(accTareaTransvFinal.descripcion ?? '').trim().slice(0, 500) || null;
+    const { data: ins, error } = await sb.from('tareas_transversales').insert({
+      titulo, descripcion, creado_por: 'junior',
+    } as any).select('id').single();
+    if (error) {
+      return { respuesta: `Quería guardar la tarea transversal pero hubo un error: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    const aviso = descripcion ? ` Nota: ${descripcion}` : '';
+    return {
+      respuesta: `Listo, tarea transversal #${ins.id} guardada: «${titulo}».${aviso} Aparece cuando pidas "tareas pendientes".`,
+      tarjetas_usadas: [], via_indice: false, costo_usd: costo,
+    };
+  }
+
+  if (accNombre || accNota || accTareaFinal) {
+    const chatId = (accNombre?.chat_id ?? accNota?.chat_id ?? accTareaFinal?.chat_id) as number;
     let personaId: number | null = null;
     const { data: cl } = await sb.from('chat_checklist').select('persona_id').eq('chat_id', chatId).maybeSingle();
     personaId = (cl?.persona_id as number) ?? null;
@@ -210,7 +258,7 @@ export async function responderJuniorTarjeta(
         personaId = (pr?.persona_id as number) ?? null;
       }
     }
-    if (!personaId) {
+    if (!personaId && (accNombre || accNota)) {
       return { respuesta: `Quería guardarlo pero no identifiqué a qué contacto te referís. Decime el nombre o el número y lo hago.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
     }
     const hechos: string[] = [];
@@ -223,6 +271,15 @@ export async function responderJuniorTarjeta(
       const texto = String(accNota.texto).trim().slice(0, 500);
       const { error } = await sb.from('notas_libres').insert({ persona_id: personaId, contenido: texto, visible_para: ['todos'], creado_por: 1 } as any);
       if (!error) { await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', personaId); hechos.push(`anoté: «${texto}»`); }
+    }
+    if (accTareaFinal) {
+      // Tarea con origen='junior' — el agente regenerador NO la pisa (filtra
+      // por origen='agente' al borrar). Aparece inmediatamente en tarjeta_tarea.
+      const titulo = String(accTareaFinal.titulo).trim().slice(0, 200);
+      const { error } = await sb.from('tarjeta_tarea').insert({
+        chat_id: chatId, titulo, prioridad: 1, origen: 'junior',
+      } as any);
+      if (!error) hechos.push(`creé la tarea: «${titulo}»`);
     }
     await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', chatId);
     const nombreShow = (accNombre?.nombre as string) ?? indice.find(f => f.chat_id === chatId)?.nombre ?? `chat ${chatId}`;
@@ -402,12 +459,17 @@ export async function responderJuniorTarjeta(
       ? dedup.slice(0, 12).map((a: any) => `• ${a.fecha}${a.hora_inicio ? ' ' + String(a.hora_inicio).slice(0,5) : ''} — ${conTel(a.personas?.nombre, a.personas?.telefono_e164)}: ${a.titulo}`).join('\n')
       : null;
 
-    if (!teToca.length && !agendaTxt) {
+    // Tareas transversales (sin contacto): viven en su propia tabla. Se listan
+    // bajo una sección dedicada cuando Jhon pide pendientes. Solo las no completadas.
+    const { data: tareasTransv } = await sb.from('tareas_transversales')
+      .select('id, titulo, descripcion').is('completada_at', null).order('creado_at', { ascending: false });
+
+    if (!teToca.length && !agendaTxt && !(tareasTransv?.length)) {
       return { respuesta: 'No tenés nada pendiente de tu lado ahora mismo. 👏 Si querés ver un caso puntual, nombrame el cliente.', tarjetas_usadas: [], via_indice: true, costo_usd: costo };
     }
 
-    // Respeta el ámbito de la pregunta: "tareas" → solo TE TOCA, "agenda" → solo
-    // AGENDA, vago → ambos. Si pidió tareas pero no hay, contestá honesto.
+    // Respeta el ámbito de la pregunta: "tareas" → solo TE TOCA + transversales,
+    // "agenda" → solo AGENDA, vago → todo.
     const partes: string[] = [];
     if (agendaTxt && !pidioSoloTareas) partes.push(`📅 AGENDA próxima (7 días):\n${agendaTxt}`);
     if (teToca.length && !pidioSoloAgenda) {
@@ -420,6 +482,13 @@ export async function responderJuniorTarjeta(
         return `${cab}\n${g.items.map(it => `   – ${it}`).join('\n')}`;
       });
       partes.push(`✅ TE TOCA (acciones concretas):\n${bloques.join('\n')}`);
+    }
+    if (tareasTransv?.length && !pidioSoloAgenda) {
+      const bloques = tareasTransv.map((t: any) => {
+        const cab = `• ${t.titulo} [#${t.id}]`;
+        return t.descripcion ? `${cab}\n   – ${t.descripcion}` : cab;
+      });
+      partes.push(`📌 TRANSVERSALES (sin contacto asignado):\n${bloques.join('\n')}`);
     }
     if (!partes.length) {
       const msg = pidioSoloTareas

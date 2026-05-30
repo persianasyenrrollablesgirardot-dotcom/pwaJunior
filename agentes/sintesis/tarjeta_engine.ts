@@ -117,10 +117,15 @@ export async function reconstruirTarjeta(
     proximo_paso: chk.proximo_paso, derivado_de_hash: inputHash, actualizado_at: ahora,
   } as any);
 
-  await sb.from('tarjeta_tarea').delete().eq('chat_id', chatId);
+  // Borramos SOLO las tareas que regeneramos nosotros (origen='agente'). Las
+  // creadas por Junior (origen='junior') desde el chat sobreviven al re-ciclo
+  // del engine — Jhon las pidió a propósito, no deben evaporarse cuando el
+  // agente recalcule. Mismo patrón que agendamientos_origen.
+  await sb.from('tarjeta_tarea').delete().eq('chat_id', chatId).or('origen.eq.agente,origen.is.null');
   if (tar.tareas.length) {
     await sb.from('tarjeta_tarea').insert(tar.tareas.map(x => ({
-      chat_id: chatId, titulo: x.titulo, prioridad: x.prioridad, derivado_de_hash: inputHash,
+      chat_id: chatId, titulo: x.titulo, prioridad: x.prioridad,
+      derivado_de_hash: inputHash, origen: 'agente',
     })) as any);
   }
 
