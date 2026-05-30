@@ -1,0 +1,15 @@
+{
+  "name": "Junior — Persianas Girardot",
+  "short_name": "Junior",
+  "description": "Asistente de Jhon: chat, checklist, agendamientos y tareas.",
+  "start_url": "/junior",
+  "scope": "/junior",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb",
+  "lang": "es-CO",
+  "icons": [
+    { "src": "/junior-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
