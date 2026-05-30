@@ -8,7 +8,15 @@ import type { ReactNode } from 'react';
 
 const TEL_REGEX = /(\+\d{10,15})/g;
 
+// Marker técnico de propuestas de borrado del Junior: [#NOTA:51:chat=104] /
+// [#TAREA:867:chat=104] / [#TRANSV:3]. Va al final del mensaje para que el
+// próximo turno pueda parsearlo y ejecutar el delete confirmado. NO se muestra
+// al usuario (es ruido visual): lo strippeamos antes de renderizar.
+const MARKER_BORRADO = /\n?\[#(?:NOTA|TAREA|TRANSV):\d+(?::chat=\d+)?\]/g;
+
 export function linkifyTelefonos(texto: string): ReactNode[] {
+  // Quitar el marker técnico antes de cualquier otro procesamiento.
+  texto = texto.replace(MARKER_BORRADO, '');
   const partes: ReactNode[] = [];
   let last = 0;
   let m: RegExpExecArray | null;

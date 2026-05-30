@@ -106,6 +106,57 @@ export async function responderJuniorTarjeta(
     ? hist.map(h => `${h.rol === 'jhon' ? 'JHON' : 'JUNIOR'}: ${h.texto}`).join('\n')
     : '(sin conversación previa)';
 
+  // ── BLINDAJE BORRADO: confirmación / cancelación en 2 pasos ───────────────
+  // Si el último turno de Junior fue una PROPUESTA de borrado (contiene el
+  // marker [#NOTA:id] / [#TAREA:id] / [#TRANSV:id]) Y este turno del usuario
+  // es una confirmación o cancelación → ejecutamos el delete (o cancelamos)
+  // SIN pasar por el LLM. Esto blinda contra borrados al voleo: Junior nunca
+  // borra en el primer turno, siempre pide OK explícito antes de tocar la BD.
+  const ultimoTurnoJunior = [...historial].reverse().find(h => h.rol === 'junior')?.texto ?? '';
+  const markerBorrado = ultimoTurnoJunior.match(/\[#(NOTA|TAREA|TRANSV):(\d+)(?::chat=(\d+))?\]/);
+  if (markerBorrado) {
+    const esConfirmacion = /^\s*(s[ií]|dale|confirm[oó]|borralo|borr[aá]|hacelo|adelante|ok|listo|yes|y|👍|✅|s\b|si\s|s[ií]\s*[,.]|claro|exacto|aja|perfecto|correcto)\b/i.test(pregunta.trim());
+    const esCancelacion = /^\s*(no|cancel(a|alo)|olvidalo|d[eé]jalo|d[eé]jala|dej[aá] eso|nada|mejor no|no la|no lo|para[áa]|stop)\b/i.test(pregunta.trim());
+    if (esConfirmacion || esCancelacion) {
+      const tipo = markerBorrado[1];
+      const id = Number(markerBorrado[2]);
+      const chatIdMarker = markerBorrado[3] ? Number(markerBorrado[3]) : null;
+      if (esCancelacion) {
+        return { respuesta: `Cancelado, no borré nada.`, tarjetas_usadas: chatIdMarker ? [chatIdMarker] : [], via_indice: true, costo_usd: 0 };
+      }
+      // CONFIRMADO → ejecutar el delete según tipo.
+      if (tipo === 'NOTA') {
+        const { data: nota } = await sb.from('notas_libres').select('id, contenido, persona_id').eq('id', id).maybeSingle();
+        if (!nota) return { respuesta: `La nota #${id} ya no existe (quizás se borró antes).`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        const { error } = await sb.from('notas_libres').delete().eq('id', id);
+        if (error) return { respuesta: `No pude borrar la nota #${id}: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
+        if (nota.persona_id) await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', nota.persona_id);
+        if (chatIdMarker) await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', chatIdMarker);
+        return { respuesta: `Listo, borré la nota #${id}: «${String(nota.contenido).slice(0, 120)}${nota.contenido.length > 120 ? '…' : ''}». La tarjeta se actualiza en unos segundos.`, tarjetas_usadas: chatIdMarker ? [chatIdMarker] : [], via_indice: false, costo_usd: 0 };
+      }
+      if (tipo === 'TAREA') {
+        const { data: tarea } = await sb.from('tarjeta_tarea').select('id, titulo, chat_id, origen').eq('id', id).maybeSingle();
+        if (!tarea) return { respuesta: `La tarea #${id} ya no existe.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        if (tarea.origen !== 'junior') return { respuesta: `No puedo borrar la tarea #${id} porque la creó el agente — se regeneraría sola. Te dejo nota "Completada" si querés.`, tarjetas_usadas: [tarea.chat_id], via_indice: true, costo_usd: 0 };
+        const { error } = await sb.from('tarjeta_tarea').delete().eq('id', id);
+        if (error) return { respuesta: `No pude borrar la tarea #${id}: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
+        await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', tarea.chat_id);
+        return { respuesta: `Listo, borré la tarea #${id}: «${tarea.titulo}».`, tarjetas_usadas: [tarea.chat_id], via_indice: false, costo_usd: 0 };
+      }
+      if (tipo === 'TRANSV') {
+        const { data: tt } = await sb.from('tareas_transversales').select('id, titulo').eq('id', id).maybeSingle();
+        if (!tt) return { respuesta: `La tarea transversal #${id} ya no existe.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        const { error } = await sb.from('tareas_transversales').delete().eq('id', id);
+        if (error) return { respuesta: `No pude borrar la transversal #${id}: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
+        return { respuesta: `Listo, borré la tarea transversal #${id}: «${tt.titulo}».`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
+      }
+    }
+    // Si el último turno fue propuesta de borrado pero el usuario dijo otra cosa
+    // (ni sí ni no), seguimos el flujo normal — el marker queda activo otro turno,
+    // por si Jhon vuelve y confirma. Si dice "borrá otra cosa", se reemplaza con
+    // un nuevo marker en el siguiente bloque.
+  }
+
   // ── Paso 1: ruteo ──────────────────────────────────────────────────────
   const ruteo: ChatMessage[] = [
     {
@@ -282,13 +333,14 @@ export async function responderJuniorTarjeta(
       const previa = notas.slice(0, 4).map((n: any) => `• [#${n.id}] ${String(n.contenido).slice(0, 80)}${n.contenido.length > 80 ? '…' : ''}`).join('\n');
       return { respuesta: `Encontré ${notas.length} notas de ${nombreContacto} que matchean "${fragmento}":\n${previa}\n¿Cuál borrar? Decime el ID o un fragmento más específico.`, tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo };
     }
-    const { error } = await sb.from('notas_libres').delete().eq('id', notas[0].id);
-    if (error) {
-      return { respuesta: `No pude borrar la nota: ${error.message}`, tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo };
-    }
-    await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', personaId);
-    await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', accBorrarNota.chat_id);
-    return { respuesta: `Listo, borré la nota de ${nombreContacto}: «${String(notas[0].contenido).slice(0, 120)}${notas[0].contenido.length > 120 ? '…' : ''}». La tarjeta se actualiza en unos segundos.`, tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo };
+    // BLINDAJE: NO borramos en este turno. Devolvemos PROPUESTA con marker
+    // [#NOTA:id:chat=N]. El bloque al inicio detecta la confirmación en el
+    // siguiente turno y ejecuta el delete recién ahí.
+    const textoPreview = String(notas[0].contenido).slice(0, 140) + (notas[0].contenido.length > 140 ? '…' : '');
+    return {
+      respuesta: `Voy a borrar esta NOTA de ${nombreContacto}:\n  «${textoPreview}»\n¿Confirmás? Respondé "sí" o "borralo" para hacerlo, "no" para cancelar.\n[#NOTA:${notas[0].id}:chat=${accBorrarNota.chat_id}]`,
+      tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo,
+    };
   }
 
   if (accBorrarTarea) {
@@ -310,12 +362,10 @@ export async function responderJuniorTarjeta(
       const previa = borrables.slice(0, 4).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
       return { respuesta: `Encontré ${borrables.length} tareas mías de ${nombreContacto} con "${fragmento}":\n${previa}\n¿Cuál borrar? Decime el ID o un fragmento más específico.`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
     }
-    const { error } = await sb.from('tarjeta_tarea').delete().eq('id', borrables[0].id);
-    if (error) {
-      return { respuesta: `No pude borrar la tarea: ${error.message}`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
-    }
-    await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', accBorrarTarea.chat_id);
-    return { respuesta: `Listo, borré la tarea de ${nombreContacto}: «${borrables[0].titulo}».`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    return {
+      respuesta: `Voy a borrar esta TAREA de ${nombreContacto}:\n  «${borrables[0].titulo}»\n¿Confirmás? Respondé "sí" o "borralo" para hacerlo, "no" para cancelar.\n[#TAREA:${borrables[0].id}:chat=${accBorrarTarea.chat_id}]`,
+      tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo,
+    };
   }
 
   if (accBorrarTareaTransv) {
@@ -336,11 +386,10 @@ export async function responderJuniorTarjeta(
       const previa = candidatas.slice(0, 4).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
       return { respuesta: `Encontré ${candidatas.length} transversales con "${accBorrarTareaTransv.titulo_match}":\n${previa}\n¿Cuál? Decime el ID.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
     }
-    const { error } = await sb.from('tareas_transversales').delete().eq('id', candidatas[0].id);
-    if (error) {
-      return { respuesta: `No pude borrar la transversal: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
-    }
-    return { respuesta: `Listo, borré la tarea transversal #${candidatas[0].id}: «${candidatas[0].titulo}».`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    return {
+      respuesta: `Voy a borrar la TAREA TRANSVERSAL #${candidatas[0].id}:\n  «${candidatas[0].titulo}»\n¿Confirmás? Respondé "sí" o "borralo" para hacerlo, "no" para cancelar.\n[#TRANSV:${candidatas[0].id}]`,
+      tarjetas_usadas: [], via_indice: false, costo_usd: costo,
+    };
   }
 
   // Misma regla anti-asumir aplica para nueva_tarea con contacto. Si la pregunta
