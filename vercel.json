@@ -12,12 +12,6 @@
       "runtime": "@vercel/node@3.2.7"
     }
   },
-  "crons": [
-    {
-      "path": "/api/ping",
-      "schedule": "*/5 * * * *"
-    }
-  ],
   "rewrites": [
     { "source": "/junior/:path*", "destination": "/index.html" },
     { "source": "/junior", "destination": "/index.html" }
