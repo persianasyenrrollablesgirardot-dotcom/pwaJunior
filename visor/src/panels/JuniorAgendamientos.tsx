@@ -51,6 +51,7 @@ export function JuniorAgendamientos() {
   
   // Estados de Modal / Formulario
   const [modalAbierto, setModalAbierto] = useState(false);
+  const [editandoId, setEditandoId] = useState<number | null>(null);
   const [form, setForm] = useState({
     titulo: '',
     tipo: 'visita_medidas' as TipoEvento,
@@ -60,6 +61,21 @@ export function JuniorAgendamientos() {
     direccion: '',
     notas: '',
   });
+
+  // Abrir el modal en modo EDIT — reutiliza el mismo form + el mismo handleCrear.
+  function iniciarEdit(a: Agendamiento) {
+    setEditandoId(a.id);
+    setForm({
+      titulo: a.titulo,
+      tipo: a.tipo,
+      persona_id: a.persona_id ?? '',
+      fecha: a.fecha,
+      hora: a.hora_inicio.slice(0, 5),
+      direccion: a.direccion ?? '',
+      notas: a.notas ?? '',
+    });
+    setModalAbierto(true);
+  }
 
   // Cargar agendamientos y personas
   async function cargar() {
@@ -136,7 +152,9 @@ export function JuniorAgendamientos() {
   const selectFechaStr = fechaSeleccionada.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
   const agendaDelDia = getAgendamientosDelDia(selectFechaStr);
 
-  // Crear agendamiento manual
+  // Crear o EDITAR agendamiento. En modo edit dispara la misma cascada que
+  // TarjetaV2: PATCH con origen='manual_edit' (protege contra delete+insert
+  // del agente) + nota de cambio + sintesis_pendiente + tarjeta dirty.
   async function handleCrear(e: React.FormEvent) {
     e.preventDefault();
     if (!form.titulo || !form.fecha || !form.hora) {
@@ -144,22 +162,56 @@ export function JuniorAgendamientos() {
       return;
     }
 
-    const { error } = await supabase.from('agendamientos').insert({
-      titulo: form.titulo,
-      tipo: form.tipo,
-      persona_id: form.persona_id ? Number(form.persona_id) : null,
-      fecha: form.fecha,
-      hora_inicio: form.hora,
-      direccion: form.direccion || null,
-      notas: form.notas || null,
-    } as any);
-
-    if (error) {
-      alert('Error al agendar: ' + error.message);
-      return;
+    if (editandoId != null) {
+      // EDIT — preservar persona_id original (mejor que tomar el del form para
+      // evitar reasignaciones accidentales).
+      const original = agendamientos.find(a => a.id === editandoId);
+      const personaId = original?.persona_id ?? (form.persona_id ? Number(form.persona_id) : null);
+      const nuevoFH = `${form.fecha}${form.hora ? ' ' + form.hora : ''}`;
+      const viejoFH = original ? `${original.fecha}${original.hora_inicio ? ' ' + original.hora_inicio.slice(0,5) : ''}` : '?';
+      const { error } = await supabase.from('agendamientos').update({
+        titulo: form.titulo,
+        tipo: form.tipo,
+        fecha: form.fecha,
+        hora_inicio: form.hora,
+        direccion: form.direccion || null,
+        notas: form.notas || null,
+        origen: 'manual_edit',
+      } as any).eq('id', editandoId);
+      if (error) { alert('Error al actualizar: ' + error.message); return; }
+      // Cascada: nota + re-síntesis + tarjeta dirty (solo si hay persona).
+      if (personaId) {
+        await supabase.from('notas_libres').insert({
+          persona_id: personaId,
+          contenido: `Agenda actualizada por Jhon (desde calendario): "${form.titulo}" reprogramado de ${viejoFH} a ${nuevoFH}.`,
+          visible_para: ['todos'], creado_por: 1,
+        } as any);
+        await supabase.from('personas').update({ sintesis_pendiente: true } as any).eq('id', personaId);
+        // Marcar dirty todas las tarjetas del persona (los chats pueden ser varios).
+        const { data: proys } = await supabase.from('proyectos').select('id').eq('persona_id', personaId);
+        const proyIds = (proys ?? []).map((p: any) => p.id);
+        if (proyIds.length) {
+          const { data: chats } = await supabase.from('chats').select('id').in('proyecto_id', proyIds);
+          const chatIds = (chats ?? []).map((c: any) => c.id);
+          if (chatIds.length) await supabase.from('tarjeta').update({ dirty: true } as any).in('chat_id', chatIds);
+        }
+      }
+    } else {
+      // CREAR (flujo original)
+      const { error } = await supabase.from('agendamientos').insert({
+        titulo: form.titulo,
+        tipo: form.tipo,
+        persona_id: form.persona_id ? Number(form.persona_id) : null,
+        fecha: form.fecha,
+        hora_inicio: form.hora,
+        direccion: form.direccion || null,
+        notas: form.notas || null,
+      } as any);
+      if (error) { alert('Error al agendar: ' + error.message); return; }
     }
 
     setModalAbierto(false);
+    setEditandoId(null);
     setForm({
       titulo: '',
       tipo: 'visita_medidas',
@@ -311,6 +363,7 @@ export function JuniorAgendamientos() {
             </span>
           </div>
           <button onClick={() => {
+            setEditandoId(null);
             setForm({ ...form, fecha: selectFechaStr });
             setModalAbierto(true);
           }} style={btnCrear}>📅 Agendar</button>
@@ -363,6 +416,7 @@ export function JuniorAgendamientos() {
                           gap: 6,
                           position: 'relative'
                         }}>
+                          <button onClick={() => iniciarEdit(a)} title="Editar fecha/hora" style={{ ...btnCancelEvent, right: 32, color: 'var(--text-muted)', fontSize: 12 }}>✏️</button>
                           <button onClick={() => handleCancelar(a.id)} style={btnCancelEvent}>×</button>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ fontSize: 12 }}>{meta.emoji}</span>
@@ -415,6 +469,7 @@ export function JuniorAgendamientos() {
                   display: 'flex', flexDirection: 'column', gap: 4, cursor: 'pointer',
                   transition: 'background 0.2s'
                 }} onClick={() => {
+                  setEditandoId(null);
                   setForm({
                     titulo: t.titulo,
                     tipo: 'visita_medidas',
@@ -444,11 +499,11 @@ export function JuniorAgendamientos() {
 
       {/* MODAL / FORMULARIO CREACIÓN MANUAL */}
       {modalAbierto && (
-        <div style={modalOverlay} onClick={() => setModalAbierto(false)}>
+        <div style={modalOverlay} onClick={() => { setModalAbierto(false); setEditandoId(null); }}>
           <div style={modalBody} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
-              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>📅 Nuevo Agendamiento</h2>
-              <button onClick={() => setModalAbierto(false)} style={btnCerrarModal}>×</button>
+              <h2 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>{editandoId != null ? '✏️ Editar Agendamiento' : '📅 Nuevo Agendamiento'}</h2>
+              <button onClick={() => { setModalAbierto(false); setEditandoId(null); }} style={btnCerrarModal}>×</button>
             </div>
 
             <form onSubmit={handleCrear} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -540,8 +595,8 @@ export function JuniorAgendamientos() {
               </label>
 
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
-                <button type="button" onClick={() => setModalAbierto(false)} style={btnCancel}>Cancelar</button>
-                <button type="submit" style={btnSubmit}>Guardar compromiso</button>
+                <button type="button" onClick={() => { setModalAbierto(false); setEditandoId(null); }} style={btnCancel}>Cancelar</button>
+                <button type="submit" style={btnSubmit}>{editandoId != null ? 'Guardar cambios' : 'Guardar compromiso'}</button>
               </div>
             </form>
           </div>
