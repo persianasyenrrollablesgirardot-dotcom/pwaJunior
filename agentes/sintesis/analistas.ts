@@ -28,8 +28,19 @@ const METODOS_PAGO = new Set(['bancolombia', 'nequi', 'daviplata', 'efectivo', '
 const TIPOS_TAREA = new Set(['llamar', 'enviar_cotizacion', 'confirmar_pago', 'pedir_ficha', 'agendar_instalacion', 'reclamar_proveedor', 'pedir_resena', 'otro']);
 const MOTIVOS_RECLAMO = new Set(['cliente_molesto', 'garantia_mal_manejada', 'dano_costoso', 'publicacion_negativa', 'mala_resena', 'incumplimiento', 'otro']);
 const ESTADOS_RECLAMO = new Set(['abierto', 'en_contencion', 'escalado', 'resuelto', 'cerrado_negativo']);
-// WhatsApp de Fábrica de Cortinas Girardot — aparece en todos los chats, se descarta.
+// Números de cuentas del negocio — aparecen en TODAS las cotizaciones como
+// medios de pago (Nequi/Daviplata). NO son teléfonos de clientes; si los
+// extraemos como tel de un cliente, queda mal asignado (caso reportado: Rocio
+// Romero terminó con +573105879410 que es el Nequi de Lorena Morales).
+const TELEFONOS_NEGOCIO = new Set([
+  '3202381865',  // Daviplata
+  '3105879410',  // Nequi (Sandra Lorena Morales)
+]);
+// Compat: algunos sitios viejos referencian TELEFONO_NEGOCIO singular.
 const TELEFONO_NEGOCIO = '3202381865';
+// Si un número aparece dentro de una ventana cercana a estos keywords, es un
+// número de cuenta/transferencia, NO el tel del cliente. Lo descartamos.
+const KEYWORDS_PAGO_CERCA = /\b(nequi|daviplata|bancolombia|davivienda|cuenta\b|transferenc|consign|abonar|pagar\s+a|cta\.?\s+(ahorr|corr)|n[uú]mero\s+de\s+cuenta|medios?\s+de\s+pago)/i;
 
 const FORMATO = `
 
@@ -661,10 +672,20 @@ async function extraerTelefonoCliente(sb: SupabaseClient, personaId: number, msg
   const re = /(?:\+?57[\s-]?)?(3\d{2}[\s-]?\d{3}[\s-]?\d{4})/g;
   const conteo = new Map<string, number>();
   for (const m of msgs) {
+    // Solo mensajes ENTRANTES — el cliente reporta SU número, no Jhon. Procesar
+    // salientes incluye las cotizaciones que mandamos con Nequi/Daviplata, y de
+    // ahí salía el bug: el Nequi del negocio se asignaba como tel del cliente.
+    if (m.direccion !== 'entrante') continue;
     const t = (m.texto || '') + ' ' + ((m.metadata as any)?.ai_text || '');
     for (const x of t.matchAll(re)) {
       const num = x[1].replace(/[\s-]/g, '');   // 10 dígitos: 3XXXXXXXXX
-      if (num.length !== 10 || num === TELEFONO_NEGOCIO) continue;
+      if (num.length !== 10 || TELEFONOS_NEGOCIO.has(num)) continue;
+      // Defensa adicional: si el cliente reenvía la cotización (forward del
+      // catálogo de Jhon) o copia info de pago, descartar números que estén
+      // dentro de una ventana de ±80 chars a keywords de pago (Nequi/cuenta).
+      const idx = x.index ?? 0;
+      const ventana = t.slice(Math.max(0, idx - 80), Math.min(t.length, idx + x[0].length + 80));
+      if (KEYWORDS_PAGO_CERCA.test(ventana)) continue;
       conteo.set(num, (conteo.get(num) ?? 0) + 1);
     }
   }
@@ -674,7 +695,7 @@ async function extraerTelefonoCliente(sb: SupabaseClient, personaId: number, msg
   const e164 = '+57' + mejor;
   const { error } = await sb.from('personas').update({ telefono_e164: e164 }).eq('id', personaId);
   if (error) console.error(`[telefono] persona ${personaId}: ${error.message}`);
-  else console.log(`[telefono] persona ${personaId} → ${e164} (extraído de mensajes/OCR)`);
+  else console.log(`[telefono] persona ${personaId} → ${e164} (extraído de mensajes entrantes)`);
 }
 
 const JUNIOR_SYSTEM =
