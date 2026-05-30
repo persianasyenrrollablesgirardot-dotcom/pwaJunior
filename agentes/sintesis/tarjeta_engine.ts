@@ -143,15 +143,19 @@ export async function reconstruirTarjeta(
 
   // Calendario: alimentar la tabla canónica `agendamientos` con los que tienen
   // FECHA. origen='agente_v2' → regenero solo lo mío, sin tocar las citas
-  // manuales (origen NULL). Así la visita aparece en el calendario de la UI.
+  // manuales (origen NULL) ni las que Jhon editó (origen='manual_edit').
   //
-  // Dedup dentro de la lista del agente: derivarAgenda a veces emite varias
-  // variaciones del mismo evento (mismo día/hora, título distinto). Quedarse
-  // con la primera por (fecha, hora, primeras 30 letras del título normalizado).
+  // Dedup dentro de la lista del agente + dedup contra manual_edit existentes:
+  // si Jhon ya reprogramó una cita (mismo persona + fecha + hora), NO emito otra
+  // del agente para no duplicar visualmente.
   await sb.from('agendamientos').delete().eq('persona_id', personaId).eq('origen', 'agente_v2');
+  const { data: manuales } = await sb.from('agendamientos')
+    .select('fecha, hora_inicio').eq('persona_id', personaId).eq('origen', 'manual_edit');
+  const yaManual = new Set((manuales ?? []).map((m: any) => `${m.fecha}|${m.hora_inicio ?? ''}`));
   const conFecha = age.agendamientos.filter(x => x.fecha);
   const vistos = new Set<string>();
   const dedupAge = conFecha.filter(x => {
+    if (yaManual.has(`${x.fecha}|${x.hora ?? ''}`)) return false;
     const k = `${x.fecha}|${x.hora ?? ''}|${(x.titulo ?? '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 30)}`;
     if (vistos.has(k)) return false;
     vistos.add(k); return true;

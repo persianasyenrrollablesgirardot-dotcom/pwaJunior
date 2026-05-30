@@ -21,6 +21,7 @@ interface TarjetaRow {
 interface Checklist { chat_id: number; estado_conversacion: EstadoConv; proximo_paso: string | null }
 interface Tarea { id: number; titulo: string; prioridad: number }
 interface Agenda { id: number; titulo: string; cuando: string; lugar: string }
+interface AgCanon { id: number; titulo: string; tipo: string | null; fecha: string | null; hora_inicio: string | null; direccion: string | null; origen: string | null }
 interface MediaRow { id: number; tipo: string; direccion: 'entrante' | 'saliente'; ts_canal: string; metadata: any }
 
 const TIPO_META: Record<string, { label: string; color: string }> = {
@@ -68,6 +69,10 @@ export function TarjetaV2() {
   const [filtroEstado, setFiltroEstado] = useState<'activos' | 'cerrados' | 'todos'>('activos');
   const [filtroTipo, setFiltroTipo] = useState<string | null>(null); // null = todos
   const [verSinIdentificar, setVerSinIdentificar] = useState(false);
+  const [agCanon, setAgCanon] = useState<AgCanon[]>([]);
+  const [editandoAg, setEditandoAg] = useState<number | null>(null);
+  const [editFecha, setEditFecha] = useState('');
+  const [editHora, setEditHora] = useState('');
   // Chat con Junior V2 (lee solo las tarjetas relevantes)
   const [jPregunta, setJPregunta] = useState('');
   const [jResp, setJResp] = useState<{ respuesta: string; tarjetas_usadas: number[]; via_indice: boolean; costo_usd: number } | null>(null);
@@ -109,12 +114,54 @@ export function TarjetaV2() {
     setTareas((tr as any) ?? []);
     const { data: ag } = await supabase.from('tarjeta_agenda').select('*').eq('chat_id', chatId);
     setAgenda((ag as any) ?? []);
+    // Agendamientos canónicos del PERSONA (no del chat) — editables.
+    const { data: tj } = await supabase.from('tarjeta').select('persona_id').eq('chat_id', chatId).maybeSingle();
+    const pid = (tj as any)?.persona_id;
+    if (pid) {
+      const { data: ags } = await supabase.from('agendamientos')
+        .select('id, titulo, tipo, fecha, hora_inicio, direccion, origen')
+        .eq('persona_id', pid).order('fecha', { ascending: true });
+      setAgCanon((ags as any) ?? []);
+    } else { setAgCanon([]); }
     const { data: md } = await supabase.from('mensajes')
       .select('id, tipo, direccion, ts_canal, metadata')
       .eq('chat_id', chatId).in('tipo', ['imagen','audio','documento','video'])
       .is('deleted_at', null).order('ts_canal', { ascending: false }).limit(30);
     setMedia((md as any) ?? []);
   }, []);
+
+  function iniciarEdit(ag: AgCanon) {
+    setEditandoAg(ag.id);
+    setEditFecha(ag.fecha ?? '');
+    setEditHora((ag.hora_inicio ?? '').slice(0, 5)); // HH:MM
+  }
+  function cancelarEdit() { setEditandoAg(null); }
+  async function guardarEdit(ag: AgCanon) {
+    if (!editFecha) return;
+    const nuevaFecha = editFecha;
+    const nuevaHora = editHora ? `${editHora}:00` : null;
+    const viejaFecha = ag.fecha ?? 'sin fecha';
+    const viejaHora = (ag.hora_inicio ?? '').slice(0, 5) || 'sin hora';
+    const nueva = `${nuevaFecha}${nuevaHora ? ' ' + nuevaHora.slice(0,5) : ''}`;
+    const vieja = `${viejaFecha}${viejaHora !== 'sin hora' ? ' ' + viejaHora : ''}`;
+    // 1) PATCH agendamiento — origen='manual_edit' protege contra el delete+insert del agente.
+    await supabase.from('agendamientos').update({
+      fecha: nuevaFecha, hora_inicio: nuevaHora, origen: 'manual_edit',
+    } as any).eq('id', ag.id);
+    // 2) Nota para que la próxima síntesis (agregador + derivados) honre el cambio.
+    if (t?.persona_id) {
+      await supabase.from('notas_libres').insert({
+        persona_id: t.persona_id,
+        contenido: `Agenda actualizada por Jhon: "${ag.titulo}" reprogramado de ${vieja} a ${nueva}.`,
+        visible_para: ['todos'], creado_por: 1,
+      } as any);
+      await supabase.from('personas').update({ sintesis_pendiente: true } as any).eq('id', t.persona_id);
+    }
+    // 3) Marcar tarjeta dirty (PK chat_id) → cicloTarjetas la regenera.
+    if (sel != null) await supabase.from('tarjeta').update({ dirty: true } as any).eq('chat_id', sel);
+    setEditandoAg(null);
+    if (sel != null) await cargarDerivados(sel);
+  }
 
   async function reprocesarMedia(body: { message_id?: number; chat_id?: number }) {
     const key = body.message_id ?? -1;
@@ -419,10 +466,45 @@ export function TarjetaV2() {
                     ))}
                   </Derivado>
                   <Derivado icono="📅" titulo="Agendamiento" color="#0891b2">
-                    {agenda.length === 0 ? <Vacio /> : agenda.map(x => (
-                      <div key={x.id} style={{ fontSize: 13, padding: '3px 0' }}>
-                        <div style={{ fontWeight: 600 }}>{x.titulo}</div>
-                        <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{x.cuando}{x.lugar ? ' · ' + x.lugar : ''}</div>
+                    {agCanon.length === 0 && agenda.length === 0 && <Vacio />}
+                    {agCanon.map(x => {
+                      const editando = editandoAg === x.id;
+                      const horaShow = (x.hora_inicio ?? '').slice(0, 5);
+                      const editado = x.origen === 'manual_edit';
+                      return (
+                        <div key={x.id} style={{ fontSize: 13, padding: '6px 0', borderBottom: '1px dashed var(--border-soft)' }}>
+                          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontWeight: 600 }}>{x.titulo}{editado && <span title="Editado por vos" style={{ marginLeft: 6, fontSize: 10, color: '#16a34a', fontWeight: 700 }}>✎ editado</span>}</div>
+                              {editando ? (
+                                <div style={{ marginTop: 4, display: 'flex', gap: 6, alignItems: 'center' }}>
+                                  <input type="date" value={editFecha} onChange={e => setEditFecha(e.target.value)}
+                                    style={{ fontSize: 12, padding: '3px 6px', border: '1px solid var(--border)', borderRadius: 4 }} />
+                                  <input type="time" value={editHora} onChange={e => setEditHora(e.target.value)}
+                                    style={{ fontSize: 12, padding: '3px 6px', border: '1px solid var(--border)', borderRadius: 4 }} />
+                                  <button onClick={() => guardarEdit(x)} style={{ fontSize: 11, padding: '3px 10px', border: 'none', background: '#16a34a', color: 'white', borderRadius: 4, cursor: 'pointer', fontWeight: 600 }}>Guardar</button>
+                                  <button onClick={cancelarEdit} style={{ fontSize: 11, padding: '3px 10px', border: '1px solid var(--border)', background: 'transparent', borderRadius: 4, cursor: 'pointer' }}>✕</button>
+                                </div>
+                              ) : (
+                                <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+                                  {x.fecha ?? 'por coordinar'}{horaShow ? ' · ' + horaShow : ''}{x.direccion ? ' · ' + x.direccion : ''}
+                                </div>
+                              )}
+                            </div>
+                            {!editando && x.fecha && (
+                              <button onClick={() => iniciarEdit(x)} title="Reprogramar fecha / hora" style={{
+                                fontSize: 11, padding: '3px 8px', border: '1px solid var(--border)',
+                                background: 'transparent', cursor: 'pointer', borderRadius: 4, color: 'var(--text-muted)',
+                              }}>✏️</button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {/* Items 'por coordinar' (sin fecha) del agente, solo lectura */}
+                    {agenda.filter(x => !x.cuando || x.cuando === 'por coordinar').map(x => (
+                      <div key={`tc-${x.id}`} style={{ fontSize: 13, padding: '4px 0', color: 'var(--text-muted)' }}>
+                        <span style={{ fontWeight: 600 }}>{x.titulo}</span> <span style={{ fontSize: 11 }}>· por coordinar</span>
                       </div>
                     ))}
                   </Derivado>
