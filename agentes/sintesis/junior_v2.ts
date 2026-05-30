@@ -135,18 +135,23 @@ export async function responderJuniorTarjeta(
         return { respuesta: `Listo, borré la nota #${id}: «${String(nota.contenido).slice(0, 120)}${nota.contenido.length > 120 ? '…' : ''}». La tarjeta se actualiza en unos segundos.`, tarjetas_usadas: chatIdMarker ? [chatIdMarker] : [], via_indice: false, costo_usd: 0 };
       }
       if (tipo === 'TAREA') {
-        const { data: tarea } = await sb.from('tarjeta_tarea').select('id, titulo, chat_id, origen').eq('id', id).maybeSingle();
-        if (!tarea) return { respuesta: `La tarea #${id} ya no existe.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
-        if (tarea.origen !== 'junior') return { respuesta: `No puedo borrar la tarea #${id} porque la creó el agente — se regeneraría sola. Te dejo nota "Completada" si querés.`, tarjetas_usadas: [tarea.chat_id], via_indice: true, costo_usd: 0 };
-        const { error } = await sb.from('tarjeta_tarea').delete().eq('id', id);
+        // Tareas V1 viven en `tareas`. Soft delete: deleted_at = now() para que
+        // queden auditables (la UI ya filtra is.deleted_at.null).
+        const { data: tarea } = await sb.from('tareas').select('id, titulo, persona_id, agente_origen, deleted_at').eq('id', id).maybeSingle();
+        if (!tarea || tarea.deleted_at) return { respuesta: `La tarea #${id} ya no existe.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        if (tarea.agente_origen !== 'junior_v2') return { respuesta: `No puedo borrar la tarea #${id} porque no la creé yo. Marcala completada en el panel Tareas.`, tarjetas_usadas: chatIdMarker ? [chatIdMarker] : [], via_indice: true, costo_usd: 0 };
+        const { error } = await sb.from('tareas').update({ deleted_at: new Date().toISOString() } as any).eq('id', id);
         if (error) return { respuesta: `No pude borrar la tarea #${id}: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
-        await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', tarea.chat_id);
-        return { respuesta: `Listo, borré la tarea #${id}: «${tarea.titulo}».`, tarjetas_usadas: [tarea.chat_id], via_indice: false, costo_usd: 0 };
+        if (chatIdMarker) await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', chatIdMarker);
+        return { respuesta: `Listo, borré la tarea #${id}: «${tarea.titulo}».`, tarjetas_usadas: chatIdMarker ? [chatIdMarker] : [], via_indice: false, costo_usd: 0 };
       }
       if (tipo === 'TRANSV') {
-        const { data: tt } = await sb.from('tareas_transversales').select('id, titulo').eq('id', id).maybeSingle();
-        if (!tt) return { respuesta: `La tarea transversal #${id} ya no existe.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
-        const { error } = await sb.from('tareas_transversales').delete().eq('id', id);
+        // Transversales también viven en `tareas` (persona_id=null).
+        const { data: tt } = await sb.from('tareas').select('id, titulo, persona_id, agente_origen, deleted_at').eq('id', id).maybeSingle();
+        if (!tt || tt.deleted_at) return { respuesta: `La tarea transversal #${id} ya no existe.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        if (tt.persona_id !== null) return { respuesta: `La tarea #${id} no es transversal (tiene contacto asignado). Probá borrarla como tarea normal.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        if (tt.agente_origen !== 'junior_v2') return { respuesta: `No puedo borrar la transversal #${id} porque no la creé yo. Borrala en el panel Tareas.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        const { error } = await sb.from('tareas').update({ deleted_at: new Date().toISOString() } as any).eq('id', id);
         if (error) return { respuesta: `No pude borrar la transversal #${id}: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
         return { respuesta: `Listo, borré la tarea transversal #${id}: «${tt.titulo}».`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
       }
@@ -291,10 +296,41 @@ export async function responderJuniorTarjeta(
     }
   }
   // Validar y normalizar las nuevas acciones de creación de tareas reales.
+  // Junior escribe en la tabla `tareas` (V1) — la misma que muestra el panel
+  // JuniorTareas del Visor. Antes escribía en `tarjeta_tarea` + tabla nueva
+  // `tareas_transversales`, pero el panel UI no las leía. Ahora todo va a `tareas`:
+  // persona_id != null → tarea de cliente; persona_id NULL → transversal.
+  // Identificador interno: agente_origen='junior_v2'.
+  // Palabras "vacías" — meta-palabras sobre la entidad tarea, sin acción concreta.
+  // Si todas las palabras del título son de esta lista, el LLM le puso título
+  // genérico porque Jhon no especificó qué hacer. Ej: "Crear tarea transversal",
+  // "Tarea transversal pendiente", "Nueva tarea sin detalles".
+  const PALABRAS_VACIAS = /^(tarea|transversal|nota|pendiente|recordatorio|crear?|nueva?|sin|especificar|detalles|acci[oó]n|gen[eé]rica?|hacer?|agregar?|a[nñ]adir?|una?|la|el|los?|las?|de|del|por|para|con|recordar|recuerda)$/i;
+  function tituloEsBasura(t: string): boolean {
+    const limpio = t.trim();
+    if (limpio.length < 8) return true;
+    const palabras = limpio.replace(/[.,;:!?¡¿«»()'"]/g, '').split(/\s+/).filter(p => p.length >= 2);
+    if (palabras.length < 2) return true;
+    // Si todas las palabras son meta, es basura. Si tiene al menos UN verbo de
+    // acción concreto ("llamar", "cortar", "agendar", "comprar"...), pasa.
+    const todasVacias = palabras.every(p => PALABRAS_VACIAS.test(p));
+    return todasVacias;
+  }
   const accTarea = plan.nueva_tarea && typeof plan.nueva_tarea.chat_id === 'number'
     && typeof plan.nueva_tarea.titulo === 'string' && plan.nueva_tarea.titulo.trim() ? plan.nueva_tarea : null;
   const accTareaTransv = plan.nueva_tarea_transversal && typeof plan.nueva_tarea_transversal.titulo === 'string'
     && plan.nueva_tarea_transversal.titulo.trim() ? plan.nueva_tarea_transversal : null;
+
+  // Guard ANTI-BASURA: si el título es vacío/genérico ("crear tarea", "nueva", "tarea
+  // transversal" sin contenido), NO creamos — pedimos el texto real. Caso reportado:
+  // Jhon dijo "Créame una tarea transversal" y Junior creó tarea con título literal
+  // "Crear tarea transversal" → basura en BD.
+  if (accTarea && tituloEsBasura(accTarea.titulo)) {
+    return { respuesta: `Decime qué acción concreta querés que guarde. Ej: "llamar a Pedro para confirmar pago", "cotizar las cortinas del Cortijo". Sin el contenido no la creo.`, tarjetas_usadas: [], via_indice: true, costo_usd: costo };
+  }
+  if (accTareaTransv && tituloEsBasura(accTareaTransv.titulo)) {
+    return { respuesta: `Decime qué tarea transversal querés. Ej: "comprar grapas industriales", "buscar nuevo proveedor de telas". Sin el contenido no la creo.`, tarjetas_usadas: [], via_indice: true, costo_usd: costo };
+  }
 
   // ── Acciones de BORRADO ────────────────────────────────────────────────────
   // Los 3 borrar_X requieren UNICIDAD: borramos solo si hay exactamente 1 match.
@@ -345,18 +381,33 @@ export async function responderJuniorTarjeta(
 
   if (accBorrarTarea) {
     const fragmento = String(accBorrarTarea.titulo_match).trim();
-    // Solo borramos tareas que Junior creó (origen='junior'). Las del agente
-    // se regeneran al rato — borrarlas sería inútil y peligroso.
-    const { data: tareas } = await sb.from('tarjeta_tarea')
-      .select('id, titulo, origen').eq('chat_id', accBorrarTarea.chat_id).ilike('titulo', `%${fragmento}%`);
-    const nombreContacto = indice.find(f => f.chat_id === accBorrarTarea.chat_id)?.nombre ?? `chat ${accBorrarTarea.chat_id}`;
-    if (!tareas || tareas.length === 0) {
-      return { respuesta: `No encontré tareas de ${nombreContacto} con "${fragmento}". Probá con otro fragmento.`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    // Resolver persona_id desde chat (las tareas V1 viven por persona, no chat).
+    const { data: cl } = await sb.from('chat_checklist').select('persona_id').eq('chat_id', accBorrarTarea.chat_id).maybeSingle();
+    let personaId = (cl?.persona_id as number) ?? null;
+    if (!personaId) {
+      const { data: ch } = await sb.from('chats').select('proyecto_id').eq('id', accBorrarTarea.chat_id).maybeSingle();
+      if (ch?.proyecto_id) {
+        const { data: pr } = await sb.from('proyectos').select('persona_id').eq('id', ch.proyecto_id).maybeSingle();
+        personaId = (pr?.persona_id as number) ?? null;
+      }
     }
-    const borrables = tareas.filter((t: any) => t.origen === 'junior');
+    const nombreContacto = indice.find(f => f.chat_id === accBorrarTarea.chat_id)?.nombre ?? `chat ${accBorrarTarea.chat_id}`;
+    if (!personaId) {
+      return { respuesta: `No identifiqué la persona del contacto ${nombreContacto}.`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    }
+    // Buscar en `tareas` V1, activas (no completadas, no soft-deleted).
+    const { data: tareas } = await sb.from('tareas')
+      .select('id, titulo, agente_origen').eq('persona_id', personaId)
+      .is('deleted_at', null).eq('completada', false).ilike('titulo', `%${fragmento}%`);
+    if (!tareas || tareas.length === 0) {
+      return { respuesta: `No encontré tareas activas de ${nombreContacto} con "${fragmento}".`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    }
+    // Solo puedo borrar las que creé yo (agente_origen='junior_v2'). Las otras
+    // (M5, otros agentes V1) Jhon las marca completadas o las borra en la UI.
+    const borrables = tareas.filter((t: any) => t.agente_origen === 'junior_v2');
     if (borrables.length === 0) {
-      const lista = tareas.slice(0, 3).map((t: any) => `• ${t.titulo}`).join('\n');
-      return { respuesta: `Esa(s) tarea(s) la creó el agente, no yo — no las puedo borrar (se regeneran solas al rato). Si querés que no aparezca, te dejo nota "Completada" o vos le hacés check en la UI:\n${lista}`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+      const lista = tareas.slice(0, 3).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
+      return { respuesta: `Esa(s) tarea(s) la creó otro agente, yo no puedo borrarla. Te dejo nota "Completada" o vos le hacés check en el panel Tareas:\n${lista}`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
     }
     if (borrables.length > 1) {
       const previa = borrables.slice(0, 4).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
@@ -371,23 +422,32 @@ export async function responderJuniorTarjeta(
   if (accBorrarTareaTransv) {
     let candidatas: any[] = [];
     if (typeof accBorrarTareaTransv.id === 'number') {
-      const { data } = await sb.from('tareas_transversales').select('id, titulo').eq('id', accBorrarTareaTransv.id);
+      const { data } = await sb.from('tareas').select('id, titulo, agente_origen')
+        .eq('id', accBorrarTareaTransv.id).is('persona_id', null).is('deleted_at', null);
       candidatas = data ?? [];
     } else {
-      const { data } = await sb.from('tareas_transversales').select('id, titulo')
-        .ilike('titulo', `%${String(accBorrarTareaTransv.titulo_match).trim()}%`).is('completada_at', null);
+      const { data } = await sb.from('tareas').select('id, titulo, agente_origen')
+        .is('persona_id', null).is('deleted_at', null).eq('completada', false)
+        .ilike('titulo', `%${String(accBorrarTareaTransv.titulo_match).trim()}%`);
       candidatas = data ?? [];
     }
     const ref = accBorrarTareaTransv.id ? `#${accBorrarTareaTransv.id}` : `"${accBorrarTareaTransv.titulo_match}"`;
     if (!candidatas.length) {
       return { respuesta: `No encontré tarea transversal ${ref}.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
     }
-    if (candidatas.length > 1) {
-      const previa = candidatas.slice(0, 4).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
-      return { respuesta: `Encontré ${candidatas.length} transversales con "${accBorrarTareaTransv.titulo_match}":\n${previa}\n¿Cuál? Decime el ID.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    // Filtro de seguridad: solo borro las mías. Las otras transversales (creadas
+    // por Jhon en la UI o por otros flujos) no las toco.
+    const borrables = candidatas.filter((t: any) => t.agente_origen === 'junior_v2');
+    if (borrables.length === 0) {
+      const lista = candidatas.slice(0, 3).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
+      return { respuesta: `Esa transversal no la creé yo (la creaste vos o otro). Borrala vos desde el panel Tareas:\n${lista}`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    if (borrables.length > 1) {
+      const previa = borrables.slice(0, 4).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
+      return { respuesta: `Encontré ${borrables.length} transversales mías con "${accBorrarTareaTransv.titulo_match}":\n${previa}\n¿Cuál? Decime el ID.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
     }
     return {
-      respuesta: `Voy a borrar la TAREA TRANSVERSAL #${candidatas[0].id}:\n  «${candidatas[0].titulo}»\n¿Confirmás? Respondé "sí" o "borralo" para hacerlo, "no" para cancelar.\n[#TRANSV:${candidatas[0].id}]`,
+      respuesta: `Voy a borrar la TAREA TRANSVERSAL #${borrables[0].id}:\n  «${borrables[0].titulo}»\n¿Confirmás? Respondé "sí" o "borralo" para hacerlo, "no" para cancelar.\n[#TRANSV:${borrables[0].id}]`,
       tarjetas_usadas: [], via_indice: false, costo_usd: costo,
     };
   }
@@ -409,19 +469,23 @@ export async function responderJuniorTarjeta(
     }
   }
 
-  // Tarea transversal: NO requiere contacto, es independiente. Va directo.
+  // Tarea transversal: NO requiere contacto, va a `tareas` V1 con persona_id=NULL.
+  // Aparece en el panel JuniorTareas (filtro "Transversales") y en mi listado.
   if (accTareaTransvFinal) {
     const titulo = String(accTareaTransvFinal.titulo).trim().slice(0, 200);
     const descripcion = String(accTareaTransvFinal.descripcion ?? '').trim().slice(0, 500) || null;
-    const { data: ins, error } = await sb.from('tareas_transversales').insert({
-      titulo, descripcion, creado_por: 'junior',
+    const { data: ins, error } = await sb.from('tareas').insert({
+      persona_id: null,
+      titulo, descripcion, tipo: 'otro',
+      origen: 'chat', agente_origen: 'junior_v2',
+      asignado_a: 'jhon', prioridad: 5, shadow: false,
     } as any).select('id').single();
     if (error) {
       return { respuesta: `Quería guardar la tarea transversal pero hubo un error: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
     }
     const aviso = descripcion ? ` Nota: ${descripcion}` : '';
     return {
-      respuesta: `Listo, tarea transversal #${ins.id} guardada: «${titulo}».${aviso} Aparece cuando pidas "tareas pendientes".`,
+      respuesta: `Listo, tarea transversal #${ins.id} guardada: «${titulo}».${aviso} La ves en el panel Tareas (filtro Transversales) o cuando me pidas "tareas pendientes".`,
       tarjetas_usadas: [], via_indice: false, costo_usd: costo,
     };
   }
@@ -453,11 +517,13 @@ export async function responderJuniorTarjeta(
       if (!error) { await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', personaId); hechos.push(`anoté: «${texto}»`); }
     }
     if (accTareaFinal) {
-      // Tarea con origen='junior' — el agente regenerador NO la pisa (filtra
-      // por origen='agente' al borrar). Aparece inmediatamente en tarjeta_tarea.
+      // Tarea con persona_id: va a `tareas` V1 (la tabla que muestra el panel
+      // JuniorTareas). agente_origen='junior_v2' la marca como mía.
       const titulo = String(accTareaFinal.titulo).trim().slice(0, 200);
-      const { error } = await sb.from('tarjeta_tarea').insert({
-        chat_id: chatId, titulo, prioridad: 1, origen: 'junior',
+      const { error } = await sb.from('tareas').insert({
+        persona_id: personaId, titulo, tipo: 'otro',
+        origen: 'chat', agente_origen: 'junior_v2',
+        asignado_a: 'jhon', prioridad: 5, shadow: false,
       } as any);
       if (!error) hechos.push(`creé la tarea: «${titulo}»`);
     }
@@ -607,6 +673,37 @@ export async function responderJuniorTarjeta(
       if (!f.proximo || NO_ACCION.test(f.proximo)) continue;
       grupos.set(f.chat_id, { nombre: f.nombre, tel: f.tel, estado: f.estado, items: [f.proximo] });
     }
+    // Sumar tareas de `tareas` V1 que tienen persona_id (creadas por Junior o
+    // por el panel) y aún no completadas. Las mapeo por persona → chat para
+    // mezclar con `grupos` existente. Sin esto, las tareas que crea Junior
+    // aparecen en panel UI pero no en el listado "TE TOCA" que da por chat.
+    const personasConTarjeta = new Map<number, FilaIndice>();
+    {
+      const personaIds = await sb.from('tarjeta').select('chat_id, persona_id').not('persona_id', 'is', null);
+      for (const t of (personaIds.data ?? []) as any[]) {
+        const info = infoPorChat.get(t.chat_id);
+        if (info) personasConTarjeta.set(t.persona_id, info);
+      }
+    }
+    const personaIdsActivos = [...personasConTarjeta.keys()];
+    if (personaIdsActivos.length) {
+      const { data: tareasV1 } = await sb.from('tareas')
+        .select('id, titulo, persona_id').in('persona_id', personaIdsActivos)
+        .is('deleted_at', null).eq('completada', false).eq('shadow', false);
+      for (const t of (tareasV1 ?? []) as any[]) {
+        const info = personasConTarjeta.get(t.persona_id);
+        if (!info) continue;
+        if (NO_ACCION.test(t.titulo)) continue;
+        if (!grupos.has(info.chat_id)) {
+          grupos.set(info.chat_id, { nombre: info.nombre, tel: info.tel, estado: info.estado, items: [] });
+        }
+        // Evitar duplicar: si ya está el mismo título no lo agrego de nuevo.
+        const g = grupos.get(info.chat_id)!;
+        if (!g.items.some(it => it.toLowerCase() === String(t.titulo).toLowerCase().trim())) {
+          g.items.push(String(t.titulo).trim());
+        }
+      }
+    }
     const teToca = [...grupos.values()];
 
     // Próximos agendamientos (7 días) — para que la respuesta empiece con calendario.
@@ -652,10 +749,13 @@ export async function responderJuniorTarjeta(
       ? dedup.slice(0, 12).map((a: any) => `• ${a.fecha}${a.hora_inicio ? ' ' + String(a.hora_inicio).slice(0,5) : ''} — ${conTel(a.personas?.nombre, a.personas?.telefono_e164)}: ${a.titulo}`).join('\n')
       : null;
 
-    // Tareas transversales (sin contacto): viven en su propia tabla. Se listan
-    // bajo una sección dedicada cuando Jhon pide pendientes. Solo las no completadas.
-    const { data: tareasTransv } = await sb.from('tareas_transversales')
-      .select('id, titulo, descripcion').is('completada_at', null).order('creado_at', { ascending: false });
+    // Tareas transversales: viven en `tareas` V1 con persona_id=NULL. Solo
+    // mostramos las activas (no completadas, no soft-deleted). Cualquiera puede
+    // crearlas — incluyo todas, no solo las mías.
+    const { data: tareasTransv } = await sb.from('tareas')
+      .select('id, titulo, descripcion').is('persona_id', null)
+      .is('deleted_at', null).eq('completada', false).eq('shadow', false)
+      .order('created_at', { ascending: false });
 
     if (!teToca.length && !agendaTxt && !(tareasTransv?.length)) {
       return { respuesta: 'No tenés nada pendiente de tu lado ahora mismo. 👏 Si querés ver un caso puntual, nombrame el cliente.', tarjetas_usadas: [], via_indice: true, costo_usd: costo };
