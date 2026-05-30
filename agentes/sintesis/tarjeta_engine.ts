@@ -38,13 +38,28 @@ async function resolverPersona(sb: SupabaseClient, chatId: number): Promise<numb
   return null;
 }
 
-/** Último veredicto de A2_NOCLIENTE para el chat: ¿no es cliente real? */
-async function verdictoNoCliente(sb: SupabaseClient, chatId: number): Promise<{ esNoCliente: boolean; subtipo: string | null }> {
+/** ¿El nombre de la persona es un placeholder no resuelto? (FASE 9.1 @lid sin metadata). */
+function nombreSinIdentificar(nombre: string | null | undefined): boolean {
+  const n = (nombre ?? '').trim();
+  return n.startsWith('⏳') || /^identificando/i.test(n);
+}
+
+/** ¿No es cliente real?
+ *  - Verdicto explícito de A2_NOCLIENTE (es_cliente=false), o
+ *  - Placeholder '⏳ Identificando…' (FASE 9.1): son jids @lid huérfanos
+ *    sin nombre humano. WA Web no los resolvió, probablemente porque no
+ *    están en la libreta. Los marcamos no-cliente automáticamente para
+ *    que no contaminen el índice de Junior ni el listado comercial. */
+async function verdictoNoCliente(sb: SupabaseClient, chatId: number, personaId: number | null): Promise<{ esNoCliente: boolean; subtipo: string | null }> {
   const { data } = await sb.from('evento_pg')
     .select('payload').eq('agente_origen', 'A2_NOCLIENTE').eq('chat_id', chatId)
     .order('ts_creado', { ascending: false }).limit(1);
   const p: any = data?.[0]?.payload;
   if (p && p.es_cliente === false) return { esNoCliente: true, subtipo: p.subtipo_no_cliente ?? null };
+  if (personaId) {
+    const { data: per } = await sb.from('personas').select('nombre').eq('id', personaId).maybeSingle();
+    if (nombreSinIdentificar(per?.nombre)) return { esNoCliente: true, subtipo: 'sin_identificar' };
+  }
   return { esNoCliente: false, subtipo: null };
 }
 
@@ -55,7 +70,7 @@ export async function reconstruirTarjeta(
   if (!personaId) {
     return { chat_id: chatId, persona_id: null, cambio: false, motivo: 'chat sin persona resoluble', hash: '', costo_usd: 0 };
   }
-  const noCli = await verdictoNoCliente(sb, chatId);
+  const noCli = await verdictoNoCliente(sb, chatId, personaId);
   // Si el contacto quedó con nombre feo (status de WhatsApp / solo número),
   // intentar extraer un nombre útil de la conversación. Se auto-resuelve: una
   // vez con nombre bueno, no se vuelve a intentar.
