@@ -221,12 +221,20 @@ export async function responderJuniorTarjeta(
   // "Dame tareas pendientes" → solo 5 items). Si la pregunta matchea claramente
   // un pedido de lista completa, IGNORAMOS lo que dijo el LLM y vamos al
   // fallback determinístico que arma TODA la lista.
-  const queryEsPedidoExplicitoDeLista = /\b(dame.*(pendientes|tareas|agenda|lista)|qu[eé]\s+tengo\s+(pendiente|hoy|que\s+hacer)|tareas?\s+pendientes|lista\s+de\s+(tareas|pendientes)|pendientes\s+actualizados?|organiz[aá]\s+mi|gu[ií]ate\s+por\s+el\s+checklist)\b/i.test(pregunta);
+  const queryEsPedidoExplicitoDeLista = /\b(dame.*(pendientes|tareas|agenda|lista)|qu[eé]\s+tengo\s+(pendiente|hoy|que\s+hacer)|tareas?\s+pendientes|lista\s+de\s+(tareas|pendientes)|pendientes(\s+actualizados?)?|s[oó]lo\s+(las\s+|los\s+)?(tareas|pendientes|agenda)|organiz[aá]\s+mi|gu[ií]ate\s+por\s+el\s+checklist|dame\s+(la\s+)?agenda|agenda\s+(pr[oó]xima|completa))\b/i.test(pregunta);
   if (queryEsPedidoExplicitoDeLista) {
     plan.puede_responder_con_indice = false;
     plan.respuesta_directa = null;
     plan.chat_ids = [];
   }
+  // Sub-clasificación: dentro del pedido de lista, ¿pidió SOLO tareas, SOLO
+  // agenda, o ambos? Si dice "tareas" sin "agenda" → solo TE TOCA. Si dice
+  // "agenda" sin "tareas" → solo AGENDA. Si menciona ambos o ninguno explícito
+  // ("dame pendientes", "qué tengo pendiente") → los dos bloques.
+  const mencionaTareas = /\b(tareas?|te\s+toca|acciones?|pendiente)\b/i.test(pregunta);
+  const mencionaAgenda = /\b(agenda|cita|calendari|reuni[oó]n)\b/i.test(pregunta);
+  const pidioSoloTareas = mencionaTareas && !mencionaAgenda;
+  const pidioSoloAgenda = mencionaAgenda && !mencionaTareas;
 
   if (plan.puede_responder_con_indice && plan.respuesta_directa) {
     return { respuesta: String(plan.respuesta_directa), tarjetas_usadas: [], via_indice: true, costo_usd: costo };
@@ -238,7 +246,7 @@ export async function responderJuniorTarjeta(
   // de las 5 tarjetas más relevantes (te toca). Esto rompe loops donde Jhon
   // pregunta "por qué me das todo" / "que te pasa" y Junior vuelve a listar.
   const ultimoJunior = [...historial].reverse().find(h => h.rol === 'junior')?.texto ?? '';
-  const ultimoFueListado = ultimoJunior.startsWith('📅 AGENDA próxima');
+  const ultimoFueListado = ultimoJunior.startsWith('📅 AGENDA próxima') || ultimoJunior.startsWith('✅ TE TOCA');
   if (ultimoFueListado && !queryEsPedidoExplicitoDeLista &&
       !plan.respuesta_directa && (!Array.isArray(plan.chat_ids) || plan.chat_ids.length === 0)) {
     // Construir 5 chat_ids más relevantes (espera_jhon o sin_responder) para que el
@@ -309,12 +317,22 @@ export async function responderJuniorTarjeta(
       return { respuesta: 'No tenés nada pendiente de tu lado ahora mismo. 👏 Si querés ver un caso puntual, nombrame el cliente.', tarjetas_usadas: [], via_indice: true, costo_usd: costo };
     }
 
+    // Respeta el ámbito de la pregunta: "tareas" → solo TE TOCA, "agenda" → solo
+    // AGENDA, vago → ambos. Si pidió tareas pero no hay, contestá honesto.
     const partes: string[] = [];
-    if (agendaTxt) partes.push(`📅 AGENDA próxima (7 días):\n${agendaTxt}`);
-    if (teToca.length) {
+    if (agendaTxt && !pidioSoloTareas) partes.push(`📅 AGENDA próxima (7 días):\n${agendaTxt}`);
+    if (teToca.length && !pidioSoloAgenda) {
       const lista = teToca.slice(0, 25).map(f => `• ${conTel(f.nombre, f.tel)}${f.proximo ? ` — ${f.proximo}` : ''}`).join('\n');
       const extra = teToca.length > 25 ? `\n…y ${teToca.length - 25} más` : '';
       partes.push(`✅ TE TOCA (acciones concretas):\n${lista}${extra}`);
+    }
+    if (!partes.length) {
+      const msg = pidioSoloTareas
+        ? 'No tenés tareas pendientes ahora mismo. 👏'
+        : pidioSoloAgenda
+          ? 'No hay agendamientos en los próximos 7 días.'
+          : 'No tenés nada pendiente de tu lado ahora mismo. 👏';
+      return { respuesta: msg, tarjetas_usadas: [], via_indice: true, costo_usd: costo };
     }
     return { respuesta: partes.join('\n\n'), tarjetas_usadas: [], via_indice: true, costo_usd: costo };
   }
