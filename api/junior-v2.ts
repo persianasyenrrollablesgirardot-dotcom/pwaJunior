@@ -15,6 +15,17 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // Auth shared-token. Header X-Junior-Token debe coincidir con JUNIOR_AUTH_TOKEN
+  // configurado en Vercel. El frontend lo pide y guarda en localStorage la 1ra vez.
+  const tokenEsperado = process.env.JUNIOR_AUTH_TOKEN;
+  if (tokenEsperado) {
+    const tokenRecibido = (req.headers['x-junior-token'] as string) ?? '';
+    if (tokenRecibido !== tokenEsperado) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+  }
+
   // Polyfill WebSocket para Node 20 (Vercel default). El cliente Supabase-js
   // chequea presencia de WebSocket al construir (aunque no usemos realtime).
   // Sin esto: 'Node.js 20 detected without native WebSocket support'.

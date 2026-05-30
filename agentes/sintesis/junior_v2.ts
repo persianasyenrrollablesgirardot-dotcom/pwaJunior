@@ -117,10 +117,15 @@ export async function responderJuniorTarjeta(
         `Cuando armes una respuesta_directa que LISTE varios contactos (pendientes, agenda, "te toca", etc), incluí el TELÉFONO entre paréntesis al lado del nombre cuando esté disponible — formato: "Nombre (+57XXX…)". Si no hay tel en el índice, omitilo silencioso.\n` +
         `Decidí:\n` +
         `- Si se responde con el índice (ej. "¿quién espera mi respuesta?") → puede_responder_con_indice=true + respuesta_directa.\n` +
-        `- Si Jhon pide algo AMPLIO u OPERATIVO sin nombrar un cliente ("organizá", "qué hago hoy", "qué tengo pendiente", ` +
-        `"dame los pendientes", "lista de tareas", "actualizá", "guiame", "ordená esto", "guiate por el checklist") → ` +
-        `puede_responder_con_indice=false y chat_ids=[]. El sistema arma un listado determinístico (AGENDA próxima + TE TOCA accionable) ` +
-        `desde el índice + agendamientos — NO lo redactés vos, no lo intentés con respuesta_directa. Solo devolvé puede_responder_con_indice=false, respuesta_directa=null, chat_ids=[].\n` +
+        `- Si Jhon pide EXPLÍCITAMENTE un listado de TODOS los pendientes/agenda (frases muy específicas como "dame los pendientes", ` +
+        `"dame la lista", "qué tengo pendiente", "lista de tareas", "organizá mi agenda", "guiate por el checklist") → ` +
+        `puede_responder_con_indice=false y chat_ids=[]. El sistema arma un listado determinístico (AGENDA + TE TOCA).\n` +
+        `   ❌ NO uses esta rama para meta-preguntas o aclaraciones ("por qué me das todo?", "qué te pasa?", "no entiendo", "explícame"). ` +
+        `Esas son CONVERSACIÓN y van por respuesta_directa LLM normal, leyendo la conversación previa.\n` +
+        `   ❌ NO uses esta rama para queries con FECHA específica ("qué tengo HOY", "qué tengo MAÑANA", "qué tengo el sábado"). ` +
+        `Para esas: puede_responder_con_indice=true y armá vos la respuesta_directa filtrando del índice por esa fecha.\n` +
+        `   ❌ SI el ÚLTIMO turno de Junior en la conversación previa fue un listado completo (empieza con "📅 AGENDA próxima"), ` +
+        `NO vuelvas a tirar listado salvo que Jhon lo pida explícitamente otra vez. Si pregunta algo conexo, respondé conversacional.\n` +
         `- Si es sobre cliente(s) específico(s) → puede_responder_con_indice=false y listá los chat_ids relevantes (máx 5).\n` +
         `NUNCA digas que "no hay tarjetas seleccionadas" ni pidas que Jhon "seleccione" — no existe seleccionar, SIEMPRE tenés el índice. ` +
         `Si "actualizar" se refiere a las tarjetas: aclaramos que se actualizan solas con info nueva, y mostramos el estado actual. ` +
@@ -213,6 +218,23 @@ export async function responderJuniorTarjeta(
 
   if (plan.puede_responder_con_indice && plan.respuesta_directa) {
     return { respuesta: String(plan.respuesta_directa), tarjetas_usadas: [], via_indice: true, costo_usd: costo };
+  }
+
+  // Anti-loop determinístico: si el LLM va a delegar al fallback de listado
+  // PERO el último turno de Junior ya fue un listado del fallback (empieza con
+  // "📅 AGENDA próxima"), forzamos respuesta conversacional con cargarDetalle
+  // de las 5 tarjetas más relevantes (te toca). Esto rompe loops donde Jhon
+  // pregunta "por qué me das todo" / "que te pasa" y Junior vuelve a listar.
+  const ultimoJunior = [...historial].reverse().find(h => h.rol === 'junior')?.texto ?? '';
+  const ultimoFueListado = ultimoJunior.startsWith('📅 AGENDA próxima');
+  const queryEsPedidoExplicitoDeLista = /\b(dame.*pendientes|dame.*lista|qu[eé]\s+tengo\s+pendiente|lista\s+de\s+tareas|organiz[aá]\s+mi\s+agenda|gu[ií]ate\s+por\s+el\s+checklist)\b/i.test(pregunta);
+  if (ultimoFueListado && !queryEsPedidoExplicitoDeLista &&
+      !plan.respuesta_directa && (!Array.isArray(plan.chat_ids) || plan.chat_ids.length === 0)) {
+    // Construir 5 chat_ids más relevantes (espera_jhon o sin_responder) para que el
+    // paso 2 los lea y responda de forma conversacional.
+    plan.chat_ids = indice
+      .filter(f => f.estado === 'espera_jhon' || f.estado === 'sin_responder')
+      .slice(0, 5).map(f => f.chat_id);
   }
 
   // ── Paso 2: cargar solo las tarjetas relevantes y responder ─────────────

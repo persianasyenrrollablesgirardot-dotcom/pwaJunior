@@ -66,10 +66,24 @@ export function JuniorChat() {
     setPregunta(''); setCargando(true);
     await persistir('usuario', q);
     try {
-      const res = await fetch('/api/junior-v2', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+      // Auth: token guardado en localStorage. Si 401, pedir y reintentar UNA vez.
+      const intentar = async (token: string | null) => fetch('/api/junior-v2', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { 'X-Junior-Token': token } : {}) },
         body: JSON.stringify({ pregunta: q, historial }),
       });
+      let res = await intentar(localStorage.getItem('junior_token'));
+      if (res.status === 401) {
+        const nuevo = prompt('Esta app está protegida. Ingresá la clave:');
+        if (!nuevo) { setCargando(false); return; }
+        localStorage.setItem('junior_token', nuevo);
+        res = await intentar(nuevo);
+        if (res.status === 401) {
+          localStorage.removeItem('junior_token');
+          setTurnos(t => [...t, { rol: 'junior', texto: 'Clave incorrecta. Recargá y volvé a intentar.' }]);
+          setCargando(false); return;
+        }
+      }
       const data = await res.json();
       if (data.error) {
         setTurnos(t => [...t, { rol: 'junior', texto: 'Tuve un problema: ' + data.error }]);
