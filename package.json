@@ -1,0 +1,14 @@
+{
+  "name": "pwa-junior",
+  "version": "1.0.0",
+  "description": "Junior — PWA mobile de Persianas Girardot. Conectado al Visor PG vía Supabase compartido.",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "cd visor && npm install && npm run build"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4"
+  }
+}

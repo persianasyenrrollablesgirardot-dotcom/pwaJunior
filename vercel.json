@@ -1,0 +1,25 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "cd visor && npm install && npm run build",
+  "outputDirectory": "visor/dist",
+  "installCommand": "echo 'install se hace en buildCommand'",
+  "functions": {
+    "visor/api/junior-v2.ts": {
+      "runtime": "@vercel/node@3.2.7",
+      "maxDuration": 30
+    },
+    "visor/api/ping.ts": {
+      "runtime": "@vercel/node@3.2.7"
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/ping",
+      "schedule": "*/5 * * * *"
+    }
+  ],
+  "rewrites": [
+    { "source": "/junior/:path*", "destination": "/index.html" },
+    { "source": "/junior", "destination": "/index.html" }
+  ]
+}
