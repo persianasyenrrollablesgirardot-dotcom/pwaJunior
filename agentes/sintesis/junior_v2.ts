@@ -216,6 +216,18 @@ export async function responderJuniorTarjeta(
     plan.respuesta_directa = null;
   }
 
+  // Bypass determinístico para pedidos explícitos de lista. El LLM del ruteo a
+  // veces no los detecta como "amplio" e improvisa una respuesta truncada (vi
+  // "Dame tareas pendientes" → solo 5 items). Si la pregunta matchea claramente
+  // un pedido de lista completa, IGNORAMOS lo que dijo el LLM y vamos al
+  // fallback determinístico que arma TODA la lista.
+  const queryEsPedidoExplicitoDeLista = /\b(dame.*(pendientes|tareas|agenda|lista)|qu[eé]\s+tengo\s+(pendiente|hoy|que\s+hacer)|tareas?\s+pendientes|lista\s+de\s+(tareas|pendientes)|pendientes\s+actualizados?|organiz[aá]\s+mi|gu[ií]ate\s+por\s+el\s+checklist)\b/i.test(pregunta);
+  if (queryEsPedidoExplicitoDeLista) {
+    plan.puede_responder_con_indice = false;
+    plan.respuesta_directa = null;
+    plan.chat_ids = [];
+  }
+
   if (plan.puede_responder_con_indice && plan.respuesta_directa) {
     return { respuesta: String(plan.respuesta_directa), tarjetas_usadas: [], via_indice: true, costo_usd: costo };
   }
@@ -227,7 +239,6 @@ export async function responderJuniorTarjeta(
   // pregunta "por qué me das todo" / "que te pasa" y Junior vuelve a listar.
   const ultimoJunior = [...historial].reverse().find(h => h.rol === 'junior')?.texto ?? '';
   const ultimoFueListado = ultimoJunior.startsWith('📅 AGENDA próxima');
-  const queryEsPedidoExplicitoDeLista = /\b(dame.*pendientes|dame.*lista|qu[eé]\s+tengo\s+pendiente|lista\s+de\s+tareas|organiz[aá]\s+mi\s+agenda|gu[ií]ate\s+por\s+el\s+checklist)\b/i.test(pregunta);
   if (ultimoFueListado && !queryEsPedidoExplicitoDeLista &&
       !plan.respuesta_directa && (!Array.isArray(plan.chat_ids) || plan.chat_ids.length === 0)) {
     // Construir 5 chat_ids más relevantes (espera_jhon o sin_responder) para que el
