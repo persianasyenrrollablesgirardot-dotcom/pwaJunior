@@ -231,15 +231,33 @@ export async function responderJuniorTarjeta(
     const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
     const en7 = new Date(Date.now() + 7 * 86400_000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
     const { data: ags } = await sb.from('agendamientos')
-      .select('titulo, tipo, fecha, hora_inicio, persona_id, personas(nombre)')
+      .select('titulo, tipo, fecha, hora_inicio, persona_id, personas(nombre, deleted_at)')
       .gte('fecha', hoy).lte('fecha', en7).order('fecha').order('hora_inicio').limit(60);
-    // Dedup: una entrada por (persona, fecha) — los agentes históricamente
+    // Set de personas con tarjeta cerrada o no-cliente → filtrar sus agendamientos.
+    // Esto cierra el círculo: cuando Jhon dice "cerralo" a Junior, el checklist
+    // pasa a 'cerrado'; sus agendamientos legacy (origen=null, no autogestionados)
+    // también se sacan del listado activo sin tener que borrarlos de la BD.
+    const personaIds = [...new Set((ags ?? []).map((a: any) => a.persona_id).filter(Boolean))] as number[];
+    const inactivas = new Set<number>();
+    if (personaIds.length) {
+      const { data: tjs } = await sb.from('tarjeta').select('chat_id, persona_id, es_no_cliente').in('persona_id', personaIds);
+      const chatIds = (tjs ?? []).map((t: any) => t.chat_id);
+      const { data: cks } = chatIds.length ? await sb.from('tarjeta_checklist').select('chat_id, estado_conversacion').in('chat_id', chatIds) : { data: [] };
+      const estadoPorChat = new Map((cks ?? []).map((c: any) => [c.chat_id, c.estado_conversacion]));
+      for (const t of (tjs ?? []) as any[]) {
+        const cerrado = estadoPorChat.get(t.chat_id) === 'cerrado';
+        if (t.es_no_cliente || cerrado) inactivas.add(t.persona_id);
+      }
+    }
+    // Dedup: una entrada por (nombre, fecha, hora) — los agentes históricamente
     // emitieron variaciones del mismo evento (ej. "Visita Patricia" x6).
+    // Filtra: agendamientos de personas borradas (huérfanos) o cuyas tarjetas
+    // están cerradas/no-cliente. Así "cerralo" en Junior saca también la cita.
     const vistos = new Set<string>();
     const dedup: any[] = [];
     for (const a of (ags ?? []) as any[]) {
-      // Dedup por (nombre, fecha, hora) — agarra duplicados con persona_id distinto
-      // (dups previos sin merge) y variaciones de título del mismo evento.
+      if (a.personas?.deleted_at) continue;
+      if (inactivas.has(a.persona_id)) continue;
       const nombre = (a.personas?.nombre ?? '').trim().toLowerCase();
       const k = `${nombre}|${a.fecha}|${a.hora_inicio ?? ''}`;
       if (vistos.has(k)) continue;
