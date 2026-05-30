@@ -15,6 +15,13 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // Polyfill WebSocket para Node 20 (Vercel default). El cliente Supabase-js
+  // chequea presencia de WebSocket al construir (aunque no usemos realtime).
+  // Sin esto: 'Node.js 20 detected without native WebSocket support'.
+  if (typeof (globalThis as any).WebSocket === 'undefined') {
+    const ws = (await import('ws')).default;
+    (globalThis as any).WebSocket = ws as any;
+  }
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'use POST' });
     return;
