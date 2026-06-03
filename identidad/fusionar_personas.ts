@@ -19,11 +19,25 @@ export interface ResultadoFusion {
   fusionada_id: number;
 }
 
-/** Tablas con columna persona_id cuyas filas se mueven a la persona sobreviviente. */
+/** Tablas con columna persona_id cuyas filas se mueven a la persona sobreviviente.
+ *  FIX (2026-05-31): la lista estaba INCOMPLETA — tenía solo 9 tablas (las del
+ *  modelo viejo) y NO movía las operativas/V2 (chat_checklist, agendamientos,
+ *  tareas, medidas, cotizaciones, tarjeta, garantías, facturas…). Resultado: al
+ *  fusionar dos fragmentos de la misma persona, toda la operación quedaba
+ *  huérfana bajo la persona borrada → la cascada de cierre no la alcanzaba (caso
+ *  Angie @lid 219 + +573185114119 @c.us 137: la garantía sobrevivía al cierre).
+ *  Lista completa derivada de information_schema (tablas reales con persona_id,
+ *  excluyendo vistas vw_* y modulo_sintesis, que se borra aparte en el paso 2). */
 const TABLAS_PERSONA_ID = [
   'evento_pg', 'proyectos', 'rol_persona_inmueble', 'memoria_local',
   'notas_libres', 'correcciones', 'correcciones_humanas', 'buzon_validacion',
-  'junior_instrucciones',
+  'junior_instrucciones', 'personas_mencionadas', 'agente_invocaciones',
+  // operativas / V2 (faltaban):
+  'chat_checklist', 'tarjeta', 'tareas', 'agendamientos', 'medidas',
+  'cotizaciones', 'cotizacion_objeciones', 'cotizacion_variaciones',
+  'abonos', 'facturas', 'costos_proyecto', 'evidencias',
+  'garantias', 'reclamos_sensibles', 'instalaciones', 'mantenimientos',
+  'produccion_orden', 'satisfaccion_postventa', 'google_reviews',
 ];
 
 export async function fusionarPersonas(
