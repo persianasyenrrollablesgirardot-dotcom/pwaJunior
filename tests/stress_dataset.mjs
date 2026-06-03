@@ -116,8 +116,15 @@ export const ESCENARIOS = [
   { cat: 'memoria_pref', msg: 'a partir de ahora, dame siempre los montos en negrita', espera: ['ARRAY:memorias>0'] },
   { cat: 'memoria_pref', msg: 'cuando hables de Margarita, recordá siempre que es la socia del local de Melgar, no cliente' },
 
-  // ─── 20. Verificación de cascada (completar tarea cancela agendamiento) ─
+  // ─── 20. Verificación de cascada ─────────────────────────────────────
+  // Cuando se cierra un checklist de un cliente comercial real, Junior DEBE
+  // emitir además tareasCompletar (todas las activas del cliente) y
+  // agendamientosCancelar (todos los futuros). Cierre sin cascada = basura
+  // en BD. Estas expectativas se verifican en el runner.
   { cat: 'cascada', msg: 'ya hice la visita de medidas con Walter, marcala como completada' },
+  { cat: 'cascada', msg: 'cerrá el caso de Walter Estancia — ya pagó saldo, instalación completada y satisfecho', espera: ['ARRAY:cierresChecklist>0', 'ARRAY:tareasCompletar>0', 'RESP:cascad|complet[ée]|tarea'] },
+  { cat: 'cascada', msg: 'Sebastián Angeos canceló la compra, dale por terminado el caso', espera: ['ARRAY:cierresChecklist>0', 'RESP:cancel|tarea|cascad'] },
+  { cat: 'cascada', msg: 'Pedidos Cubides ya está instalado y pagado, cerrá el flujo completo', espera: ['ARRAY:cierresChecklist>0', 'RESP:complet[ée]|cancel|cascad'] },
 
   // ─── 21. Pregunta sobre el sistema mismo ──────────────────────────────
   { cat: 'meta', msg: '¿cuántos clientes tengo activos en total?' },
