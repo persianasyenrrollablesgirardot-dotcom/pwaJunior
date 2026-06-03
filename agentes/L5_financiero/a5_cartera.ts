@@ -69,10 +69,12 @@ export const a5CarteraHooks: AgenteHooks<DatosA5Cartera> = {
       .single();
     if (pErr || !p) throw new Error(`persona ${params.persona_id} no encontrada: ${pErr?.message}`);
 
-    // Cotizaciones con saldo > 0 (cartera real)
+    // Cotizaciones GANADAS con saldo > 0 (cartera real; propuestas/negociaciones
+    // con total aún no son deuda cobrable).
     const { data: cots } = await sb.from('cotizaciones')
       .select('id, fecha, total, abono_monto, saldo')
       .eq('persona_id', params.persona_id)
+      .eq('estado', 'ganada')
       .gt('saldo', 0)
       .is('deleted_at', null)
       .order('fecha', { ascending: true })
@@ -302,9 +304,24 @@ de mensaje WhatsApp lista para Jhon.`,
     }
   },
 
-  async postProcesar(_sb: SupabaseClient, _out, _ctx) {
-    // En shadow: nada. En productivo: la tarea + plantilla pasan al buzón.
-    // Cuando Jhon aprueba, se crea la fila en tareas con el texto sugerido.
-    return;
+  async postProcesar(sb: SupabaseClient, out, ctx) {
+    if (ctx.agente.shadow) return;
+    const p = out.payload as any;
+    if (!p?.es_candidato_recordatorio || !p.tarea_propuesta) return;
+    const t = p.tarea_propuesta as TareaCobroOutput;
+
+    // Materializar la tarea de cobro en la tarjeta (tarjeta_tarea) para que sea
+    // accionable en el Visor. origen='agente_cartera' → sobrevive al re-ciclo del
+    // motor de tarjetas (que borra solo origen 'agente'/null). Idempotente: se
+    // reemplaza la tarea de cobro previa de este chat. La plantilla WhatsApp
+    // completa vive en el evento_pg (visible en el módulo "qué entendieron los agentes").
+    await sb.from('tarjeta_tarea').delete().eq('chat_id', ctx.chat_id).eq('origen', 'agente_cartera');
+    const tituloMonto = (p.deuda_total ? ` ($${Number(p.deuda_total).toLocaleString('es-CO')})` : '');
+    await sb.from('tarjeta_tarea').insert({
+      chat_id: ctx.chat_id,
+      titulo: `💰 ${t.titulo}`.includes('$') ? `💰 ${t.titulo}` : `💰 ${t.titulo}${tituloMonto}`,
+      prioridad: typeof t.prioridad === 'number' ? t.prioridad : 6,
+      origen: 'agente_cartera',
+    } as any);
   },
 };
