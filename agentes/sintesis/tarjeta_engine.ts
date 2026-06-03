@@ -11,8 +11,19 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'node:crypto';
 import { leerInsumosTarjeta, redactarNarrativa, type Tarjeta } from './agregador.js';
-import { derivarChecklist, derivarTareas, derivarAgenda } from './derivados.js';
+import { derivarChecklist, derivarTareas, derivarAgenda, type ResChecklist, type ResTareas, type ResAgenda } from './derivados.js';
 import { arreglarNombreSiFeo } from './nombres.js';
+import { detectarCitasUniversales } from './detector_citas.js';
+import { cascadaCierreChecklist } from './cascada.js';
+
+// FIX flujo de cierre (2026-05-31): detección DETERMINÍSTICA de nota de cierre
+// (antes el cierre dependía del Junior viejo, retirado → los casos no se cerraban).
+// Captura las formas que usa Jhon sin atrapar "listo/terminado" sueltos.
+const RE_CIERRE = /(\bcerr[aáeéo]\w*|\bcierre\b|dar de baja|\bspam\b|ya se (atendi|cerr|resolv)|caso (cerrad|terminad)|dalo por (cerrad|terminad|resuelt)|qued[oó] resuelt)/i;
+function motivoNotaCierre(notas: string[]): string | null {
+  for (const n of notas) if (n && RE_CIERRE.test(n)) return n.trim().slice(0, 200);
+  return null;
+}
 
 export interface ResultadoReconstruir {
   chat_id: number;
@@ -110,17 +121,57 @@ export async function reconstruirTarjeta(
   } as any);
 
   // Derivados: leen la tarjeta `t`, escriben en sus tablas (regeneración entera).
-  const [chk, tar, age] = await Promise.all([derivarChecklist(t), derivarTareas(t), derivarAgenda(t)]);
+  // FIX flujo de cierre: si hay nota de cierre (regex determinístico) NO gastamos
+  // LLM y cerramos directo; si no, derivamos normal y respetamos lo que diga el
+  // checklist. Si el caso quedó CERRADO, no se arrastran tareas/agenda nuevas.
+  const motivoNota = motivoNotaCierre(ins.notas);
+  // Cierre AUTORITATIVO: si el caso ya quedó cerrado manualmente (botón/cascada,
+  // cerrado_manual=true), V2 lo respeta y NO deja que el LLM lo reabra. Antes
+  // solo miraba notas/LLM → un cierre por botón SIN nota se desincronizaba
+  // (chat_checklist='cerrada' vs tarjeta='espera_*'). Bug desincronización
+  // 2026-05-31. OJO: solo el flag cerrado_manual es autoritativo; el legacy
+  // estado='cerrada' del Junior viejo (sin flag) NO — puede haber reabierto.
+  const { data: ccPrev } = await sb.from('chat_checklist')
+    .select('cerrado_manual, motivo_cierre').eq('chat_id', chatId).maybeSingle();
+  const cierreManual = ccPrev?.cerrado_manual === true;
+  const motivoCierre = motivoNota ?? (cierreManual ? (ccPrev?.motivo_cierre || 'Cerrado manualmente') : null);
+  let chk: ResChecklist, tar: ResTareas, age: ResAgenda;
+  if (motivoCierre) {
+    chk = { estado_conversacion: 'cerrado', proximo_paso: motivoNota ? 'Caso cerrado por nota de Jhon' : 'Caso cerrado', costo_usd: 0 };
+    tar = { tareas: [], costo_usd: 0 };
+    age = { agendamientos: [], costo_usd: 0 };
+  } else {
+    [chk, tar, age] = await Promise.all([derivarChecklist(t), derivarTareas(t), derivarAgenda(t)]);
+    if (chk.estado_conversacion === 'cerrado') {   // el LLM cerró → no arrastrar pendientes
+      tar = { tareas: [], costo_usd: tar.costo_usd };
+      age = { agendamientos: [], costo_usd: age.costo_usd };
+    }
+  }
+  const casoCerrado = chk.estado_conversacion === 'cerrado';
+  // Cierre REAL en cascada: cierra chat_checklist + completa tareas (viejas) +
+  // cancela agendamientos. Reemplaza al disparador huérfano del Junior viejo.
+  if (casoCerrado) {
+    await cascadaCierreChecklist(sb, chatId, motivoCierre ?? 'Cerrado por análisis (sin pendientes)').catch(() => {});
+  }
 
   await sb.from('tarjeta_checklist').upsert({
     chat_id: chatId, estado_conversacion: chk.estado_conversacion,
     proximo_paso: chk.proximo_paso, derivado_de_hash: inputHash, actualizado_at: ahora,
   } as any);
 
-  await sb.from('tarjeta_tarea').delete().eq('chat_id', chatId);
+  // Borramos SOLO las tareas que regeneramos nosotros (origen='agente'). Las
+  // creadas por Junior (origen='junior') desde el chat sobreviven al re-ciclo
+  // del engine — Jhon las pidió a propósito, no deben evaporarse cuando el
+  // agente recalcule. Mismo patrón que agendamientos_origen.
+  if (casoCerrado) {
+    await sb.from('tarjeta_tarea').delete().eq('chat_id', chatId);   // cerrado → limpiar TODAS (incl. junior/cartera)
+  } else {
+    await sb.from('tarjeta_tarea').delete().eq('chat_id', chatId).or('origen.eq.agente,origen.is.null');
+  }
   if (tar.tareas.length) {
     await sb.from('tarjeta_tarea').insert(tar.tareas.map(x => ({
-      chat_id: chatId, titulo: x.titulo, prioridad: x.prioridad, derivado_de_hash: inputHash,
+      chat_id: chatId, titulo: x.titulo, prioridad: x.prioridad,
+      derivado_de_hash: inputHash, origen: 'agente',
     })) as any);
   }
 
@@ -167,10 +218,19 @@ export async function reconstruirTarjeta(
     })) as any);
   }
 
+  // Detector universal de citas: corre DESPUÉS de derivarAgenda para capturar
+  // citas que los agentes M1-M7 ignoran (chats personal_familia, eventos no
+  // comerciales). Tiene su propio dedup vs lo ya agendado — nunca pisa lo del
+  // agente_v2 ni manual_edit. Caso reportado: Lorena "nos vemos mañana 10am"
+  // que derivarAgenda no capturó porque la narrativa decía "pausa comercial".
+  // Si el caso está cerrado, no re-insertar citas (la cascada ya canceló la agenda).
+  const detCitas = casoCerrado ? { citas_insertadas: 0, llm_costo_usd: 0 } : await detectarCitasUniversales(sb, chatId, personaId);
+
   return {
     chat_id: chatId, persona_id: personaId, cambio: true, hash: inputHash,
-    estado_conversacion: chk.estado_conversacion, n_tareas: tar.tareas.length, n_agenda: age.agendamientos.length,
-    costo_usd: t.costo_usd + chk.costo_usd + tar.costo_usd + age.costo_usd,
+    estado_conversacion: chk.estado_conversacion, n_tareas: tar.tareas.length,
+    n_agenda: age.agendamientos.length + detCitas.citas_insertadas,
+    costo_usd: t.costo_usd + chk.costo_usd + tar.costo_usd + age.costo_usd + detCitas.llm_costo_usd,
   };
 }
 

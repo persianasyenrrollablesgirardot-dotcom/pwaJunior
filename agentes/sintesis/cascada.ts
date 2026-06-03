@@ -60,12 +60,13 @@ export async function cascadaCierreChecklist(
     .select('id');
   if (errT) throw new Error(`cascada tareas persona ${personaId}: ${errT.message}`);
 
-  // 3. Cancelar (soft-delete) TODOS los agendamientos futuros (fecha >= hoy).
-  const hoyISO = ahoraIso.slice(0, 10);
+  // 3. Cancelar (soft-delete) TODOS los agendamientos de la persona — pasados Y
+  //    futuros. Caso cerrado = sin agenda vigente. (Antes filtraba fecha>=hoy →
+  //    una instalación con fecha pasada quedaba visible en un caso cerrado.
+  //    Bug "Instalación casa de Maritza Alameda" 2026-05-31.)
   const { data: agsUpd, error: errA } = await sb.from('agendamientos')
     .update({ deleted_at: ahoraIso } as any)
     .eq('persona_id', personaId)
-    .gte('fecha', hoyISO)
     .is('deleted_at', null)
     .select('id');
   if (errA) throw new Error(`cascada agendamientos persona ${personaId}: ${errA.message}`);
