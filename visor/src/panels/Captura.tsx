@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { chequearExtension, listarChats, obtenerMensajes, procesarChat, bloquearChatExt, desbloquearChatExt, type ChatCaptura, type MensajeCanonico } from '../lib/extension';
 import { fetchConfiguracion, eliminarChatProcesado, previewEliminarChat, type PreviewEliminarChat, type ResultadoEliminarChat } from '../lib/queries';
+import { parseQuery, matchContacto } from '../lib/busqueda';
 import { supabase } from '../lib/supabase';
 import { useContextoActivo } from '../lib/contexto_activo';
 
@@ -24,6 +25,7 @@ export function Captura() {
   const [cargandoMsgs, setCargandoMsgs] = useState(false);
   const [filtro, setFiltro] = useState<FiltroEstado>('crudos');
   const [orden, setOrden] = useState<Orden>('reciente');   // F1.19 fix aplicado: usa chatT real de WA Web
+  const [busqueda, setBusqueda] = useState('');
   const [costoTexto, setCostoTexto] = useState(0.0007);
   const [costoMedia, setCostoMedia] = useState(0.005);
   const [topeDiario, setTopeDiario] = useState(5);
@@ -47,7 +49,8 @@ export function Captura() {
           supabase.from('chats')
             .select('id, canal_chat_id, ia_historico_procesado')
             .eq('canal', 'whatsapp')
-            .eq('ia_historico_procesado', true),
+            .eq('ia_historico_procesado', true)
+            .is('deleted_at', null),   // FIX: un chat eliminado (soft-delete) ya NO está procesado → vuelve a "Procesar"
         ]);
         setChats(data);
         const m = new Map<string, number>();
@@ -79,7 +82,8 @@ export function Captura() {
             const { data } = await supabase.from('chats')
               .select('id, canal_chat_id, ia_historico_procesado')
               .eq('canal', 'whatsapp')
-              .eq('ia_historico_procesado', true);
+              .eq('ia_historico_procesado', true)
+              .is('deleted_at', null);   // FIX: ignorar chats soft-deleted
             const m = new Map<string, number>();
             (data ?? []).forEach((c: any) => { if (c.canal_chat_id) m.set(c.canal_chat_id, c.id); });
             setProcesadosPorJid(m);
@@ -112,6 +116,7 @@ export function Captura() {
       .select('id, canal_chat_id, ia_historico_procesado')
       .eq('canal', 'whatsapp')
       .eq('ia_historico_procesado', true)
+      .is('deleted_at', null)   // FIX: ignorar chats soft-deleted
       .then(({ data }) => {
         const m = new Map<string, number>();
         (data ?? []).forEach((c: any) => { if (c.canal_chat_id) m.set(c.canal_chat_id, c.id); });
@@ -141,6 +146,17 @@ export function Captura() {
     else if (filtro === 'bloqueados') arr = arr.filter(c => c.bloqueado);
     else if (filtro === 'sospechosos') arr = arr.filter(c => !c.bloqueado && c.no_cliente_score >= 2);
 
+    // Búsqueda unificada: teléfono (parcial), nombre/título, #chat (id Supabase
+    // vía procesadosPorJid), jid/LID. Mismo parser que Clientes/Tarjeta/global.
+    const q = parseQuery(busqueda);
+    if (!q.vacia) {
+      arr = arr.filter(c => matchContacto(q, {
+        chatId: procesadosPorJid.get(c.jid) ?? null,
+        nombre: c.titulo, titulo: c.titulo,
+        telefono: c.phoneNumber, jid: c.jid,
+      }));
+    }
+
     if (orden === 'reciente') {
       arr.sort((a, b) => {
         const tsA = Number(a.stats.last_ts) || 0;
@@ -158,7 +174,7 @@ export function Captura() {
       });
     }
     return arr;
-  }, [chats, filtro, orden]);
+  }, [chats, filtro, orden, busqueda, procesadosPorJid]);
 
   const chat = seleccionado ? chats.find(c => c.jid === seleccionado) : null;
 
@@ -209,6 +225,19 @@ export function Captura() {
           <KPI label="Costo proyectado todos" valor={`$${stats.costoProyectado.toFixed(2)}`} color={stats.costoProyectado > topeDiario ? 'var(--red)' : 'var(--green)'} subtitulo={`tope diario $${topeDiario.toFixed(2)}`} />
         </div>
 
+        {/* Buscador unificado */}
+        <input
+          type="search"
+          value={busqueda}
+          onChange={e => setBusqueda(e.target.value)}
+          placeholder="🔍 Buscar por teléfono, nombre, #chat o jid… (ej: 311330, #272, cotización)"
+          style={{
+            width: '100%', padding: '8px 12px', fontSize: 12, boxSizing: 'border-box',
+            border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-page)',
+            outline: 'none', marginBottom: 8,
+          }}
+        />
+
         {/* Filtros */}
         <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
           <Chip label={`Crudos · ${chats.filter(c => !c.bloqueado && !c.isStatus).length}`} activo={filtro === 'crudos'} onClick={() => setFiltro('crudos')} color="var(--accent)" />
@@ -233,7 +262,7 @@ export function Captura() {
             <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>Sin chats con este filtro.</div>
           )}
           {filtrados.map(c => (
-            <ChatRow key={c.jid} chat={c} activo={c.jid === seleccionado} onClick={() => setSeleccionado(c.jid)} costoTexto={costoTexto} costoMedia={costoMedia} />
+            <ChatRow key={c.jid} chat={c} activo={c.jid === seleccionado} onClick={() => setSeleccionado(c.jid)} costoTexto={costoTexto} costoMedia={costoMedia} procesado={procesadosPorJid.has(c.jid)} />
           ))}
         </div>
 
@@ -318,8 +347,8 @@ function Chip({ label, activo, onClick, color }: { label: string; activo: boolea
   );
 }
 
-function ChatRow({ chat, activo, onClick, costoTexto, costoMedia }: {
-  chat: ChatCaptura; activo: boolean; onClick: () => void; costoTexto: number; costoMedia: number;
+function ChatRow({ chat, activo, onClick, costoTexto, costoMedia, procesado }: {
+  chat: ChatCaptura; activo: boolean; onClick: () => void; costoTexto: number; costoMedia: number; procesado: boolean;
 }) {
   const costoEst = chat.stats.texto * costoTexto + (chat.stats.imagen + chat.stats.audio + chat.stats.video + chat.stats.documento) * costoMedia;
   const lastTs = chat.stats.last_ts;
@@ -352,6 +381,7 @@ function ChatRow({ chat, activo, onClick, costoTexto, costoMedia }: {
           {chat.stats.documento > 0 && <span>· 📄 {chat.stats.documento}</span>}
         </div>
         <div style={{ display: 'flex', gap: 4, marginTop: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+          {procesado ? <Tag color="var(--green)">🟢 procesado</Tag> : <Tag color="var(--text-muted)">⚪ crudo</Tag>}
           {chat.isGroup && <Tag color="#5856d6">grupo</Tag>}
           {chat.isBusiness && <Tag color="#34c759">negocio</Tag>}
           {chat.isAddressBook && <Tag color="#5ac8fa">en agenda</Tag>}

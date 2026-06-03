@@ -114,6 +114,25 @@ export async function setRealtimeExtension(enabled: boolean): Promise<{ ok: bool
   return await send({ type: 'V3_SET_REALTIME', enabled });
 }
 
+// ─── Semáforo de conexión de WhatsApp Web ────────────────────────
+export interface WaStatus {
+  ok: boolean;
+  conectado: boolean;           // true = WhatsApp Web abierto + logueado = capturando
+  motivo: string;               // ok | sin_pestana | qr | cargando | sin_respuesta | sin_extension | error_tabs
+  detalle: string;              // texto legible para el tooltip / badge
+  estado?: string;              // logueado | qr | cargando
+}
+
+// Consulta si WhatsApp Web está abierto, logueado y capturando en tiempo real.
+// No lanza: si la extensión no está, devuelve conectado=false con motivo 'sin_extension'.
+export async function estadoWhatsApp(): Promise<WaStatus> {
+  try {
+    return await send<WaStatus>({ type: 'V3_WA_STATUS' });
+  } catch (e: any) {
+    return { ok: false, conectado: false, motivo: 'sin_extension', detalle: 'Extensión de captura no conectada' };
+  }
+}
+
 // ─── Transcripción de media ──────────────────────────────────────
 
 export interface EstimadoMediaChat {

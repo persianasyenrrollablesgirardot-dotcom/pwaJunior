@@ -12,6 +12,7 @@ import { supabase } from '../lib/supabase';
 import { useContextoActivo } from '../lib/contexto_activo';
 import { useNavegacion } from '../lib/navegacion';
 import { previewEliminarChat, eliminarChatProcesado, reclasificarAmbito, type PreviewEliminarChat, type ResultadoEliminarChat } from '../lib/queries';
+import { parseQuery, matchContacto } from '../lib/busqueda';
 
 interface ClienteRow {
   chat_id: number;
@@ -161,15 +162,16 @@ export function Clientes() {
         ? (x.ambito ?? '').startsWith('personal_')
         : x.ambito === filtroAmbito);
     }
-    if (busqueda.trim()) {
-      const q = busqueda.toLowerCase();
-      r = r.filter(x =>
-        x.chat_titulo.toLowerCase().includes(q) ||
-        (x.persona_nombre ?? '').toLowerCase().includes(q) ||
-        (x.persona_telefono ?? '').includes(q) ||
-        (x.persona_email ?? '').toLowerCase().includes(q) ||
-        (x.persona_empresa ?? '').toLowerCase().includes(q) ||
-        (x.persona_ciudad ?? '').toLowerCase().includes(q));
+    // Búsqueda unificada (mismo parser que Captura/Tarjeta/global): reconoce
+    // #chat, #persona, teléfono parcial, jid/LID, nombre, email, empresa, ciudad.
+    const q = parseQuery(busqueda);
+    if (!q.vacia) {
+      r = r.filter(x => matchContacto(q, {
+        chatId: x.chat_id, personaId: x.persona_id,
+        nombre: x.persona_nombre, titulo: x.chat_titulo,
+        telefono: x.persona_telefono, jid: x.chat_jid,
+        email: x.persona_email, empresa: x.persona_empresa, ciudad: x.persona_ciudad,
+      }));
     }
     return r;
   }, [rows, busqueda, filtroAmbito]);
@@ -222,7 +224,7 @@ export function Clientes() {
             type="search"
             value={busqueda}
             onChange={e => setBusqueda(e.target.value)}
-            placeholder="🔍 Buscar nombre, teléfono, email, empresa…"
+            placeholder="🔍 Buscar nombre, teléfono, #chat, #persona, email, empresa…"
             style={{
               width: 320, padding: '7px 12px', fontSize: 13,
               border: '1px solid var(--border)', borderRadius: 6,

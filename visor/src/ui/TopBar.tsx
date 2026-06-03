@@ -2,82 +2,58 @@ import { useEffect, useRef, useState } from 'react';
 import { useModo } from '../lib/modo';
 import { supabase, supabaseConfigured } from '../lib/supabase';
 import { fetchConfiguracion, guardarConfiguracion } from '../lib/queries';
-import { setRealtimeExtension } from '../lib/extension';
+import { setRealtimeExtension, estadoWhatsApp, type WaStatus } from '../lib/extension';
 import { useContextoActivo } from '../lib/contexto_activo';
+import { useNavegacion } from '../lib/navegacion';
+import { parseQuery } from '../lib/busqueda';
 
 // ─── Resultado de búsqueda global ─────────────────────────────────────────
 interface ResultadoBusqueda {
-  tipo: 'persona' | 'chat';
+  tipo: 'chat';
   id: number;
   titulo: string;
   subtitulo: string;
+  procesado: boolean;
+  chatId: number;
+  jid: string | null;
+  personaId: number | null;
+  personaNombre: string | null;
+  proyectoId: number | null;
+  proyectoNombre: string | null;
 }
 
-async function buscarGlobal(q: string): Promise<ResultadoBusqueda[]> {
-  if (!q.trim()) return [];
-  const resultados: ResultadoBusqueda[] = [];
+// Buscador global unificado: busca en la vista de chats PROCESADOS (misma fuente
+// que el módulo Clientes) por #chat, #persona, teléfono parcial, nombre, jid/LID,
+// ciudad. Para chats CRUDOS (sin procesar) está el buscador de Captura.
+async function buscarGlobal(raw: string): Promise<ResultadoBusqueda[]> {
+  const q = parseQuery(raw);
+  if (q.vacia) return [];
+  const sel = 'chat_id, chat_titulo, chat_jid, proyecto_id, proyecto_nombre, persona_id, persona_nombre, persona_telefono, persona_ciudad';
+  let query = supabase.from('vw_clientes_resumen_v2').select(sel);
 
-  // Detectar búsqueda por ID: "id154", "#154", o solo un número
-  const matchId = q.match(/^(?:id#?|#)?(\d+)$/i);
-  if (matchId) {
-    const id = Number(matchId[1]);
-    // Buscar persona por ID
-    const { data: p } = await supabase.from('personas')
-      .select('id, nombre, telefono_e164, ciudad, ambito_principal')
-      .eq('id', id).is('deleted_at', null).maybeSingle();
-    if (p) {
-      resultados.push({
-        tipo: 'persona', id: p.id,
-        titulo: p.nombre ?? `Persona #${p.id}`,
-        subtitulo: [
-          `id ${p.id}`,
-          p.telefono_e164,
-          p.ciudad,
-          p.ambito_principal !== 'comercial' ? `(${p.ambito_principal})` : null,
-        ].filter(Boolean).join(' · '),
-      });
-    }
-    // Buscar chat por ID
-    const { data: c } = await supabase.from('chats')
-      .select('id, titulo, canal, canal_chat_id, personas(id, nombre)')
-      .eq('id', id).is('deleted_at', null).maybeSingle();
-    if (c) {
-      const persona = (c as any).personas;
-      resultados.push({
-        tipo: 'chat', id: c.id,
-        titulo: c.titulo ?? `Chat #${c.id}`,
-        subtitulo: [
-          `chat id ${c.id}`,
-          c.canal,
-          persona?.nombre ? `· ${persona.nombre}` : null,
-        ].filter(Boolean).join(' '),
-      });
-    }
-    return resultados;
+  const idN = q.idExplicito ?? (q.esNumeroPuro ? Number(q.digitos) : null);
+  if (idN != null) {
+    query = query.or(`chat_id.eq.${idN},persona_id.eq.${idN}`);
+  } else {
+    // comas y % rompen la sintaxis del .or de PostgREST → limpiarlas
+    const t = raw.trim().replace(/[,%]/g, ' ');
+    query = query.or(
+      `chat_titulo.ilike.%${t}%,persona_nombre.ilike.%${t}%,persona_telefono.ilike.%${t}%,chat_jid.ilike.%${t}%,persona_ciudad.ilike.%${t}%`,
+    );
   }
 
-  // Búsqueda por texto: nombre, teléfono, ciudad
-  const texto = q.trim();
-  const { data: personas } = await supabase.from('personas')
-    .select('id, nombre, telefono_e164, ciudad, ambito_principal')
-    .is('deleted_at', null)
-    .or(`nombre.ilike.%${texto}%,telefono_e164.ilike.%${texto}%,ciudad.ilike.%${texto}%`)
-    .limit(8);
-
-  for (const p of personas ?? []) {
-    resultados.push({
-      tipo: 'persona', id: p.id,
-      titulo: p.nombre ?? `Persona #${p.id}`,
-      subtitulo: [
-        `id ${p.id}`,
-        p.telefono_e164,
-        p.ciudad,
-        p.ambito_principal !== 'comercial' ? `· ${p.ambito_principal}` : null,
-      ].filter(Boolean).join(' · '),
-    });
-  }
-
-  return resultados;
+  const { data } = await query.limit(12);
+  return (data ?? []).map((r: any): ResultadoBusqueda => ({
+    tipo: 'chat',
+    id: r.chat_id,
+    titulo: r.persona_nombre || r.chat_titulo || `Chat #${r.chat_id}`,
+    subtitulo: [`chat #${r.chat_id}`, r.persona_telefono, r.persona_ciudad,
+      typeof r.chat_jid === 'string' && r.chat_jid.endsWith('@lid') ? '(LID)' : null].filter(Boolean).join(' · '),
+    procesado: true,                 // la vista solo trae chats procesados
+    chatId: r.chat_id, jid: r.chat_jid,
+    personaId: r.persona_id, personaNombre: r.persona_nombre,
+    proyectoId: r.proyecto_id, proyectoNombre: r.proyecto_nombre,
+  }));
 }
 
 export function TopBar() {
@@ -87,6 +63,7 @@ export function TopBar() {
   const [topeDiario, setTopeDiario] = useState<number>(5);
   const [costoHoy, setCostoHoy] = useState<number>(0);
   const ctx = useContextoActivo();
+  const nav = useNavegacion();
 
   // ── Buscador global ──────────────────────────────────────────────────────
   const [query, setQuery] = useState('');
@@ -124,9 +101,15 @@ export function TopBar() {
   }, [query]);
 
   function seleccionar(r: ResultadoBusqueda) {
-    if (r.tipo === 'persona') {
-      ctx.seleccionarPersona(r.id, r.titulo);
+    if (r.jid) {
+      ctx.seleccionarChat(r.chatId, r.titulo, r.jid, {
+        proyectoId: r.proyectoId ?? undefined, proyectoNombre: r.proyectoNombre ?? undefined,
+        personaId: r.personaId ?? undefined, personaNombre: r.personaNombre ?? undefined,
+      });
+    } else if (r.personaId != null) {
+      ctx.seleccionarPersona(r.personaId, r.personaNombre ?? r.titulo);
     }
+    nav.cambiarModulo('m1');     // saltar al Núcleo con el contacto ya activo
     setQuery('');
     setAbierto(false);
     setResultados([]);
@@ -231,7 +214,8 @@ export function TopBar() {
                   onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                 >
                   <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
-                    {r.tipo === 'persona' ? '👤' : '💬'} {r.titulo}
+                    💬 {r.titulo}
+                    {r.procesado && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: 'var(--green)', border: '1px solid var(--green)', padding: '1px 5px', borderRadius: 8 }}>🟢 procesado</span>}
                   </span>
                   <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{r.subtitulo}</span>
                 </button>
@@ -279,6 +263,9 @@ export function TopBar() {
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {/* Semáforo de conexión de WhatsApp Web */}
+        <SemaforoWhatsApp />
+
         {/* Toggle IA Tiempo Real */}
         <button
           onClick={toggleIA}
@@ -320,6 +307,47 @@ export function TopBar() {
         </div>
       </div>
     </header>
+  );
+}
+
+// ─── Semáforo de conexión de WhatsApp Web ──────────────────────────────────
+// Consulta a la extensión cada 10s si WhatsApp Web está abierto, logueado y
+// capturando. 🟢 = capturando · 🔴 = desconectado (con el motivo en el tooltip).
+function SemaforoWhatsApp() {
+  const [st, setSt] = useState<WaStatus | null>(null);
+
+  useEffect(() => {
+    let vivo = true;
+    async function chequear() {
+      const r = await estadoWhatsApp();
+      if (vivo) setSt(r);
+    }
+    chequear();
+    const id = setInterval(chequear, 10000);
+    function onVisible() { if (document.visibilityState === 'visible') chequear(); }
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { vivo = false; clearInterval(id); document.removeEventListener('visibilitychange', onVisible); };
+  }, []);
+
+  const cargando = st === null;
+  const conectado = st?.conectado === true;
+  const color = cargando ? 'var(--text-muted)' : (conectado ? 'var(--green)' : 'var(--red)');
+  const dot = cargando ? '⚪' : (conectado ? '🟢' : '🔴');
+  const texto = cargando ? 'Verificando…' : (conectado ? 'Capturando' : (st?.detalle ?? 'Desconectado'));
+
+  return (
+    <div
+      title={st?.detalle ?? 'Estado de captura de WhatsApp Web'}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6, padding: '4px 10px',
+        border: `1px solid ${conectado ? 'var(--green)' : (cargando ? 'var(--border)' : 'var(--red)')}`,
+        borderRadius: 16, background: conectado ? '#34c75922' : (cargando ? 'var(--bg-page)' : '#ff3b3022'),
+      }}
+    >
+      <span style={{ fontSize: 11 }}>{dot}</span>
+      <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>WhatsApp</span>
+      <span style={{ fontSize: 11, fontWeight: 700, color }}>{texto}</span>
+    </div>
   );
 }
 
