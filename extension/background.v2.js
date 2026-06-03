@@ -172,6 +172,9 @@ Describe la imagen en español, máximo 150 palabras. Si hay TEXTO visible, tran
 
 const PDF_PROMPT = `Resume el PDF en español, máximo 250 palabras. Si es cotización/factura/comprobante/contrato/catálogo, extrae: cliente, monto, productos, medidas, fechas, referencias clave.`;
 
+// Prompt para cuando el PDF se lee como IMÁGENES (páginas rasterizadas) vía Vision.
+const PDF_VISION_PROMPT = `Eres asistente de un negocio de cortinas y persianas (Fábrica de Cortinas Girardot, Colombia). Las imágenes son las primeras páginas de un documento PDF. Transcribe y resume en español (máximo 300 palabras) el contenido relevante. Si es cotización/factura/comprobante/contrato/catálogo, extrae LITERAL: cliente, montos (en COP), banco/cuenta destino/referencia, productos, medidas, fechas. Sé directo, sin saludos ni rodeos.`;
+
 // ─── Settings (legacy share con v1) ────────────────────────────────
 const SETTINGS_KEY = 'ws_settings';
 async function getSettings() {
@@ -626,11 +629,94 @@ function extractTextFromPdf(bytes) {
   return '';
 }
 
+// ─── Rasterización de PDF → imágenes (vía documento offscreen) ─────
+// El SW MV3 no tiene canvas. Creamos un documento offscreen (offscreen.html +
+// pdf.js) que renderiza las primeras páginas y nos devuelve dataURLs JPEG.
+let offscreenCreating = null;
+async function ensureOffscreen() {
+  if (chrome.runtime.getContexts) {
+    const ctxs = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+    if (ctxs.length) return;
+  }
+  if (offscreenCreating) { await offscreenCreating; return; }
+  offscreenCreating = chrome.offscreen.createDocument({
+    url: 'offscreen.html',
+    reasons: ['BLOBS'],
+    justification: 'Rasterizar PDF a imagen para transcribir con Vision',
+  }).catch(e => {
+    // Carrera: si otro llamado ya lo creó, Chrome tira "Only a single...". Ignorar.
+    if (!String(e?.message || e).includes('single offscreen')) throw e;
+  });
+  await offscreenCreating;
+  offscreenCreating = null;
+}
+
+// Bytes del PDF → dataURLs JPEG de las primeras `maxPages` páginas.
+async function rasterizePdfToImages(bytes, maxPages = 2) {
+  await ensureOffscreen();
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  const b64 = btoa(bin);
+  // Reintento corto: createDocument puede resolver antes de que offscreen.js
+  // registre su onMessage → el primer sendMessage rebota con "Receiving end
+  // does not exist". Reintentamos unas pocas veces.
+  let resp;
+  for (let intento = 0; intento < 6; intento++) {
+    try {
+      resp = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'WS_RASTERIZE_PDF', b64, maxPages });
+      break;
+    } catch (e) {
+      if (!String(e?.message || e).includes('Receiving end')) throw e;
+      await new Promise(r => setTimeout(r, 150));
+      await ensureOffscreen();
+    }
+  }
+  if (!resp?.ok) throw new Error('rasterize: ' + (resp?.error || 'sin respuesta del offscreen'));
+  return resp.images || [];
+}
+
+// Vision sobre 1+ imágenes (dataURLs) en UNA sola llamada — para leer documentos.
+async function visionOnImages(dataUrls, prompt, detail = 'high') {
+  const { openaiKey } = await getSettings();
+  if (!openaiKey) throw new Error('openaiKey vacío');
+  const content = [{ type: 'text', text: prompt }];
+  for (const url of dataUrls) content.push({ type: 'image_url', image_url: { url, detail } });
+  const res = await fetch(OPENAI_CHAT_URL, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 700, messages: [{ role: 'user', content }] }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error('Vision(doc) HTTP ' + res.status + ': ' + JSON.stringify(json).slice(0, 200));
+  return json.choices?.[0]?.message?.content?.trim() || '';
+}
+
 async function pdfSummarize(bytes, fileName) {
   const { openaiKey } = await getSettings();
   if (!openaiKey) throw new Error('openaiKey vacío');
 
-  // Extraer texto plano nativamente para evitar type: 'file' no soportado por OpenAI Chat
+  // PRIMARIO (2026-06): rasterizar las 2 primeras páginas y leerlas con Vision.
+  // Reemplaza al extractor de texto frágil — que fallaba con PDFs comprimidos
+  // (FlateDecode) y escaneados, dejando al modelo solo con el nombre del archivo.
+  // DEBUG (validación): PDF_DEBUG_THROW=true propaga el error real a ai_error en
+  // vez de caer al extractor viejo (para verlo en Supabase). Poner false al cerrar.
+  const PDF_DEBUG_THROW = false;
+  try {
+    const images = await rasterizePdfToImages(bytes, 2);
+    if (!images.length) throw new Error('rasterización devolvió 0 imágenes');
+    let prompt = PDF_VISION_PROMPT;
+    if (fileName) prompt += `\nArchivo: ${fileName}`;
+    const text = await visionOnImages(images, prompt, 'high');
+    if (!text) throw new Error('Vision devolvió texto vacío');
+    console.log(`[VPG-BG-V2] PDF leído por Vision (${images.length} pág.)`);
+    return text;
+  } catch (e) {
+    const msgErr = String(e?.message || e);
+    console.warn('[VPG-BG-V2] rasterización PDF falló:', msgErr);
+    if (PDF_DEBUG_THROW) throw new Error('PDF_RENDER: ' + msgErr);
+  }
+
+  // FALLBACK: extractor de texto viejo (por si el render falla por algún PDF raro).
   const extractedText = extractTextFromPdf(bytes);
   let promptContent = PDF_PROMPT;
   if (fileName) promptContent += `\nArchivo: ${fileName}`;
@@ -1935,6 +2021,13 @@ async function procesarReprocesarPendientes() {
         const tieneBytes = !!local.media?.sha256
           && !!(await tx('media_blobs', 'readonly', s => reqAsync(s.get(local.media.sha256))));
         const taskType = tieneBytes ? 'ai_process' : 'download_media';
+        // Bustear el cache de IA por sha256: sin esto processMediaWithAI hace
+        // cache-HIT (línea ~749) y devuelve el resultado VIEJO → el "reprocesar"
+        // nunca re-corría la IA. Era el motivo por el que los PDFs leídos con el
+        // extractor viejo no se re-transcribían con la rasterización + Vision nueva.
+        if (local.media?.sha256) {
+          await tx('media_processed', 'readwrite', s => reqAsync(s.delete(local.media.sha256))).catch(() => {});
+        }
         await tx('pending_queue', 'readwrite', s => reqAsync(s.put({
           taskType, messageId: row.canal_msg_id, attempts: 0, nextAt: Date.now(), createdAt: Date.now(),
         })));
@@ -1950,6 +2043,10 @@ async function procesarReprocesarPendientes() {
     console.warn('[WS-BG-V2] procesarReprocesarPendientes:', e.message);
   }
 }
+
+// Sello de build: lo estampamos en cada reprocesamiento para saber con CERTEZA,
+// desde Supabase, qué versión del código corrió (ver si el reload tomó efecto).
+const CODE_BUILD = 'pdf-vision-2026-06-03';
 
 // PATCH directo a Supabase con ai_text/ai_kind/ai_status del mensaje.
 // Necesario porque syncToVisorPG usa upsert ignore-duplicates → filas
@@ -1971,6 +2068,7 @@ async function patchAiTextEnSupabase(canalMsgId, entry) {
       ai_text: entry.text, ai_kind: entry.kind, ai_status: 'processed',
       reprocesar_pending: false,
       reprocesar_result: 'processed', reprocesar_result_at: new Date().toISOString(),
+      reprocesar_build: CODE_BUILD,
     };
     const patchRes = await fetch(url, {
       method: 'PATCH',
@@ -1989,7 +2087,7 @@ async function limpiarReprocesarFlag(supabaseKey, messageId, motivo) {
       { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } },
     );
     const cur = (await getRes.json())[0]?.metadata ?? {};
-    const md = { ...cur, reprocesar_pending: false, reprocesar_result: motivo, reprocesar_result_at: new Date().toISOString() };
+    const md = { ...cur, reprocesar_pending: false, reprocesar_result: motivo, reprocesar_result_at: new Date().toISOString(), reprocesar_build: CODE_BUILD };
     await fetch(
       `${SUPABASE_URL}/rest/v1/mensajes?id=eq.${messageId}`,
       { method: 'PATCH', headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify({ metadata: md }) },
