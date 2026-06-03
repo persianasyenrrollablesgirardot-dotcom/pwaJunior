@@ -58,7 +58,9 @@ import { analizarChecklist } from '../agentes/sintesis/checklist.js';
 import { responderJunior, type NuevoCliente } from '../agentes/sintesis/junior_chat.js';
 import { cascadaCierreChecklist } from '../agentes/sintesis/cascada.js';
 import { cicloTarjetas } from '../agentes/sintesis/tarjeta_engine.js';
+import { cicloCartera } from '../agentes/batch/cartera.js';
 import { fusionarPersonas } from '../identidad/fusionar_personas.js';
+import { cicloFusionPorTelefono } from '../identidad/fusion_telefono.js';
 
 // ─── Config y env ─────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
@@ -1273,6 +1275,21 @@ async function main() {
   setInterval(() => { cicloSintesisPendiente().catch(e => console.error('[V2/SINT-MANUAL]', e?.message)); }, 4000);
   // V2: motor de tarjetas embebido (antes proceso aparte worker_tarjetas).
   setInterval(() => { cicloTarjetas(sb, m => console.log('[V2/TARJETAS]', m)).catch(e => console.error('[V2/TARJETAS]', e?.message)); }, 10000);
+
+  // Disparador batch de A5_CARTERA (cobros pendientes): no es tiempo real → cada
+  // 6h + un disparo inicial a los 60s del arranque. Throttle interno por persona.
+  const dispararCartera = () => cicloCartera(sb, m => console.log('[V2/CARTERA]', m)).catch(e => console.error('[V2/CARTERA]', e?.message));
+  setTimeout(dispararCartera, 60_000);
+  setInterval(dispararCartera, 6 * 3600 * 1000);
+
+  // Red de seguridad de identidad: auto-fusión de personas con el mismo teléfono
+  // (fragmentación LID↔teléfono). No es tiempo real → cada 6h + disparo inicial
+  // a los 90s. La unificación en caliente la hace matcher.ts; esto cierra bordes.
+  const dispararFusionTel = () => cicloFusionPorTelefono(sb, m => console.log('[V2/FUSION-TEL]', m))
+    .then(r => { if (r.fusiones) console.log(`[V2/FUSION-TEL] ${r.fusiones} fusión(es) en ${r.gruposDuplicados} grupo(s)`); })
+    .catch(e => console.error('[V2/FUSION-TEL]', e?.message));
+  setTimeout(dispararFusionTel, 90_000);
+  setInterval(dispararFusionTel, 6 * 3600 * 1000);
 
   setInterval(() => console.log(`[V2] stats: ${JSON.stringify(stats)}`), STATS_INTERVAL_MS);
 
