@@ -221,6 +221,9 @@ export async function cicloPdfWorker(sb: SupabaseClient, log: (m: string) => voi
     delete (md as any).extractor_done;                     // fuerza re-extracción de los agentes
     const { error } = await sb.from('mensajes').update({ texto, metadata: md } as any).eq('id', m.id);
     if (error) { sinMatch++; log(`msg ${m.id}: error al escribir ${error.message}`); continue; }
+    // El extractor (Ciclo A) solo procesa chats con ia_historico_procesado=true.
+    // Si la chat no lo tenía, el texto del PDF nunca se extraería → forzarlo.
+    await sb.from('chats').update({ ia_historico_procesado: true } as any).eq('id', m.chat_id);
     // Disparar reconstrucción de la tarjeta de esa persona.
     await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', per.id);
     await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', m.chat_id);
