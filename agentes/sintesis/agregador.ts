@@ -36,6 +36,32 @@ export interface Tarjeta extends Insumos {
 }
 
 /**
+ * ¿El evento de un agente trae un HALLAZGO sustantivo? (señales genéricas sobre
+ * el payload, no sobre el texto). Sirve para que el módulo "qué entendieron los
+ * agentes" muestre SOLO los que aportan algo, y no se llene de "no hay X".
+ */
+function aportaHallazgo(payload: any): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  // 1. Algún array de resultados con contenido.
+  const ARRAYS = ['items', 'objeciones', 'menciones', 'menciones_terceros', 'tareas',
+    'riesgos_detectados', 'candidatos_fusion', 'validaciones', 'alertas',
+    'referidos_propuestos', 'medidas_adicionales', 'montos', 'medidas', 'entidades'];
+  for (const k of ARRAYS) if (Array.isArray(payload[k]) && payload[k].length > 0) return true;
+  // 2. Flags de hallazgo en true.
+  const FLAGS = ['hay_reclamo', 'hay_abono', 'hay_comprobante', 'hay_reporte_falla',
+    'hay_referidos', 'tiene_riesgos_altos', 'tiene_alertas_criticas', 'cambio_propuesto'];
+  for (const k of FLAGS) if (payload[k] === true) return true;
+  // 3. Valores puntuales presentes / clasificaciones que aportan contexto.
+  if (payload.alto_m != null || payload.ancho_m != null) return true;     // A6_MEDIDAS
+  if (payload.abono != null) return true;                                  // A5_ABONO
+  if (payload.es_cliente === false) return true;                           // A2_NOCLIENTE marca no-cliente
+  if (payload.rol_emisor && payload.rol_emisor !== 'cliente') return true; // A2_ROL ≠ cliente (familiar/intermediario…)
+  if (payload.ambito_propuesto) return true;                               // A2_AMBITO propone cambio
+  if (typeof payload.intencion === 'string' && !['otro', 'saludo', ''].includes(payload.intencion)) return true; // A2_INTENCION útil
+  return false;
+}
+
+/**
  * Lee los insumos de la tarjeta (hechos por módulo + notas). NO llama al LLM,
  * así el motor puede calcular el hash y decidir si hace falta rehacer ANTES de
  * gastar en la narrativa.
@@ -54,6 +80,30 @@ export async function leerInsumosTarjeta(sb: SupabaseClient, personaId: number):
     const s = porModulo.get(m);
     return { modulo: m, titulo: MODULO_NOMBRE[m] ?? m, sintesis: s.sintesis, alerta: s.alerta ?? null };
   });
+
+  // Modelo híbrido: "qué entendió cada agente" (verbatim) desde el payload de
+  // sus eventos. Tomamos el contexto_entendido más reciente por agente y
+  // filtramos el ruido de "no aplica" para no inflar la tarjeta. Se suma como un
+  // módulo más → aparece en la UI sin migración ni tocar el front.
+  const { data: evCtx } = await sb.from('evento_pg')
+    .select('agente_origen, payload, ts_creado')
+    .eq('persona_id', personaId)
+    .is('deleted_at', null)
+    .order('ts_creado', { ascending: false })
+    .limit(120);
+  const ctxPorAgente = new Map<string, string>();
+  for (const e of evCtx ?? []) {
+    const txt = String((e.payload as any)?.contexto_entendido ?? '').trim();
+    // Solo incluir agentes que aportan un HALLAZGO real (por payload, no por texto):
+    // así el módulo queda conciso y no se llena de "no hay X de mi dominio".
+    if (txt && e.agente_origen && !ctxPorAgente.has(e.agente_origen) && aportaHallazgo(e.payload)) {
+      ctxPorAgente.set(e.agente_origen, txt);
+    }
+  }
+  if (ctxPorAgente.size) {
+    const texto = [...ctxPorAgente.entries()].map(([ag, t]) => `• ${ag}: ${t}`).join('\n');
+    contexto_estructurado.push({ modulo: 'agentes', titulo: '🧩 Qué entendieron los agentes', sintesis: texto, alerta: null });
+  }
 
   // Notas de Jhon (verdad prioritaria): columna personas.notas + tabla notas_libres.
   const { data: notasRows } = await sb.from('notas_libres')

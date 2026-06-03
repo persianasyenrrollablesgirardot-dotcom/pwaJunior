@@ -20,7 +20,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { deepseekChat, type ChatMessage, type DeepSeekResult } from './llm.js';
-import { validarOutput, parsearJSONSeguro, type OutputAgente, type ContextoValidacion, ValidacionError } from './validador.js';
+import { validarOutput, parsearJSONSeguro, esTerminoNegocio, type OutputAgente, type ContextoValidacion, ValidacionError } from './validador.js';
 
 export interface AgenteDefinicion {
   codigo: string;                    // 'A1', 'A5', 'JUNIOR'
@@ -100,6 +100,19 @@ export interface AgenteHooks<TDatos = any> {
 
 const MAX_INTENTOS_AGENTE = 3;
 const LEASE_SEGUNDOS = 300;
+
+/**
+ * Modelo híbrido (2026-05-30): instrucción inyectada al system prompt de TODOS
+ * los agentes LLM (no se repite en cada prompt). Pide dos campos al RAÍZ del JSON
+ * de salida — estructura mínima accionable (payload) + narrativa libre + extras.
+ * Los campos son opcionales y retrocompatibles; el runner los fusiona al payload.
+ */
+export const INSTRUCCION_HIBRIDO = `
+
+# MODELO HÍBRIDO — agregá estos campos al RAÍZ del JSON (junto a tipo_evento, confianza, payload, evidencia_msg_ids):
+- "contexto_entendido" (string): en 1-2 frases y en tus palabras, lo que entendiste — INCLUÍ lo que NO entra en los campos estructurados del payload (matices, condiciones, formato inusual, lo implícito, tu duda). Es lo que un humano leería para entender el caso de un vistazo. Si de verdad no hay nada que entender (mensaje vacío/irrelevante), poné una frase corta diciéndolo.
+- "extras" (objeto, OPCIONAL): cualquier dato útil que el payload no tenga campo propio (ej. {"urgencia":"alta"}, {"forma_pago":"nequi"}). Si no hay, omitilo.
+Los campos del payload son para que el sistema ACTÚE; contexto_entendido/extras son para NO perder lo que no encaja en el formato. No inventes: basate en el mensaje real.`;
 
 /**
  * Mapea tipo_evento del output a tipo_decision válido para buzon_validacion.
@@ -276,6 +289,11 @@ export async function ejecutarAgente<TDatos = any>(
             `Tenelas en cuenta. NO repitas errores corregidos antes:\n${correccionesTexto}`,
         };
       }
+      // Modelo híbrido: inyección central de la instrucción para TODOS los agentes
+      // LLM (no hay que repetirla en cada prompt). Se apende al system message.
+      if (messages.length > 0 && messages[0].role === 'system') {
+        messages[0] = { ...messages[0], content: messages[0].content + INSTRUCCION_HIBRIDO };
+      }
     } catch (e: any) {
       return await finalizarConError(sb, agente, params, t0, 0, intentosPrevios + 1, 'construirPrompt: ' + e.message, tag);
     }
@@ -364,6 +382,13 @@ export async function ejecutarAgente<TDatos = any>(
     throw e;
   }
 
+  // ─── Modelo híbrido: fusionar narrativa libre + extras dentro del payload
+  //     que se persiste (estructura mínima accionable + contexto libre). Es
+  //     no-destructivo: si el agente no los emite, el payload queda igual.
+  const payloadPersistir: Record<string, any> = { ...output.payload };
+  if (output.contexto_entendido) payloadPersistir.contexto_entendido = output.contexto_entendido;
+  if (output.extras && typeof output.extras === 'object') payloadPersistir.extras = output.extras;
+
   // ─── 13. MODO SHADOW: NO escribe a tablas de negocio, solo loggea
   const ctxAgente: ContextoAgente = {
     agente, evento_id: params.evento_id, chat_id: params.chat_id, persona_id: params.persona_id,
@@ -379,7 +404,7 @@ export async function ejecutarAgente<TDatos = any>(
       agente_origen: agente.codigo, evento_padre_id: params.evento_id,
       confianza: output.confianza, costo_usd: costoInvocacion,
       shadow: true,
-      payload: output.payload,
+      payload: payloadPersistir,
       evidencia_ids: { msg_ids: output.evidencia_msg_ids },
       ts_canal: new Date().toISOString(),
     } as any);
@@ -404,7 +429,7 @@ export async function ejecutarAgente<TDatos = any>(
     estado: 'PROCESADO', persona_id: params.persona_id, proyecto_id: params.proyecto_id, chat_id: params.chat_id,
     agente_origen: agente.codigo, evento_padre_id: params.evento_id,
     confianza: output.confianza, costo_usd: costoInvocacion,
-    payload: output.payload,
+    payload: payloadPersistir,
     evidencia_ids: { msg_ids: output.evidencia_msg_ids },
     ts_canal: new Date().toISOString(),
   } as any).select('id').maybeSingle();
@@ -413,24 +438,48 @@ export async function ejecutarAgente<TDatos = any>(
   //         CONFIRMADO / INFERIDO / DUDOSO escriben directo al módulo, visibles.
   //         Decisión de Jhon (2026-05-19): cero aprobación rutinaria — los
   //         agentes trabajan solos, Jhon corrige post-hoc en el módulo.
+  //         EXCEPCIÓN (2026-05-31): 'dato_extraido' (extracción de bajo nivel de
+  //         L1/L2) NO va al buzón aunque sea ALERTA — no es propuesta accionable
+  //         y nadie trabaja el buzón en V2; solo lo saturaba (199 ítems ruido).
+  //         El buzón queda para propuestas reales (abono/medida/tarea/cotización).
   let fue_al_buzon = false;
-  if (output.confianza === 'ALERTA') {
-    await sb.from('buzon_validacion').insert({
-      evento_id: evtNew?.id,
-      proyecto_id: params.proyecto_id,
-      persona_id: params.persona_id,
-      ambito: params.ambito,
-      tipo_decision: mapTipoDecision(output.tipo_evento),
-      entidad_tipo: entidadInfo.entidad_tipo ?? null,
-      entidad_id: entidadInfo.entidad_id ?? null,
-      resumen: (output.payload as any)?.resumen ?? (output.payload as any)?.preview ?? `${output.tipo_evento} inferido por ${agente.codigo}`,
-      detalle: output.payload,
-      evidencia_ids: { msg_ids: output.evidencia_msg_ids },
-      reglas_aplicadas: output.reglas_aplicadas ?? [],
-      prioridad: output.confianza === 'ALERTA' ? 1 : (output.confianza === 'DUDOSO' ? 4 : 3),
-      estado: 'pendiente',
-    } as any);
-    fue_al_buzon = true;
+  if (output.confianza === 'ALERTA' && output.tipo_evento !== 'dato_extraido') {
+    const tipoDecision = mapTipoDecision(output.tipo_evento);
+    const resumenBuzon = (output.payload as any)?.resumen ?? output.contexto_entendido ?? (output.payload as any)?.preview ?? `${output.tipo_evento} inferido por ${agente.codigo}`;
+    // DEDUP (2026-05-31): no re-insertar una ALERTA idéntica que ya está
+    // pendiente (mismo persona+tipo+resumen). Reprocesar un chat re-emite la
+    // misma ALERTA → antes se acumulaban duplicados (ej Arboleda "agendar
+    // instalación urgente" ×10, Paola medida 0.85×2.20 ×4). El buzón es un log
+    // que nadie resuelve activamente, así que un duplicado solo agrega ruido.
+    let yaExiste: { id: number } | null = null;
+    if (params.persona_id != null) {
+      const { data } = await sb.from('buzon_validacion')
+        .select('id')
+        .eq('persona_id', params.persona_id)
+        .eq('tipo_decision', tipoDecision)
+        .eq('resumen', resumenBuzon)
+        .eq('estado', 'pendiente')
+        .limit(1).maybeSingle();
+      yaExiste = (data as any) ?? null;
+    }
+    if (!yaExiste) {
+      await sb.from('buzon_validacion').insert({
+        evento_id: evtNew?.id,
+        proyecto_id: params.proyecto_id,
+        persona_id: params.persona_id,
+        ambito: params.ambito,
+        tipo_decision: tipoDecision,
+        entidad_tipo: entidadInfo.entidad_tipo ?? null,
+        entidad_id: entidadInfo.entidad_id ?? null,
+        resumen: resumenBuzon,
+        detalle: payloadPersistir,
+        evidencia_ids: { msg_ids: output.evidencia_msg_ids },
+        reglas_aplicadas: output.reglas_aplicadas ?? [],
+        prioridad: output.confianza === 'ALERTA' ? 1 : (output.confianza === 'DUDOSO' ? 4 : 3),
+        estado: 'pendiente',
+      } as any);
+      fue_al_buzon = true;
+    }
   }
 
   // ─── 17. Liberar lock + reset intentos (éxito)
@@ -494,7 +543,9 @@ async function cargarOtrosClientes(sb: SupabaseClient, persona_id_actual: number
     if (p.email) out.push(p.email);
     if (p.empresa) out.push(p.empresa);
   }
-  return out;
+  // FIX guard "Safra": nunca tratar términos del negocio propio (catálogo/marca)
+  // como identificadores de otro cliente, aunque alguna persona los tenga de nombre/empresa.
+  return out.filter(x => !esTerminoNegocio(x));
 }
 
 /**

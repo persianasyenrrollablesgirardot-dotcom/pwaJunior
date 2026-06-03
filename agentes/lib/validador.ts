@@ -41,8 +41,35 @@ export const SISTEMAS_SAFRA = [
   'verticales', 'peliculas_solares', 'toldos', 'motores', 'domotica', 'rieles', 'cadenillas',
 ] as const;
 
+// ─── Términos del NEGOCIO PROPIO (nunca son "otro cliente") ──────────────
+// FIX guard "Safra" (2026-05-30): el catálogo se llama "Safra" y aparece en casi
+// toda cotización. Como alguna persona/empresa quedó registrada con ese término,
+// `cargarOtrosClientes` lo metía en la lista de otros-clientes y el guard
+// anti-contaminación bloqueaba TODA cotización que mencionara productos Safra
+// (A4_COTIZ no emitía ni una; también golpeaba A8_GARANTIA). Estos términos
+// se excluyen del chequeo cross-cliente.
+export const TERMINOS_NEGOCIO_PROTEGIDOS = [
+  'safra',
+  'persianas girardot', 'persianas y enrrollables girardot', 'persianas y enrollables girardot',
+  'enrrollables girardot', 'cortinas girardot', 'fabrica de cortinas girardot',
+  ...SISTEMAS_SAFRA,
+] as const;
+
+/** ¿El identificador es un término del negocio propio (catálogo/marca), no un cliente ajeno? */
+export function esTerminoNegocio(s: string): boolean {
+  const low = (s ?? '').toLowerCase().trim();
+  if (!low) return false;
+  if (low.includes('safra')) return true;                 // el caso crítico: catálogo Safra
+  return (TERMINOS_NEGOCIO_PROTEGIDOS as readonly string[]).includes(low);
+}
+
 export const CONFIANZA = ['CONFIRMADO', 'INFERIDO', 'DUDOSO', 'ALERTA', 'RECHAZADO'] as const;
 export type Confianza = typeof CONFIANZA[number];
+
+// Agentes BATCH: deciden sobre la persona/datos estructurados (no sobre un
+// mensaje), por eso se eximen de la evidencia obligatoria de msg_id. Su
+// anti-alucinación se valida contra los datos cargados en su validarOutputEspecifico.
+export const AGENTES_BATCH = new Set(['A5_CARTERA', 'A4_RECOMPRA', 'A7_RUTAS', 'A5_RENTAB']);
 
 export const TIPOS_EVENTO = [
   // originales (002_schema_inicial)
@@ -64,6 +91,13 @@ export interface OutputAgente {
   evidencia_msg_ids: string[];           // OBLIGATORIO si confianza != 'pregunta_humano'
   reglas_aplicadas?: string[];           // ej: ['R-001', 'R-013#1']
   observacion_humano?: string;           // si quiere mandar al buzón con explicación
+
+  // ── Modelo híbrido (2026-05-30): estructura mínima accionable (payload) +
+  //    narrativa libre + extras dinámico. Ambos OPCIONALES y retrocompatibles:
+  //    un agente que no los emita sigue funcionando igual. El runner los
+  //    fusiona dentro del payload persistido para que la tarjeta los lea.
+  contexto_entendido?: string;           // lo que el agente entendió, en prosa (lo que no entra en campos)
+  extras?: Record<string, any>;          // datos dinámicos que el esquema fijo no previó
 }
 
 // ─── Errores de validación ───────────────────────────────────────────────
@@ -131,8 +165,13 @@ export function validarOutput(out: OutputAgente, ctx: ContextoValidacion): void 
   }
 
   // 2. Anti-alucinación: evidencia obligatoria
-  // Excepción: si tipo_evento es 'pregunta_humano' o confianza es 'DUDOSO', se permite vacío
-  const evidenciaRequerida = out.confianza !== 'DUDOSO' && out.tipo_evento !== 'pregunta_humano';
+  // Excepción: 'pregunta_humano', confianza 'DUDOSO', o AGENTES BATCH — estos
+  // deciden sobre la PERSONA/datos estructurados (cotizaciones, saldos,
+  // instalaciones), no sobre un mensaje puntual, así que no tienen un msg_id
+  // natural que citar. Su anti-alucinación se valida sobre los datos cargados
+  // (en su validarOutputEspecifico), no sobre msg_ids.
+  const evidenciaRequerida = !AGENTES_BATCH.has(ctx.agente)
+    && out.confianza !== 'DUDOSO' && out.tipo_evento !== 'pregunta_humano';
   if (evidenciaRequerida) {
     if (!Array.isArray(out.evidencia_msg_ids) || out.evidencia_msg_ids.length === 0) {
       throw new ValidacionError('R-anti-alucinacion',
@@ -158,7 +197,8 @@ export function validarOutput(out: OutputAgente, ctx: ContextoValidacion): void 
   // Convertir payload a string y buscar identificadores de otros clientes
   const payloadStr = JSON.stringify(out.payload).toLowerCase();
   for (const otro of ctx.identificadores_otros_clientes) {
-    if (!otro || otro.length < 4) continue;  // ignorar fragmentos muy cortos
+    if (!otro || otro.length < 4) continue;     // ignorar fragmentos muy cortos
+    if (esTerminoNegocio(otro)) continue;        // FIX: el catálogo/marca propia (Safra…) NO es otro cliente
     if (payloadStr.includes(otro.toLowerCase())) {
       throw new ValidacionError('R-anti-contaminacion',
         `payload menciona '${otro}' que pertenece a OTRO cliente. Cross-cliente leak detectado.`);

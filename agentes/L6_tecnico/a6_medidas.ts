@@ -271,6 +271,32 @@ Validá las medidas. Recordá: ancho_m/alto_m/quien_midio/bandera_riesgo TOP-LEV
   validarOutputEspecifico(out, datos) {
     const p = out.payload as any;
 
+    // FIX (2026-05-31): el LLM sobre-marca 'ratio_invertido' en TODA ventana más
+    // alta que ancha (orientación vertical, que es normal). La regla real es
+    // alto > RATIO_INVERTIDO_LIMITE(3) × ancho. Recalculamos determinísticamente
+    // y, si NO se cumple, quitamos la alerta + la mención "invertido" del resumen
+    // → el flag pasa a ser confiable y deja de dar falsas alarmas. NO cambia el
+    // umbral (3×) ni R-013#1: la medición por cliente sigue siendo ALERTA aparte
+    // (alerta 'medida_por_no_tecnico'), que es el signal real.
+    {
+      const aN = typeof p.ancho_m === 'number' ? p.ancho_m : null;
+      const alN = typeof p.alto_m === 'number' ? p.alto_m : null;
+      const realmenteInvertido = aN != null && alN != null && alN > RATIO_INVERTIDO_LIMITE * aN;
+      if (!realmenteInvertido) {
+        if (Array.isArray(p.alertas_tecnicas)) {
+          p.alertas_tecnicas = p.alertas_tecnicas.filter((a: any) => a?.codigo !== 'ratio_invertido');
+        }
+        if (typeof p.resumen === 'string') {
+          p.resumen = p.resumen
+            .replace(/\s*\(posible(?:mente)?\s+invertid[oa]\)/gi, '')
+            .replace(/(?:[.;]\s*)?(?:alerta:?\s*)?ratio\s+invertid[oa][^.]*\.?/gi, '')
+            .replace(/\s{2,}/g, ' ')
+            .replace(/\s+\./g, '.')
+            .trim();
+        }
+      }
+    }
+
     const tipos_quien_midio = ['tecnico', 'cliente', 'familiar', 'otro', 'no_dicho'];
     if (!tipos_quien_midio.includes(p.quien_midio)) {
       throw new ValidacionError('schema', `quien_midio inválido: ${p.quien_midio}`);

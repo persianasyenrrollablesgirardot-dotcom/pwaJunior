@@ -152,10 +152,35 @@ export const a1AudioHooks: AgenteHooks<DatosA1Audio> = {
     }
   },
 
-  async postProcesar(_sb: SupabaseClient, _out, _ctx) {
-    // L1: solo emite evento. La transcripción ya vive en mensajes.metadata.ai_text.
-    // El pipeline puede re-procesar el evento como tipo=texto en una fase posterior
-    // (responsabilidad del worker, no de este agente).
-    return;
+  async postProcesar(sb: SupabaseClient, out, ctx) {
+    // FIX bug audios (2026-05-30): copiar la transcripción a `mensajes.texto`.
+    // Antes solo vivía en metadata.ai_text + el evento, pero los demás agentes
+    // (montos, medidas, entidades, cotización…) leen `mensajes.texto` → quedaban
+    // ciegos al ~83% de los audios. Solo se copia si el texto está vacío o es
+    // placeholder (no pisamos un caption real). Se borra metadata.extractor_done
+    // para forzar la re-extracción del mensaje (ahora con texto) en el próximo ciclo.
+    const p = out.payload as any;
+    if (p?.tipo_subevento !== 'transcripcion_audio' || typeof p.transcripcion !== 'string' || !p.transcripcion.trim()) {
+      return;
+    }
+    const msgId = out.evidencia_msg_ids?.[0];
+    if (!msgId) return;
+    const transcripcion = p.transcripcion.trim();
+    const nuevoTexto = `🎤 ${transcripcion}`;
+
+    const { data: m } = await sb.from('mensajes')
+      .select('texto, metadata')
+      .eq('chat_id', ctx.chat_id).eq('canal_msg_id', msgId)
+      .maybeSingle();
+    const actual = (m?.texto ?? '').trim();
+    const esVacioOPlaceholder = !actual || actual === '[audio]'
+      || actual.startsWith('🎤') || /no recuperable|cdn/i.test(actual);
+    if (!esVacioOPlaceholder || actual === nuevoTexto) return;   // hay caption real o ya está
+
+    const meta = { ...(m?.metadata ?? {}), ai_text: transcripcion, ai_kind: 'whisper', ai_status: 'processed' };
+    delete (meta as any).extractor_done;   // forzar re-extracción ahora que hay texto
+    await sb.from('mensajes')
+      .update({ texto: nuevoTexto, metadata: meta } as any)
+      .eq('chat_id', ctx.chat_id).eq('canal_msg_id', msgId);
   },
 };

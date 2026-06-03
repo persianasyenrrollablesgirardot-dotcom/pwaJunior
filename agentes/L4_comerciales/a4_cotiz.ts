@@ -256,6 +256,17 @@ ${sistemasStr}
 ${zonaStr}
 ${cotPreviaStr}
 
+MODELO HÍBRIDO (campos top-level, además de payload):
+  - "contexto_entendido" (string, SIEMPRE): en 1-2 frases y en tus palabras, lo
+    que entendiste del pedido — incluí lo que NO entra en los campos rígidos
+    (formato raro, condiciones, dudas, lo que el cliente dejó implícito). Esto es
+    lo que un humano leería para entender el caso de un vistazo.
+  - "extras" (objeto, OPCIONAL): cualquier dato útil que el esquema no tiene campo
+    propio (ej: {"urgencia":"alta"}, {"forma_pago_mencionada":"nequi"},
+    {"referencia_otra_cotizacion":true}). No fuerces nada; si no hay, omitilo.
+  Regla: los campos estructurados (items) son para que el sistema ACTÚE; el
+  contexto_entendido/extras son para no perder lo que no encaja en el formato.
+
 Devolvés JSON EXACTO con la forma de los ejemplos siguientes.
 
 EJEMPLO 1 — cotización con 1 item (caso B, INFERIDO → buzón para Jhon):
@@ -283,7 +294,9 @@ EJEMPLO 1 — cotización con 1 item (caso B, INFERIDO → buzón para Jhon):
     "resumen": "Cliente solicita 1 blackout 2.40×1.80m para sala"
   },
   "evidencia_msg_ids": ["MSG_ID_1", "MSG_ID_2"],
-  "reglas_aplicadas": ["R-001"]
+  "reglas_aplicadas": ["R-001"],
+  "contexto_entendido": "El cliente pidió un blackout para la sala y dio medidas que midió él mismo (2.40×1.80), así que hay que confirmarlas en visita. Falta definir color y accesorios.",
+  "extras": { "medidas_por_confirmar": true }
 }
 
 EJEMPLO 2 — mensaje NO es cotización (caso A, DUDOSO → buzón con prioridad):
@@ -299,7 +312,8 @@ EJEMPLO 2 — mensaje NO es cotización (caso A, DUDOSO → buzón con prioridad
     "resumen": "No es cotización"
   },
   "evidencia_msg_ids": ["MSG_ID"],
-  "reglas_aplicadas": ["R-001"]
+  "reglas_aplicadas": ["R-001"],
+  "contexto_entendido": "El cliente solo agradece; en este mensaje no hay intención de cotizar."
 }`,
     };
 

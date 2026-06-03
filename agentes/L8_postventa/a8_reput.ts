@@ -238,13 +238,15 @@ REGLAS DURAS:
 
 CÁLCULO MECÁNICO de "confianza" global (NO opinión, regla fija):
   caso A — apto_para_resena=false (no es momento o no califica):
-    out.confianza = "CONFIRMADO"  (no buzón, no molestar)
+    out.confianza = "DUDOSO"  (no buzón, no molestar). Es una NO-acción sobre el
+    cliente, no un dato citable de un mensaje → evidencia_msg_ids DEBE ir vacío: []
 
   caso B — apto_para_resena=true (todos los criterios cumplidos):
-    out.confianza = "INFERIDO"   (al buzón, Jhon edita plantilla y envía)
+    out.confianza = "INFERIDO"   (al buzón, Jhon edita plantilla y envía).
+    Citá en evidencia_msg_ids el msg del evento.
 
 PROHIBIDO ABSOLUTO:
-  ✗ apto=false con out.confianza ≠ "CONFIRMADO" → ERROR
+  ✗ apto=false con out.confianza ≠ "DUDOSO" → ERROR
   ✗ apto=true con out.confianza = "CONFIRMADO" → ERROR
 
 Salida JSON EXACTA — APTO:
@@ -266,10 +268,10 @@ Salida JSON EXACTA — APTO:
   "reglas_aplicadas": ["R-001"]
 }
 
-Si NO APTO (caso A, CONFIRMADO → NO al buzón):
+Si NO APTO (caso A, DUDOSO → NO al buzón, SIN evidencia):
 {
   "tipo_evento": "review",
-  "confianza": "CONFIRMADO",
+  "confianza": "DUDOSO",
   "payload": {
     "recomendacion": {
       "apto_para_resena": false,
@@ -281,7 +283,7 @@ Si NO APTO (caso A, CONFIRMADO → NO al buzón):
     },
     "resumen": "NO apto (garantía activa)"
   },
-  "evidencia_msg_ids": ["${datos.evento_msg_id ?? ''}"],
+  "evidencia_msg_ids": [],
   "reglas_aplicadas": ["R-001"]
 }`,
     };
@@ -356,9 +358,12 @@ basado en TODOS los criterios. Sé estricto y conservador.`,
     }
 
     // Coherencia mecánica out.confianza ↔ apto
-    if (!r.apto_para_resena && out.confianza !== 'CONFIRMADO') {
+    // apto=false → DUDOSO (exento de evidencia: es NO-acción sobre el cliente, no
+    // un dato de mensaje). Antes era CONFIRMADO → el guard anti-alucinación lo
+    // rechazaba SIEMPRE por falta de msg_id citable (300/300 rechazos).
+    if (!r.apto_para_resena && out.confianza !== 'DUDOSO') {
       throw new ValidacionError('coherencia-a8r',
-        `apto=false requiere out.confianza='CONFIRMADO', recibido '${out.confianza}'`);
+        `apto=false requiere out.confianza='DUDOSO', recibido '${out.confianza}'`);
     }
     if (r.apto_para_resena && out.confianza === 'CONFIRMADO') {
       throw new ValidacionError('coherencia-a8r',
