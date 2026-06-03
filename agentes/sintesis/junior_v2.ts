@@ -14,6 +14,7 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { deepseekChat, type ChatMessage } from '../lib/llm.js';
+import { fusionarPersonas } from '../../identidad/fusionar_personas.js';
 
 export interface RespuestaJuniorV2 {
   respuesta: string;
@@ -64,27 +65,83 @@ async function cargarDetalle(sb: SupabaseClient, chatIds: number[]): Promise<str
       continue;
     }
     const { data: ck } = await sb.from('tarjeta_checklist').select('estado_conversacion, proximo_paso').eq('chat_id', id).maybeSingle();
-    const { data: tar } = await sb.from('tarjeta_tarea').select('titulo, prioridad').eq('chat_id', id).order('prioridad');
-    const { data: ag } = await sb.from('tarjeta_agenda').select('titulo, cuando, lugar').eq('chat_id', id);
+    // Tareas: leer tareas V1 (la tabla que muestra el panel) Y las del agente
+    // V2 (tarjeta_tarea). Antes solo leía V2 — no veía las que Junior crea ni
+    // las que el agente M5 deriva como tareas comerciales.
+    const { data: tarV1 } = tt.persona_id
+      ? await sb.from('tareas').select('titulo').eq('persona_id', tt.persona_id)
+          .is('deleted_at', null).eq('completada', false).eq('shadow', false)
+      : { data: [] };
+    const { data: tarV2 } = await sb.from('tarjeta_tarea').select('titulo, prioridad').eq('chat_id', id).order('prioridad');
+    // Agenda: la fuente canónica es `agendamientos` por persona_id (lo que ve
+    // el panel UI, lo que crea el detector_citas). Antes leía tarjeta_agenda
+    // (derivado V2 que solo se llena con derivarAgenda → ignoraba citas
+    // detectadas por detector_citas y manuales). Caso reportado: cita con
+    // Lorena 31/05 10am existía en `agendamientos` pero NO en tarjeta_agenda.
+    const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const { data: ag } = tt.persona_id
+      ? await sb.from('agendamientos')
+          .select('titulo, fecha, hora_inicio, direccion').eq('persona_id', tt.persona_id)
+          .is('deleted_at', null).gte('fecha', hoy)
+          .order('fecha').order('hora_inicio').limit(20)
+      : { data: [] };
     const ctx = (tt.contexto ?? []).map((c: any) => `  [${c.titulo}] ${c.sintesis}`).join('\n');
+    // Unificar tareas V1 + V2 sin duplicar por título.
+    const titulosVistos = new Set<string>();
+    const tareasUnif: string[] = [];
+    for (const x of [...(tarV2 ?? []), ...(tarV1 ?? [])] as any[]) {
+      const k = String(x.titulo).toLowerCase().trim();
+      if (titulosVistos.has(k)) continue;
+      titulosVistos.add(k); tareasUnif.push(String(x.titulo));
+    }
+    const agendaStr = (ag ?? []).map((x: any) => {
+      const cuando = `${x.fecha}${x.hora_inicio ? ' ' + String(x.hora_inicio).slice(0, 5) : ''}`;
+      const lugar = x.direccion ? ` @ ${x.direccion}` : '';
+      return `${x.titulo} (${cuando}${lugar})`;
+    }).join(' · ') || '(nada agendado en próximos 20 eventos)';
     bloques.push(
       `### ${tt.personas?.nombre ?? `Chat #${id}`} (chat ${id}, ${tt.tipo_contacto})\n` +
       (contacto ? `CONTACTO: ${contacto}\n` : '') +
       `ESTADO GENERAL: ${tt.narrativa ?? '(sin narrativa)'}\n` +
       (tt.notas?.length ? `NOTAS DE JHON (verdad): ${tt.notas.join(' · ')}\n` : '') +
       `CHECKLIST: ${ck?.estado_conversacion ?? '?'} → ${ck?.proximo_paso ?? '-'}\n` +
-      `TAREAS: ${(tar ?? []).map((x: any) => x.titulo).join(' · ') || '(ninguna)'}\n` +
-      `AGENDA: ${(ag ?? []).map((x: any) => `${x.titulo} (${x.cuando})`).join(' · ') || '(nada)'}\n` +
+      `TAREAS: ${tareasUnif.join(' · ') || '(ninguna)'}\n` +
+      `AGENDA: ${agendaStr}\n` +
       `CONTEXTO POR MÓDULO:\n${ctx || '  (sin detalle)'}`
     );
   }
   return bloques.join('\n\n');
 }
 
+/**
+ * Duplicados pendientes (detector A3_IDENTIDAD) para que Junior V2 los plantee a
+ * Jhon y procese su confirmación. Reemplaza a cargarDuplicadosPendientes del
+ * Junior viejo (junior_chat.ts), que quedó huérfano con JUNIOR_VIEJO_ACTIVO=false.
+ * Devuelve '' si no hay ninguno.
+ */
+async function cargarDuplicadosPendientes(sb: SupabaseClient): Promise<string> {
+  const { data: dups } = await sb.from('duplicados_detectados')
+    .select('id, persona_nueva_id, persona_existente_id, motivo')
+    .eq('estado', 'pendiente')
+    .order('id', { ascending: true });
+  if (!dups || dups.length === 0) return '';
+  const ids = [...new Set(dups.flatMap(d => [d.persona_nueva_id, d.persona_existente_id]))];
+  const { data: pers } = await sb.from('personas').select('id, nombre, telefono_e164, ciudad').in('id', ids);
+  const ref = (id: number) => {
+    const p = pers?.find(x => x.id === id);
+    if (!p) return `id ${id}`;
+    return `"${p.nombre ?? 'sin nombre'}" (id ${id}${p.telefono_e164 ? ', ' + p.telefono_e164 : ''}${p.ciudad ? ', ' + p.ciudad : ''})`;
+  };
+  const lineas = dups.map(d =>
+    `[duplicado #${d.id}] ${ref(d.persona_nueva_id)} podría ser la misma persona que ${ref(d.persona_existente_id)}.${d.motivo ? ' Motivo: ' + d.motivo : ''}`);
+  return `\n\n=== POSIBLES CLIENTES DUPLICADOS (pendientes de tu confirmación) ===\n${lineas.join('\n')}`;
+}
+
 export async function responderJuniorTarjeta(
   sb: SupabaseClient, pregunta: string, historial: TurnoHistorial[] = [],
 ): Promise<RespuestaJuniorV2> {
   const indice = await cargarIndice(sb);
+  const dupText = await cargarDuplicadosPendientes(sb);
   // Defensa: si derivarChecklist coló una NO-ACCIÓN en estado=espera_jhon
   // (mantenerse / esperar / observar / "decidir si X o Y" / reclasifi…/o mantener…),
   // la bajamos a 'cerrado' en el índice IN-MEMORY para que ni el ruteo LLM ni el
@@ -106,28 +163,134 @@ export async function responderJuniorTarjeta(
     ? hist.map(h => `${h.rol === 'jhon' ? 'JHON' : 'JUNIOR'}: ${h.texto}`).join('\n')
     : '(sin conversación previa)';
 
+  // ── BLINDAJE BORRADO: confirmación / cancelación en 2 pasos ───────────────
+  // Si el último turno de Junior fue una PROPUESTA de borrado (contiene el
+  // marker [#NOTA:id] / [#TAREA:id] / [#TRANSV:id]) Y este turno del usuario
+  // es una confirmación o cancelación → ejecutamos el delete (o cancelamos)
+  // SIN pasar por el LLM. Esto blinda contra borrados al voleo: Junior nunca
+  // borra en el primer turno, siempre pide OK explícito antes de tocar la BD.
+  const ultimoTurnoJunior = [...historial].reverse().find(h => h.rol === 'junior')?.texto ?? '';
+  const markerBorrado = ultimoTurnoJunior.match(/\[#(NOTA|TAREA|TRANSV):(\d+)(?::chat=(\d+))?\]/);
+  if (markerBorrado) {
+    const esConfirmacion = /^\s*(s[ií]|dale|confirm[oó]|borralo|borr[aá]|hacelo|adelante|ok|listo|yes|y|👍|✅|s\b|si\s|s[ií]\s*[,.]|claro|exacto|aja|perfecto|correcto)\b/i.test(pregunta.trim());
+    const esCancelacion = /^\s*(no|cancel(a|alo)|olvidalo|d[eé]jalo|d[eé]jala|dej[aá] eso|nada|mejor no|no la|no lo|para[áa]|stop)\b/i.test(pregunta.trim());
+    if (esConfirmacion || esCancelacion) {
+      const tipo = markerBorrado[1];
+      const id = Number(markerBorrado[2]);
+      const chatIdMarker = markerBorrado[3] ? Number(markerBorrado[3]) : null;
+      if (esCancelacion) {
+        return { respuesta: `Cancelado, no borré nada.`, tarjetas_usadas: chatIdMarker ? [chatIdMarker] : [], via_indice: true, costo_usd: 0 };
+      }
+      // CONFIRMADO → ejecutar el delete según tipo.
+      if (tipo === 'NOTA') {
+        const { data: nota } = await sb.from('notas_libres').select('id, contenido, persona_id').eq('id', id).maybeSingle();
+        if (!nota) return { respuesta: `La nota #${id} ya no existe (quizás se borró antes).`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        const { error } = await sb.from('notas_libres').delete().eq('id', id);
+        if (error) return { respuesta: `No pude borrar la nota #${id}: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
+        if (nota.persona_id) await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', nota.persona_id);
+        if (chatIdMarker) await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', chatIdMarker);
+        return { respuesta: `Listo, borré la nota #${id}: «${String(nota.contenido).slice(0, 120)}${nota.contenido.length > 120 ? '…' : ''}». La tarjeta se actualiza en unos segundos.`, tarjetas_usadas: chatIdMarker ? [chatIdMarker] : [], via_indice: false, costo_usd: 0 };
+      }
+      if (tipo === 'TAREA') {
+        // Tareas V1 viven en `tareas`. Soft delete: deleted_at = now() para que
+        // queden auditables (la UI ya filtra is.deleted_at.null).
+        const { data: tarea } = await sb.from('tareas').select('id, titulo, persona_id, agente_origen, deleted_at').eq('id', id).maybeSingle();
+        if (!tarea || tarea.deleted_at) return { respuesta: `La tarea #${id} ya no existe.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        if (tarea.agente_origen !== 'junior_v2') return { respuesta: `No puedo borrar la tarea #${id} porque no la creé yo. Marcala completada en el panel Tareas.`, tarjetas_usadas: chatIdMarker ? [chatIdMarker] : [], via_indice: true, costo_usd: 0 };
+        const { error } = await sb.from('tareas').update({ deleted_at: new Date().toISOString() } as any).eq('id', id);
+        if (error) return { respuesta: `No pude borrar la tarea #${id}: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
+        if (chatIdMarker) await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', chatIdMarker);
+        return { respuesta: `Listo, borré la tarea #${id}: «${tarea.titulo}».`, tarjetas_usadas: chatIdMarker ? [chatIdMarker] : [], via_indice: false, costo_usd: 0 };
+      }
+      if (tipo === 'TRANSV') {
+        // Transversales también viven en `tareas` (persona_id=null).
+        const { data: tt } = await sb.from('tareas').select('id, titulo, persona_id, agente_origen, deleted_at').eq('id', id).maybeSingle();
+        if (!tt || tt.deleted_at) return { respuesta: `La tarea transversal #${id} ya no existe.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        if (tt.persona_id !== null) return { respuesta: `La tarea #${id} no es transversal (tiene contacto asignado). Probá borrarla como tarea normal.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        if (tt.agente_origen !== 'junior_v2') return { respuesta: `No puedo borrar la transversal #${id} porque no la creé yo. Borrala en el panel Tareas.`, tarjetas_usadas: [], via_indice: true, costo_usd: 0 };
+        const { error } = await sb.from('tareas').update({ deleted_at: new Date().toISOString() } as any).eq('id', id);
+        if (error) return { respuesta: `No pude borrar la transversal #${id}: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
+        return { respuesta: `Listo, borré la tarea transversal #${id}: «${tt.titulo}».`, tarjetas_usadas: [], via_indice: false, costo_usd: 0 };
+      }
+    }
+    // Si el último turno fue propuesta de borrado pero el usuario dijo otra cosa
+    // (ni sí ni no), seguimos el flujo normal — el marker queda activo otro turno,
+    // por si Jhon vuelve y confirma. Si dice "borrá otra cosa", se reemplaza con
+    // un nuevo marker en el siguiente bloque.
+  }
+
   // ── Paso 1: ruteo ──────────────────────────────────────────────────────
+  const hoyISO = new Date().toISOString().slice(0, 10);   // para resolver fechas relativas de citas
   const ruteo: ChatMessage[] = [
     {
       role: 'system',
       content:
-        `Sos el RUTEO de Junior, asistente de Jhon (Persianas Girardot, COP). Tenés la CONVERSACIÓN PREVIA y el ÍNDICE ` +
+        `Sos el RUTEO de Junior, asistente de Jhon (Persianas Girardot, COP).\n` +
+        `\n` +
+        `═══ EL ÍNDICE ES SUPERFICIAL — NO MIENTAS A PARTIR DE ÉL ═══\n` +
+        `El ÍNDICE que ves abajo es UNA LÍNEA por tarjeta: nombre, teléfono, tipo, estado, próximo paso. NADA más. ` +
+        `NO tenés la narrativa, NO tenés las notas, NO tenés el historial de la conversación, NO tenés la cotización ni los pagos. ` +
+        `Esos datos viven en la TARJETA PROCESADA — para acceder los tenés que cargar chat_ids (puede_responder_con_indice=false). ` +
+        `PROHIBIDO responder "no hay registro de X" / "no hay conversación con X" / "no tengo info de X" usando SOLO el índice. ` +
+        `Si la persona aparece en el índice, su tarjeta procesada existe — cargala. Caso reportado: "dame resumen de Lorena" → respondiste "sin conversación" basándote en el índice, cuando su tarjeta TIENE narrativa completa. ESO ES MENTIRA.\n` +
+        `\n` +
+        `═══ QUERIES DE LECTURA → SIEMPRE cargar tarjeta(s), NUNCA índice ═══\n` +
+        `Si la query incluye verbos de LECTURA — "resumen", "leeme", "contame de", "dame info de", "qué pasa con", "qué dice la tarjeta de", ` +
+        `"cómo va", "dame contexto", "dame historial", "buscame info de", "qué sabés de", "dame detalles", "leé la tarjeta", "abrime", ` +
+        `"mostrame", "dame todo lo de" — Y menciona un CONTACTO específico (nombre o teléfono): ` +
+        `OBLIGATORIO devolvé puede_responder_con_indice=false + chat_ids=[esa_tarjeta]. Sin excepciones. El paso 2 carga la tarjeta y responde con la narrativa.\n` +
+        `Si la query es "leeme las tarjetas" / "puedes leer las tarjetas" SIN nombre específico → cargá los 5 chat_ids más relevantes (estado=espera_jhon o con tareas activas) y respondé con resumen estratégico. NO listes el índice plano — eso es lo opuesto a "leer".\n` +
+        `\n` +
+        `═══ REFERENCIAS RELACIONALES — "mi ex / mi novia / mi mamá / mi hijo" ═══\n` +
+        `Si la query usa una referencia RELACIONAL en vez del nombre — "mi ex", "mi expareja", "mi exnovia", "mi exmarido", "mi novia/o", ` +
+        `"mi pareja", "mi mamá / papá / madre / padre", "mi hijo / hija", "mi hermano / hermana", "mi socio", "mi instalador", "mi proveedor", ` +
+        `"mi cuñado", "mis hijos" — NO digas "no encuentro a esa persona". Esa referencia NO viene del nombre, viene del tipo/contexto. ` +
+        `Acción: cargá TODAS las tarjetas con tipo_contacto !== 'comercial' (personal_familia, proveedor, instalador, colaborador) ` +
+        `y dejá que el paso 2 lea las narrativas — ahí está la verdad sobre quién es quién. Devolvé chat_ids con TODAS las tarjetas no-comerciales (máx 8).\n` +
+        `Caso reportado: "dame resumen de la tarjeta de mi ex" → respondiste "no aparece ninguna con nombre 'ex'", cuando Lorena MORALES (personal_familia) está en el índice y su narrativa dice "expareja". MENTISTE por no asociar la relación.\n` +
+        `\n` +
+        `═══ DUPLICADOS POR TELÉFONO — siempre mencionarlos ═══\n` +
+        `Si en el índice hay DOS o más contactos con el MISMO teléfono, son personas distintas en el sistema (puede haber bug de WhatsApp o dedup pendiente). ` +
+        `Cuando reportes uno, MENCIONÁ que existe el otro y pedí aclaración: ` +
+        `"Atento: hay OTRA tarjeta con el mismo tel +57XXX — <Nombre2> (<tipo>). ¿Te referís a esa otra?". NUNCA reportes solo uno como si fuera único.\n` +
+        `\n` +
+        `Tenés la CONVERSACIÓN PREVIA y el ÍNDICE ` +
         `de tarjetas (una por chat, con nombre, TELÉFONO, tipo, estado y próximo paso). Resolvé referencias de la pregunta usando ` +
         `la conversación previa ("ese", "él", "el anterior", "ese cliente" → el cliente del que se venía hablando).\n` +
         `Cuando armes una respuesta_directa que LISTE varios contactos (pendientes, agenda, "te toca", etc), incluí el TELÉFONO entre paréntesis al lado del nombre cuando esté disponible — formato: "Nombre (+57XXX…)". Si no hay tel en el índice, omitilo silencioso.\n` +
         `Decidí:\n` +
         `- Si se responde con el índice (ej. "¿quién espera mi respuesta?") → puede_responder_con_indice=true + respuesta_directa.\n` +
-        `- Si Jhon pide algo AMPLIO u OPERATIVO sin nombrar un cliente ("organizá", "qué hago hoy", "qué tengo pendiente", ` +
-        `"dame los pendientes", "lista de tareas", "actualizá", "guiame", "ordená esto", "guiate por el checklist") → ` +
-        `puede_responder_con_indice=false y chat_ids=[]. El sistema arma un listado determinístico (AGENDA próxima + TE TOCA accionable) ` +
-        `desde el índice + agendamientos — NO lo redactés vos, no lo intentés con respuesta_directa. Solo devolvé puede_responder_con_indice=false, respuesta_directa=null, chat_ids=[].\n` +
-        `- Si es sobre cliente(s) específico(s) → puede_responder_con_indice=false y listá los chat_ids relevantes (máx 5).\n` +
+        `- Si Jhon pide EXPLÍCITAMENTE un listado de TODOS los pendientes/agenda (frases muy específicas como "dame los pendientes", ` +
+        `"dame la lista", "qué tengo pendiente", "lista de tareas", "organizá mi agenda", "guiate por el checklist") → ` +
+        `puede_responder_con_indice=false y chat_ids=[]. El sistema arma un listado determinístico (AGENDA + TE TOCA).\n` +
+        `   ❌ NO uses esta rama para meta-preguntas o aclaraciones ("por qué me das todo?", "qué te pasa?", "no entiendo", "explícame"). ` +
+        `Esas son CONVERSACIÓN y van por respuesta_directa LLM normal, leyendo la conversación previa.\n` +
+        `   ❌ NO uses esta rama para queries con FECHA específica ("qué tengo HOY", "qué tengo MAÑANA", "qué tengo el sábado"). ` +
+        `Para esas: puede_responder_con_indice=true y armá vos la respuesta_directa filtrando del índice por esa fecha.\n` +
+        `   ❌ SI el ÚLTIMO turno de Junior en la conversación previa fue un listado completo (empieza con "📅 AGENDA próxima"), ` +
+        `NO vuelvas a tirar listado salvo que Jhon lo pida explícitamente otra vez. Si pregunta algo conexo, respondé conversacional.\n` +
+        `- Si es sobre cliente(s) específico(s) → puede_responder_con_indice=false y listá los chat_ids relevantes (máx 5). ` +
+        `⚠ CRÍTICO: si la pregunta MENCIONA un nombre o teléfono (aunque también diga "tareas/pendientes"), es ESPECÍFICA, NO genérica. ` +
+        `Ej: "dame las tareas de Constanza Madeiras (+573108377932)" → cargá SOLO esa tarjeta, NO devuelvas chat_ids=[]. ` +
+        `"qué pasa con Pedro" → cargá la tarjeta de Pedro. NO conviertas queries con nombre en listados completos.\n` +
         `NUNCA digas que "no hay tarjetas seleccionadas" ni pidas que Jhon "seleccione" — no existe seleccionar, SIEMPRE tenés el índice. ` +
         `Si "actualizar" se refiere a las tarjetas: aclaramos que se actualizan solas con info nueva, y mostramos el estado actual. ` +
         `En respuesta_directa NUNCA inventes datos (horas/montos/fechas) que no estén en el índice; si Jhon insiste con algo que no ves, no se lo confirmes inventando.\n` +
-        `- Si Jhon te da una INSTRUCCIÓN para recordar/anotar algo sobre un contacto ("este es mi instalador William", "anotá que X", ` +
-        `"recordá que Y", "tené en cuenta que Z") → devolvé nota={"chat_id": <chat del contacto del índice>, "texto": "<la instrucción ` +
-        `redactada como nota>"}. Identificá el contacto por nombre/teléfono/contexto previo. Es para GUARDAR, no una pregunta.\n` +
+        `- Si Jhon pide CREAR UNA TAREA / agendá esto / hay que hacer X (acción concreta y verbalizada con verbo de acción: ` +
+        `"crea una tarea para llamar a X", "hay que cortar las telas", "agendá llamar a Y", "tareita: confirmar pago") → ` +
+        `devolvé nueva_tarea={"chat_id": <chat>, "titulo": "<la acción concreta, ≤120 chars, en infinitivo o imperativo: 'Cortar las telas y programar mantenimiento'>"}. ` +
+        `Si el contacto NO está claro o es ambiguo (ver REGLA ANTI-ASUMIR abajo), o si Jhon dice "transversal / general / sin cliente / sin contacto / no asignada", ` +
+        `devolvé nueva_tarea_transversal={"titulo": "<acción>", "descripcion": "<contexto opcional, ej: 'Señora del conjunto Madeira, sin teléfono todavía'>"}. ` +
+        `IMPORTANTE: tarea ≠ nota. Tarea es acción pendiente que aparecerá listada cuando Jhon pida "tareas pendientes". Nota es contexto.\n` +
+        `- Si Jhon te da una INSTRUCCIÓN para recordar/anotar contexto sobre un contacto ("este es mi instalador William", "anotá que X es socio", ` +
+        `"recordá que Y siempre llega tarde", "tené en cuenta que Z prefiere efectivo") → devolvé nota={"chat_id": <chat del contacto del índice>, "texto": "<la instrucción ` +
+        `redactada como nota>"}. Es CONTEXTO para guardar, no una tarea.\n` +
+        `   ⚠ REGLA ANTI-ASUMIR (aplica a nueva_tarea Y nota): si el contacto se describe por un FRAGMENTO ambiguo (apellido común, nombre de CONJUNTO/edificio/calle, ` +
+        `referencia geográfica como "la del peñón", "el del cortijo", "señora de Madeira"), NO crees nada a la primera tarjeta que ` +
+        `matchee. Frases tipo "señora/señor/cliente DE <Lugar>" casi siempre refieren al LUGAR (conjunto residencial donde vive el cliente) ` +
+        `y no a un apellido — y puede haber varios clientes en ese lugar. En esos casos: para TAREAS, devolvé nueva_tarea_transversal con descripción que mencione la pista ` +
+        `("Señora del conjunto Madeira — pedir nombre/tel a Jhon"). Para NOTAS, devolvé puede_responder_con_indice=true + respuesta_directa pidiendo aclaración. ` +
+        `Mejor crear transversal o preguntar que asumir y meter en el contacto equivocado — caso real: tarea terminó en Constanza Madeiras cuando era OTRA persona del conjunto Madeira.\n` +
         `- Si Jhon dice CÓMO SE LLAMA un contacto ("se llama Germán", "es Germán el socio", "este es William") → devolvé ` +
         `nuevo_nombre={"chat_id": <chat del contacto>, "nombre": "<el nombre, ej. 'Germán (socio)'>"} para actualizar el nombre de la tarjeta. ` +
         `Puede ir JUNTO con nota (la instrucción) en el mismo mensaje.\n` +
@@ -136,10 +299,52 @@ export async function responderJuniorTarjeta(
         `convertilo en nota={"chat_id": <chat del contacto>, "texto": "Cierre por Jhon: <razón que dio, o 'tras conversación directa con el cliente' si no dio razón>"}. ` +
         `Junior NO puede cambiar el estado de la tarjeta directamente, pero la nota queda registrada y los agentes re-derivan el checklist en el próximo ciclo. ` +
         `Si Jhon insiste varias veces que lo cierres, NO inventes que ya lo hiciste — convertilo en nota acá y respondé honesto en respuesta_directa: "anoté el cierre por tu indicación; los agentes lo procesan en el próximo ciclo".\n` +
+        `\n` +
+        `- Si Jhon pide BORRAR / ELIMINAR algo concreto ("borrá la nota de X sobre Y", "eliminá la tarea de Z", "borrá la tarea transversal #N", ` +
+        `"sacá esa anotación"), identificá QUÉ borrar y devolvé el campo correspondiente:\n` +
+        `  • borrar_nota={"chat_id": <chat del contacto>, "texto_match": "<fragmento del texto de la nota para identificarla>"} → busca en notas_libres del contacto.\n` +
+        `  • borrar_tarea={"chat_id": <chat>, "titulo_match": "<fragmento del título>"} → busca en tarjeta_tarea del contacto (solo borra las origen='junior').\n` +
+        `  • borrar_tarea_transversal={"id": <id si te lo dieron, ej #2>, "titulo_match": "<o fragmento del título>"} → busca en tareas_transversales.\n` +
+        `Si Jhon NO especifica qué borrar ("borrá lo de Constanza" sin más), devolvé respuesta_directa pidiendo aclaración ("¿la nota sobre X o la tarea de Y?"). ` +
+        `El sistema verifica unicidad y NO borra si hay 0 o ≥2 matches — te avisa para pedir aclaración.\n` +
+        `\n` +
+        `═══ HONESTIDAD SOBRE LO QUE NO PODÉS HACER ═══\n` +
+        `Tus capacidades de escritura son SEIS Y NADA MÁS: (1) crear nota libre en una persona, (2) cambiar el nombre del contacto, ` +
+        `(3) crear tarea en tarjeta_tarea de un contacto (origen='junior'), (4) crear tarea_transversal (sin contacto), ` +
+        `(5) BORRAR nota libre identificándola por texto (busca por persona_id + match), (6) BORRAR tarea (origen='junior' o transversal) por título/id.\n` +
+        `Si Jhon te pide CUALQUIER OTRA COSA de escritura, NO MIENTAS confirmando. Devolvé puede_responder_con_indice=true + ` +
+        `respuesta_directa explicando honestamente que no podés Y ofreciendo lo más cercano que sí podés. Lista de pedidos que NO podés ejecutar:\n` +
+        `  • "moveme esta tarea a otro contacto" → no puedo mover, pero PUEDO crearla en el nuevo y BORRAR la del viejo (si origen=junior) o dejar nota CANCELADA si la creó el agente.\n` +
+        `  • "marcala como hecha / completada / dale check" → no puedo marcar tareas como hechas. Si fue creada por mí (origen=junior) puedo BORRARLA. Si la creó el agente, te dejo nota "Completada el <fecha>" o vos le hacés check en la UI.\n` +
+        `  • "editá esta tarea / cambiale el título" → no puedo editar. Pero PUEDO borrar la vieja (si origen=junior) y crear una nueva con el título correcto, lo hago en un solo paso.\n` +
+        `  • "agendá visita el <fecha> a las <hora>" / "crea agendamiento" → no puedo escribir en el calendario. Andá al panel Agendamientos y agregala ahí (botón 📅 Agendar).\n` +
+        `  • "borrá esta cita / cancelá agendamiento" → no puedo. Andá a Agendamientos y borrala desde ahí.\n` +
+        `  • "editá esta cita" → no puedo. Tocá ✏️ en la cita del panel Agendamientos.\n` +
+        `  • "creá un contacto nuevo" → no puedo crear contactos desde cero. Los contactos vienen automáticos del WhatsApp. Si es alguien sin WhatsApp registrado, dejala como tarea_transversal con la descripción.\n` +
+        `  • "borrá este contacto / este cliente" → no puedo. Andá al panel del cliente y archivalo ahí.\n` +
+        `  • "mandale un mensaje / WhatsApp a X" → no puedo enviar mensajes por vos. Te puedo abrir el link de WhatsApp con clic en el teléfono.\n` +
+        `Cuando respondas con "no puedo X, pero puedo Y", sé BREVE, claro y ofreceme la opción Y como pregunta directa para que diga sí/no. ` +
+        `- Si Jhon pide AGENDAR una cita/visita/instalación con un contacto ("agendá visita con X mañana 10am", "ponme cita el sábado con Y", "agendá instalación de Z el 5 de junio") → nuevo_agendamiento={"chat_id": <chat del contacto>, "titulo": "<qué>", "tipo": "visita_medidas|instalacion|reunion_proveedor|personal|otro", "fecha": "YYYY-MM-DD" (resolvé fechas relativas contra HOY=${hoyISO}), "hora": "HH:MM"|null}.\n` +
+        `- Si Jhon pide CANCELAR/quitar una cita YA agendada ("cancelá la cita con X", "quitá la visita de Y") → cancelar_agendamiento={"chat_id": <chat>, "titulo_match": "<fragmento del título, o vacío para la próxima cita del contacto>"}.\n` +
+        `- DUPLICADOS: si en el contexto hay una sección "POSIBLES CLIENTES DUPLICADOS", el sistema detectó clientes que QUIZÁS son la misma persona registrada dos veces. ` +
+        `PLANTEÁSELO a Jhon en respuesta_directa (decile cuáles son, por nombre/tel, y el #duplicado) y preguntale si son la misma persona o dos distintas. NO los fusiones por tu cuenta. ` +
+        `Cuando Jhon te responda sobre uno concreto → resolver_duplicado={"duplicado_id": <número del #>, "accion": "fusionar"} si CONFIRMA que son la misma, o {"duplicado_id": <número>, "accion": "descartar"} si dice que son DISTINTAS. ` +
+        `Si Jhon no se pronuncia sobre un duplicado, no agregues el objeto. Fusionar es irreversible-en-la-práctica → solo con confirmación explícita de Jhon.\n` +
+        `NUNCA inventes que ejecutaste algo. NUNCA digas "listo" si no creaste/borraste/agendaste/cancelaste/fusionaste una de las 9 cosas. Mentir es peor que negarte.\n` +
+        `\n` +
         `Devolvé SOLO JSON: {"puede_responder_con_indice": bool, "respuesta_directa": string|null, "chat_ids": number[], ` +
-        `"nota": {"chat_id": number, "texto": string} | null, "nuevo_nombre": {"chat_id": number, "nombre": string} | null}`,
+        `"nota": {"chat_id": number, "texto": string} | null, ` +
+        `"nuevo_nombre": {"chat_id": number, "nombre": string} | null, ` +
+        `"nueva_tarea": {"chat_id": number, "titulo": string} | null, ` +
+        `"nueva_tarea_transversal": {"titulo": string, "descripcion": string} | null, ` +
+        `"borrar_nota": {"chat_id": number, "texto_match": string} | null, ` +
+        `"borrar_tarea": {"chat_id": number, "titulo_match": string} | null, ` +
+        `"borrar_tarea_transversal": {"id": number|null, "titulo_match": string} | null, ` +
+        `"nuevo_agendamiento": {"chat_id": number, "titulo": string, "tipo": string, "fecha": "YYYY-MM-DD", "hora": string|null} | null, ` +
+        `"cancelar_agendamiento": {"chat_id": number, "titulo_match": string} | null, ` +
+        `"resolver_duplicado": {"duplicado_id": number, "accion": "fusionar"|"descartar"} | null}`,
     },
-    { role: 'user', content: `CONVERSACIÓN PREVIA:\n${histTexto}\n\nÍNDICE DE TARJETAS:\n${indiceTexto}\n\nNUEVA PREGUNTA DE JHON: ${pregunta}` },
+    { role: 'user', content: `CONVERSACIÓN PREVIA:\n${histTexto}\n\nÍNDICE DE TARJETAS:\n${indiceTexto}${dupText}\n\nNUEVA PREGUNTA DE JHON: ${pregunta}` },
   ];
   const r1 = await deepseekChat({ messages: ruteo, agente: 'JUNIOR_V2_RUTEO', max_tokens: 900, response_format: { type: 'json_object' } });
   let plan: any = {};
@@ -151,10 +356,319 @@ export async function responderJuniorTarjeta(
   // verdad, sólo después de guardar. Las dos pueden venir en el mismo mensaje.
   const accNombre = plan.nuevo_nombre && typeof plan.nuevo_nombre.chat_id === 'number'
     && typeof plan.nuevo_nombre.nombre === 'string' && plan.nuevo_nombre.nombre.trim() ? plan.nuevo_nombre : null;
-  const accNota = plan.nota && typeof plan.nota.chat_id === 'number'
+  let accNota = plan.nota && typeof plan.nota.chat_id === 'number'
     && typeof plan.nota.texto === 'string' && plan.nota.texto.trim() ? plan.nota : null;
-  if (accNombre || accNota) {
-    const chatId = (accNombre?.chat_id ?? accNota?.chat_id) as number;
+
+  // Guard determinístico ANTI-ASUMIR: si Jhon describe al contacto con un
+  // patrón ambiguo ("señor/señora/cliente DE <Lugar>", "del conjunto X",
+  // "de la calle Y"), bloqueamos la creación de nota y pedimos aclaración. El
+  // LLM ignora la regla en el system prompt cuando hay un match obvio — el
+  // guard determinístico es el último filtro. Caso reportado: "señora de
+  // Madeira" → la nota terminaba en Constanza Madeiras cuando era OTRA persona
+  // del mismo conjunto residencial llamado Madeira.
+  if (accNota) {
+    // Patrón "señor/señora/cliente/don/doña DE <Lugar-o-fragmento>". El "DE" es
+    // la señal — indica relación con un LUGAR (conjunto residencial, calle), no
+    // un apellido. Aunque haya 1 sola tarjeta que matchee el fragmento, igual
+    // preguntamos: el caso real fue "señora DE Madeira" → Constanza Madeiras
+    // matcheaba, pero el target era OTRA clienta del mismo conjunto Madeira.
+    const matchAmbiguo = pregunta.match(/\b(?:se(?:ñ|n)or[a]?|cliente[a]?s?|don|do(?:ñ|n)a)\s+de(?:l|\s+la|\s+los|\s+las|\s+conjunto|\s+edificio|\s+calle|\s+carrera|\s+avenida|\s+barrio)?\s+([A-Za-zÁÉÍÓÚÑáéíóúñ][\wÁÉÍÓÚÑáéíóúñ'·-]+)/i);
+    if (matchAmbiguo) {
+      const fragmento = matchAmbiguo[1].trim();
+      // Listar todos los candidatos cuyo nombre o próximo_paso contiene el
+      // fragmento — Jhon puede elegir o confirmar que es otra persona.
+      const candidatos = indice.filter(f =>
+        f.nombre.toLowerCase().includes(fragmento.toLowerCase()) ||
+        (f.proximo ?? '').toLowerCase().includes(fragmento.toLowerCase())
+      );
+      const lista = candidatos.slice(0, 4).map(c => `${c.nombre}${c.tel ? ` (${c.tel})` : ''}`).join(', ');
+      const sugerencia = candidatos.length
+        ? `Posibles: ${lista}. ¿Es alguno de esos o es otra persona del mismo lugar?`
+        : `No encontré a nadie llamado "${fragmento}" — puede que sea un lugar y la persona tenga otro nombre.`;
+      accNota = null;
+      plan.respuesta_directa = `Antes de crearla quiero confirmar: cuando decís "${fragmento}", ¿quién es exactamente? ${sugerencia} Pasame el nombre completo o el teléfono y la creo en la tarjeta correcta.`;
+      plan.puede_responder_con_indice = true;
+      plan.chat_ids = [];
+    }
+  }
+  // Validar y normalizar las nuevas acciones de creación de tareas reales.
+  // Junior escribe en la tabla `tareas` (V1) — la misma que muestra el panel
+  // JuniorTareas del Visor. Antes escribía en `tarjeta_tarea` + tabla nueva
+  // `tareas_transversales`, pero el panel UI no las leía. Ahora todo va a `tareas`:
+  // persona_id != null → tarea de cliente; persona_id NULL → transversal.
+  // Identificador interno: agente_origen='junior_v2'.
+  // Palabras "vacías" — meta-palabras sobre la entidad tarea, sin acción concreta.
+  // Si todas las palabras del título son de esta lista, el LLM le puso título
+  // genérico porque Jhon no especificó qué hacer. Ej: "Crear tarea transversal",
+  // "Tarea transversal pendiente", "Nueva tarea sin detalles".
+  const PALABRAS_VACIAS = /^(tarea|transversal|nota|pendiente|recordatorio|crear?|nueva?|sin|especificar|detalles|acci[oó]n|gen[eé]rica?|hacer?|agregar?|a[nñ]adir?|una?|la|el|los?|las?|de|del|por|para|con|recordar|recuerda)$/i;
+  function tituloEsBasura(t: string): boolean {
+    const limpio = t.trim();
+    if (limpio.length < 8) return true;
+    const palabras = limpio.replace(/[.,;:!?¡¿«»()'"]/g, '').split(/\s+/).filter(p => p.length >= 2);
+    if (palabras.length < 2) return true;
+    // Si todas las palabras son meta, es basura. Si tiene al menos UN verbo de
+    // acción concreto ("llamar", "cortar", "agendar", "comprar"...), pasa.
+    const todasVacias = palabras.every(p => PALABRAS_VACIAS.test(p));
+    return todasVacias;
+  }
+  const accTarea = plan.nueva_tarea && typeof plan.nueva_tarea.chat_id === 'number'
+    && typeof plan.nueva_tarea.titulo === 'string' && plan.nueva_tarea.titulo.trim() ? plan.nueva_tarea : null;
+  const accTareaTransv = plan.nueva_tarea_transversal && typeof plan.nueva_tarea_transversal.titulo === 'string'
+    && plan.nueva_tarea_transversal.titulo.trim() ? plan.nueva_tarea_transversal : null;
+
+  // Guard ANTI-BASURA: si el título es vacío/genérico ("crear tarea", "nueva", "tarea
+  // transversal" sin contenido), NO creamos — pedimos el texto real. Caso reportado:
+  // Jhon dijo "Créame una tarea transversal" y Junior creó tarea con título literal
+  // "Crear tarea transversal" → basura en BD.
+  if (accTarea && tituloEsBasura(accTarea.titulo)) {
+    return { respuesta: `Decime qué acción concreta querés que guarde. Ej: "llamar a Pedro para confirmar pago", "cotizar las cortinas del Cortijo". Sin el contenido no la creo.`, tarjetas_usadas: [], via_indice: true, costo_usd: costo };
+  }
+  if (accTareaTransv && tituloEsBasura(accTareaTransv.titulo)) {
+    return { respuesta: `Decime qué tarea transversal querés. Ej: "comprar grapas industriales", "buscar nuevo proveedor de telas". Sin el contenido no la creo.`, tarjetas_usadas: [], via_indice: true, costo_usd: costo };
+  }
+
+  // ── Acciones de BORRADO ────────────────────────────────────────────────────
+  // Los 3 borrar_X requieren UNICIDAD: borramos solo si hay exactamente 1 match.
+  // 0 matches → "no encontré"; ≥2 → "encontré varias, ¿cuál?". Nunca borra al voleo.
+  const accBorrarNota = plan.borrar_nota && typeof plan.borrar_nota.chat_id === 'number'
+    && typeof plan.borrar_nota.texto_match === 'string' && plan.borrar_nota.texto_match.trim() ? plan.borrar_nota : null;
+  const accBorrarTarea = plan.borrar_tarea && typeof plan.borrar_tarea.chat_id === 'number'
+    && typeof plan.borrar_tarea.titulo_match === 'string' && plan.borrar_tarea.titulo_match.trim() ? plan.borrar_tarea : null;
+  const accBorrarTareaTransv = plan.borrar_tarea_transversal && (
+    typeof plan.borrar_tarea_transversal.id === 'number' ||
+    (typeof plan.borrar_tarea_transversal.titulo_match === 'string' && plan.borrar_tarea_transversal.titulo_match.trim())
+  ) ? plan.borrar_tarea_transversal : null;
+
+  if (accBorrarNota) {
+    // Resolver persona_id desde el chat_id (mismo helper que el bloque de escritura).
+    const { data: cl } = await sb.from('chat_checklist').select('persona_id').eq('chat_id', accBorrarNota.chat_id).maybeSingle();
+    let personaId = (cl?.persona_id as number) ?? null;
+    if (!personaId) {
+      const { data: ch } = await sb.from('chats').select('proyecto_id').eq('id', accBorrarNota.chat_id).maybeSingle();
+      if (ch?.proyecto_id) {
+        const { data: pr } = await sb.from('proyectos').select('persona_id').eq('id', ch.proyecto_id).maybeSingle();
+        personaId = (pr?.persona_id as number) ?? null;
+      }
+    }
+    if (!personaId) {
+      return { respuesta: `No identifiqué el contacto para borrar la nota. Decime de qué cliente es.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    const fragmento = String(accBorrarNota.texto_match).trim();
+    const { data: notas } = await sb.from('notas_libres')
+      .select('id, contenido').eq('persona_id', personaId).ilike('contenido', `%${fragmento}%`);
+    const nombreContacto = indice.find(f => f.chat_id === accBorrarNota.chat_id)?.nombre ?? `chat ${accBorrarNota.chat_id}`;
+    if (!notas || notas.length === 0) {
+      return { respuesta: `No encontré ninguna nota de ${nombreContacto} que contenga "${fragmento}". Probá con otro fragmento del texto.`, tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo };
+    }
+    if (notas.length > 1) {
+      const previa = notas.slice(0, 4).map((n: any) => `• [#${n.id}] ${String(n.contenido).slice(0, 80)}${n.contenido.length > 80 ? '…' : ''}`).join('\n');
+      return { respuesta: `Encontré ${notas.length} notas de ${nombreContacto} que matchean "${fragmento}":\n${previa}\n¿Cuál borrar? Decime el ID o un fragmento más específico.`, tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo };
+    }
+    // BLINDAJE: NO borramos en este turno. Devolvemos PROPUESTA con marker
+    // [#NOTA:id:chat=N]. El bloque al inicio detecta la confirmación en el
+    // siguiente turno y ejecuta el delete recién ahí.
+    const textoPreview = String(notas[0].contenido).slice(0, 140) + (notas[0].contenido.length > 140 ? '…' : '');
+    return {
+      respuesta: `Voy a borrar esta NOTA de ${nombreContacto}:\n  «${textoPreview}»\n¿Confirmás? Respondé "sí" o "borralo" para hacerlo, "no" para cancelar.\n[#NOTA:${notas[0].id}:chat=${accBorrarNota.chat_id}]`,
+      tarjetas_usadas: [accBorrarNota.chat_id], via_indice: false, costo_usd: costo,
+    };
+  }
+
+  if (accBorrarTarea) {
+    const fragmento = String(accBorrarTarea.titulo_match).trim();
+    // Resolver persona_id desde chat (las tareas V1 viven por persona, no chat).
+    const { data: cl } = await sb.from('chat_checklist').select('persona_id').eq('chat_id', accBorrarTarea.chat_id).maybeSingle();
+    let personaId = (cl?.persona_id as number) ?? null;
+    if (!personaId) {
+      const { data: ch } = await sb.from('chats').select('proyecto_id').eq('id', accBorrarTarea.chat_id).maybeSingle();
+      if (ch?.proyecto_id) {
+        const { data: pr } = await sb.from('proyectos').select('persona_id').eq('id', ch.proyecto_id).maybeSingle();
+        personaId = (pr?.persona_id as number) ?? null;
+      }
+    }
+    const nombreContacto = indice.find(f => f.chat_id === accBorrarTarea.chat_id)?.nombre ?? `chat ${accBorrarTarea.chat_id}`;
+    if (!personaId) {
+      return { respuesta: `No identifiqué la persona del contacto ${nombreContacto}.`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    }
+    // Buscar en `tareas` V1, activas (no completadas, no soft-deleted).
+    const { data: tareas } = await sb.from('tareas')
+      .select('id, titulo, agente_origen').eq('persona_id', personaId)
+      .is('deleted_at', null).eq('completada', false).ilike('titulo', `%${fragmento}%`);
+    if (!tareas || tareas.length === 0) {
+      return { respuesta: `No encontré tareas activas de ${nombreContacto} con "${fragmento}".`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    }
+    // Solo puedo borrar las que creé yo (agente_origen='junior_v2'). Las otras
+    // (M5, otros agentes V1) Jhon las marca completadas o las borra en la UI.
+    const borrables = tareas.filter((t: any) => t.agente_origen === 'junior_v2');
+    if (borrables.length === 0) {
+      const lista = tareas.slice(0, 3).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
+      return { respuesta: `Esa(s) tarea(s) la creó otro agente, yo no puedo borrarla. Te dejo nota "Completada" o vos le hacés check en el panel Tareas:\n${lista}`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    }
+    if (borrables.length > 1) {
+      const previa = borrables.slice(0, 4).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
+      return { respuesta: `Encontré ${borrables.length} tareas mías de ${nombreContacto} con "${fragmento}":\n${previa}\n¿Cuál borrar? Decime el ID o un fragmento más específico.`, tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo };
+    }
+    return {
+      respuesta: `Voy a borrar esta TAREA de ${nombreContacto}:\n  «${borrables[0].titulo}»\n¿Confirmás? Respondé "sí" o "borralo" para hacerlo, "no" para cancelar.\n[#TAREA:${borrables[0].id}:chat=${accBorrarTarea.chat_id}]`,
+      tarjetas_usadas: [accBorrarTarea.chat_id], via_indice: false, costo_usd: costo,
+    };
+  }
+
+  if (accBorrarTareaTransv) {
+    let candidatas: any[] = [];
+    if (typeof accBorrarTareaTransv.id === 'number') {
+      const { data } = await sb.from('tareas').select('id, titulo, agente_origen')
+        .eq('id', accBorrarTareaTransv.id).is('persona_id', null).is('deleted_at', null);
+      candidatas = data ?? [];
+    } else {
+      const { data } = await sb.from('tareas').select('id, titulo, agente_origen')
+        .is('persona_id', null).is('deleted_at', null).eq('completada', false)
+        .ilike('titulo', `%${String(accBorrarTareaTransv.titulo_match).trim()}%`);
+      candidatas = data ?? [];
+    }
+    const ref = accBorrarTareaTransv.id ? `#${accBorrarTareaTransv.id}` : `"${accBorrarTareaTransv.titulo_match}"`;
+    if (!candidatas.length) {
+      return { respuesta: `No encontré tarea transversal ${ref}.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    // Filtro de seguridad: solo borro las mías. Las otras transversales (creadas
+    // por Jhon en la UI o por otros flujos) no las toco.
+    const borrables = candidatas.filter((t: any) => t.agente_origen === 'junior_v2');
+    if (borrables.length === 0) {
+      const lista = candidatas.slice(0, 3).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
+      return { respuesta: `Esa transversal no la creé yo (la creaste vos o otro). Borrala vos desde el panel Tareas:\n${lista}`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    if (borrables.length > 1) {
+      const previa = borrables.slice(0, 4).map((t: any) => `• [#${t.id}] ${t.titulo}`).join('\n');
+      return { respuesta: `Encontré ${borrables.length} transversales mías con "${accBorrarTareaTransv.titulo_match}":\n${previa}\n¿Cuál? Decime el ID.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    return {
+      respuesta: `Voy a borrar la TAREA TRANSVERSAL #${borrables[0].id}:\n  «${borrables[0].titulo}»\n¿Confirmás? Respondé "sí" o "borralo" para hacerlo, "no" para cancelar.\n[#TRANSV:${borrables[0].id}]`,
+      tarjetas_usadas: [], via_indice: false, costo_usd: costo,
+    };
+  }
+
+  // ── Agendamientos por instrucción directa (reemplaza al Junior viejo) ───────
+  const accNuevoAg = plan.nuevo_agendamiento && typeof plan.nuevo_agendamiento.chat_id === 'number'
+    && typeof plan.nuevo_agendamiento.titulo === 'string' && plan.nuevo_agendamiento.titulo.trim()
+    && /^\d{4}-\d{2}-\d{2}$/.test(String(plan.nuevo_agendamiento.fecha ?? '')) ? plan.nuevo_agendamiento : null;
+  const accCancelarAg = plan.cancelar_agendamiento && typeof plan.cancelar_agendamiento.chat_id === 'number'
+    ? plan.cancelar_agendamiento : null;
+
+  async function resolverPersonaDeChat(chatId: number): Promise<number | null> {
+    const { data: cl } = await sb.from('chat_checklist').select('persona_id').eq('chat_id', chatId).maybeSingle();
+    if (cl?.persona_id) return cl.persona_id as number;
+    const { data: ch } = await sb.from('chats').select('proyecto_id').eq('id', chatId).maybeSingle();
+    if (ch?.proyecto_id) {
+      const { data: pr } = await sb.from('proyectos').select('persona_id').eq('id', ch.proyecto_id).maybeSingle();
+      return (pr?.persona_id as number) ?? null;
+    }
+    return null;
+  }
+  const TIPOS_AG = ['visita_medidas', 'instalacion', 'reunion_proveedor', 'personal', 'otro'];
+
+  if (accNuevoAg) {
+    const personaId = await resolverPersonaDeChat(accNuevoAg.chat_id);
+    const nombre = indice.find(f => f.chat_id === accNuevoAg.chat_id)?.nombre ?? `chat ${accNuevoAg.chat_id}`;
+    if (!personaId) return { respuesta: `No identifiqué el contacto para agendar. Decime el nombre o el número.`, tarjetas_usadas: [accNuevoAg.chat_id], via_indice: false, costo_usd: costo };
+    const tipo = TIPOS_AG.includes(accNuevoAg.tipo) ? accNuevoAg.tipo : 'otro';
+    const hora = /^\d{1,2}:\d{2}$/.test(String(accNuevoAg.hora ?? '')) ? `${accNuevoAg.hora}:00` : null;
+    const { error } = await sb.from('agendamientos').insert({
+      persona_id: personaId, titulo: String(accNuevoAg.titulo).trim().slice(0, 200),
+      tipo, fecha: accNuevoAg.fecha, hora_inicio: hora, origen: 'junior',
+    } as any);
+    if (error) return { respuesta: `Quise agendar pero hubo un error: ${error.message}`, tarjetas_usadas: [accNuevoAg.chat_id], via_indice: false, costo_usd: costo };
+    return { respuesta: `Listo, agendé «${String(accNuevoAg.titulo).trim()}» con ${nombre} para el ${accNuevoAg.fecha}${hora ? ` a las ${accNuevoAg.hora}` : ''}. Lo ves en el calendario.`, tarjetas_usadas: [accNuevoAg.chat_id], via_indice: false, costo_usd: costo };
+  }
+
+  if (accCancelarAg) {
+    const personaId = await resolverPersonaDeChat(accCancelarAg.chat_id);
+    const nombre = indice.find(f => f.chat_id === accCancelarAg.chat_id)?.nombre ?? `chat ${accCancelarAg.chat_id}`;
+    if (!personaId) return { respuesta: `No identifiqué el contacto para cancelar la cita. Decime el nombre o el número.`, tarjetas_usadas: [accCancelarAg.chat_id], via_indice: false, costo_usd: costo };
+    const frag = String(accCancelarAg.titulo_match ?? '').trim();
+    let qy = sb.from('agendamientos').select('id, titulo, fecha, hora_inicio')
+      .eq('persona_id', personaId).is('deleted_at', null).gte('fecha', hoyISO);
+    if (frag) qy = qy.ilike('titulo', `%${frag}%`);
+    const { data: ags } = await qy.order('fecha');
+    if (!ags || ags.length === 0) return { respuesta: `No encontré citas futuras de ${nombre}${frag ? ` con "${frag}"` : ''}.`, tarjetas_usadas: [accCancelarAg.chat_id], via_indice: false, costo_usd: costo };
+    if (ags.length > 1) {
+      const lista = ags.slice(0, 5).map((a: any) => `• ${a.fecha}${a.hora_inicio ? ' ' + String(a.hora_inicio).slice(0, 5) : ''} — ${a.titulo}`).join('\n');
+      return { respuesta: `${nombre} tiene ${ags.length} citas futuras:\n${lista}\n¿Cuál cancelo? Decime el título o la fecha.`, tarjetas_usadas: [accCancelarAg.chat_id], via_indice: false, costo_usd: costo };
+    }
+    const a = ags[0];
+    await sb.from('agendamientos').update({ deleted_at: new Date().toISOString() } as any).eq('id', a.id);
+    return { respuesta: `Listo, cancelé la cita de ${nombre}: «${a.titulo}» (${a.fecha}${a.hora_inicio ? ' ' + String(a.hora_inicio).slice(0, 5) : ''}).`, tarjetas_usadas: [accCancelarAg.chat_id], via_indice: false, costo_usd: costo };
+  }
+
+  // ── Resolución de duplicados (reconecta el flujo del Junior viejo a V2) ────
+  // Jhon confirma por el chat si dos clientes son la misma persona (fusionar) o
+  // distintos (descartar). La fusión usa fusionarPersonas (ya completo: mueve
+  // todas las tablas con persona_id). El detector A3_IDENTIDAD sigue llenando
+  // duplicados_detectados; este es el lado de resolución que estaba huérfano.
+  const accResolverDup = plan.resolver_duplicado && typeof plan.resolver_duplicado.duplicado_id === 'number'
+    && (plan.resolver_duplicado.accion === 'fusionar' || plan.resolver_duplicado.accion === 'descartar')
+    ? plan.resolver_duplicado : null;
+  if (accResolverDup) {
+    const { data: dup } = await sb.from('duplicados_detectados')
+      .select('id, persona_nueva_id, persona_existente_id, estado')
+      .eq('id', accResolverDup.duplicado_id).maybeSingle();
+    if (!dup || dup.estado !== 'pendiente') {
+      return { respuesta: `El duplicado #${accResolverDup.duplicado_id} ya no está pendiente o no existe.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    if (accResolverDup.accion === 'descartar') {
+      await sb.from('duplicados_detectados').update({ estado: 'descartado', resuelto_at: new Date().toISOString() } as any).eq('id', dup.id);
+      return { respuesta: `Anotado: son personas DISTINTAS. Descarté el duplicado #${dup.id}, no fusioné nada.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    // fusionar: la persona EXISTENTE (más establecida) sobrevive; la nueva se absorbe.
+    try {
+      await fusionarPersonas(sb, dup.persona_existente_id, dup.persona_nueva_id, `Confirmado por Jhon en Junior V2 (duplicado #${dup.id})`);
+      await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', dup.persona_existente_id);
+      return { respuesta: `Listo, fusioné las dos en una sola persona (duplicado #${dup.id}). Se unifica todo —chats, agenda, tareas, cotizaciones— bajo un registro. Se refleja en unos segundos.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    } catch (e: any) {
+      return { respuesta: `Quise fusionarlas pero hubo un error: ${e.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+  }
+
+  // Misma regla anti-asumir aplica para nueva_tarea con contacto. Si la pregunta
+  // tiene patrón ambiguo "señora DE Lugar", la convertimos a tarea TRANSVERSAL
+  // automáticamente (la descripción guarda la pista para que Jhon la asocie luego).
+  let accTareaFinal = accTarea;
+  let accTareaTransvFinal = accTareaTransv;
+  if (accTarea) {
+    const matchAmbiguo = pregunta.match(/\b(?:se(?:ñ|n)or[a]?|cliente[a]?s?|don|do(?:ñ|n)a)\s+de(?:l|\s+la|\s+los|\s+las|\s+conjunto|\s+edificio|\s+calle|\s+carrera|\s+avenida|\s+barrio)?\s+([A-Za-zÁÉÍÓÚÑáéíóúñ][\wÁÉÍÓÚÑáéíóúñ'·-]+)/i);
+    if (matchAmbiguo) {
+      const fragmento = matchAmbiguo[1].trim();
+      accTareaFinal = null;
+      accTareaTransvFinal = {
+        titulo: accTarea.titulo,
+        descripcion: `Pista del contacto: "${fragmento}" (no identificado todavía — pedir nombre/teléfono a Jhon antes de mover a tarjeta).`,
+      };
+    }
+  }
+
+  // Tarea transversal: NO requiere contacto, va a `tareas` V1 con persona_id=NULL.
+  // Aparece en el panel JuniorTareas (filtro "Transversales") y en mi listado.
+  if (accTareaTransvFinal) {
+    const titulo = String(accTareaTransvFinal.titulo).trim().slice(0, 200);
+    const descripcion = String(accTareaTransvFinal.descripcion ?? '').trim().slice(0, 500) || null;
+    const { data: ins, error } = await sb.from('tareas').insert({
+      persona_id: null,
+      titulo, descripcion, tipo: 'otro',
+      origen: 'chat', agente_origen: 'junior_v2',
+      asignado_a: 'jhon', prioridad: 5, shadow: false,
+    } as any).select('id').single();
+    if (error) {
+      return { respuesta: `Quería guardar la tarea transversal pero hubo un error: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
+    }
+    const aviso = descripcion ? ` Nota: ${descripcion}` : '';
+    return {
+      respuesta: `Listo, tarea transversal #${ins.id} guardada: «${titulo}».${aviso} La ves en el panel Tareas (filtro Transversales) o cuando me pidas "tareas pendientes".`,
+      tarjetas_usadas: [], via_indice: false, costo_usd: costo,
+    };
+  }
+
+  if (accNombre || accNota || accTareaFinal) {
+    const chatId = (accNombre?.chat_id ?? accNota?.chat_id ?? accTareaFinal?.chat_id) as number;
     let personaId: number | null = null;
     const { data: cl } = await sb.from('chat_checklist').select('persona_id').eq('chat_id', chatId).maybeSingle();
     personaId = (cl?.persona_id as number) ?? null;
@@ -165,7 +679,7 @@ export async function responderJuniorTarjeta(
         personaId = (pr?.persona_id as number) ?? null;
       }
     }
-    if (!personaId) {
+    if (!personaId && (accNombre || accNota)) {
       return { respuesta: `Quería guardarlo pero no identifiqué a qué contacto te referís. Decime el nombre o el número y lo hago.`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
     }
     const hechos: string[] = [];
@@ -178,6 +692,17 @@ export async function responderJuniorTarjeta(
       const texto = String(accNota.texto).trim().slice(0, 500);
       const { error } = await sb.from('notas_libres').insert({ persona_id: personaId, contenido: texto, visible_para: ['todos'], creado_por: 1 } as any);
       if (!error) { await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', personaId); hechos.push(`anoté: «${texto}»`); }
+    }
+    if (accTareaFinal) {
+      // Tarea con persona_id: va a `tareas` V1 (la tabla que muestra el panel
+      // JuniorTareas). agente_origen='junior_v2' la marca como mía.
+      const titulo = String(accTareaFinal.titulo).trim().slice(0, 200);
+      const { error } = await sb.from('tareas').insert({
+        persona_id: personaId, titulo, tipo: 'otro',
+        origen: 'chat', agente_origen: 'junior_v2',
+        asignado_a: 'jhon', prioridad: 5, shadow: false,
+      } as any);
+      if (!error) hechos.push(`creé la tarea: «${titulo}»`);
     }
     await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', chatId);
     const nombreShow = (accNombre?.nombre as string) ?? indice.find(f => f.chat_id === chatId)?.nombre ?? `chat ${chatId}`;
@@ -211,8 +736,171 @@ export async function responderJuniorTarjeta(
     plan.respuesta_directa = null;
   }
 
+  // Bypass MÍNIMO: solo se dispara cuando la query es GENÉRICA — sin nombre de
+  // contacto y sin teléfono. Antes era agresivo y agarraba cosas como "dame las
+  // tareas de Constanza (+573108377932)" forzando listado completo, ignorando a
+  // Constanza. Ahora confiamos en el LLM para queries específicas; solo
+  // intervenimos cuando claramente no hay forma de saber qué contacto cargar.
+  //
+  // Condiciones para disparar bypass:
+  //   1) NO hay teléfono en la pregunta (sin +57XXX ni 10 dígitos sueltos).
+  //   2) NO hay match obvio con el nombre de algún contacto del índice (≥3 chars).
+  //   3) La pregunta usa léxico de "lista completa" muy explícito.
+  const tieneTelefono = /\+?\d{10,15}/.test(pregunta);
+  const palabrasPregunta = pregunta.toLowerCase().split(/[\s,.;:!?¿¡()]+/).filter(p => p.length >= 4);
+  const mencionaContactoConocido = indice.some(f => {
+    const nombre = f.nombre.toLowerCase();
+    // Match si alguna palabra de la pregunta (≥4 chars) está contenida en el nombre.
+    return palabrasPregunta.some(p => nombre.includes(p));
+  });
+  const lexicoListaCompleta = /\b(dame\s+(todos?\s+(los\s+|las\s+)?|las\s+|los\s+)?(tareas|pendientes|agenda|lista)|qu[eé]\s+tengo\s+(pendiente|hoy|para\s+hacer)|tareas?\s+pendientes|lista\s+(completa\s+)?de\s+(tareas|pendientes)|todos?\s+(los\s+|las\s+)?(pendientes|tareas)|organiz[aá]\s+mi|gu[ií]ate\s+por\s+el\s+checklist|dame\s+(la\s+)?agenda|agenda\s+(pr[oó]xima|completa|de\s+la\s+semana))\b/i.test(pregunta);
+  const queryEsPedidoExplicitoDeLista = lexicoListaCompleta && !tieneTelefono && !mencionaContactoConocido;
+  if (queryEsPedidoExplicitoDeLista) {
+    plan.puede_responder_con_indice = false;
+    plan.respuesta_directa = null;
+    plan.chat_ids = [];
+  }
+
+  // ── GUARD DE LECTURA: forzar carga de tarjeta procesada ───────────────────
+  // Caso reportado: "dame resumen de Lorena mi ex" → el LLM eligió responder con
+  // el índice ("sin conversación comercial") sin cargar la tarjeta — MENTIRA, la
+  // narrativa existía. El LLM tiene sesgo natural a usar el índice (más barato).
+  // Detectamos verbos de LECTURA + nombre conocido y forzamos chat_ids para que
+  // el paso 2 cargue la tarjeta y responda con la narrativa real.
+  const lexicoLectura = /\b(res[uú]men|le[eé]me|le[eé]r|contame|cont[áa]me|dame\s+(info|contexto|historial|detalles|todo)|qu[eé]\s+(pasa|sabes|sab[eé]s|hay|dice\s+la\s+tarjeta)|c[oó]mo\s+(va|est[aá])|busca[mn]e\s+info|abr[ií]me|mostr[áa]me|dame\s+todo\s+lo\s+de|info\s+de|datos\s+de|historia\s+de|conversaci[oó]n\s+con)\b/i.test(pregunta);
+  // Referencia relacional: "mi ex / novia / mamá / hijo / etc." → cargar todas
+  // las tarjetas no-comerciales para que el LLM lea narrativas y encuentre quién
+  // es esa relación. Caso reportado: "tarjeta de mi ex" → solo encontraba a
+  // "Rocio" por nombre (false), no a Lorena MORALES (personal_familia, en
+  // narrativa dice "expareja").
+  const lexicoRelacionalMatch = pregunta.match(/\b(?:mi|el|la|mis|los|las)\s+(ex|expareja|exnovi[ao]|exmarido|exesposo|exesposa|novi[ao]|pareja|esposo|esposa|marido|mam[aá]|pap[aá]|madre|padre|hij[ao]s?|hermano|hermana|t[ií]o|t[ií]a|primo|prima|cu[nñ]ado|cu[nñ]ada|sobrino|sobrina|socio|socia|instalador|instaladora|proveedor|proveedora|jefe|jefa|empleado|empleada|abogado|abogada|contador|contadora|amigo|amiga)\b/i);
+  if (lexicoRelacionalMatch && lexicoLectura && !queryEsPedidoExplicitoDeLista) {
+    // Búsqueda dirigida: buscar en NARRATIVA y NOTAS de las tarjetas la
+    // palabra relacional. Si "mi ex", buscar narrativas con "ex"/"expareja".
+    // Si no hay match, fallback a todas las no-comerciales. Esto evita que el
+    // slice(0,5) del paso 2 deje afuera la tarjeta correcta. Caso reportado:
+    // "tarjeta de mi ex" → cargaba 5 no-comerciales sin Lorena (chat 154).
+    const termRel = lexicoRelacionalMatch[1].toLowerCase();
+    // Variantes de búsqueda por término. Las narrativas y notas son texto libre.
+    const variantesPorTerm: Record<string, string[]> = {
+      ex: ['expareja', 'ex pareja', 'exnovi', 'exmarido', 'exesposo', 'mi ex'],
+      expareja: ['expareja', 'ex pareja', 'mi ex'],
+      mama: ['madre', 'mamá', 'mama', 'mami'], 'mamá': ['madre', 'mamá', 'mama', 'mami'],
+      papa: ['padre', 'papá', 'papa', 'papi'], 'papá': ['padre', 'papá', 'papa', 'papi'],
+      madre: ['madre', 'mamá', 'mami'], padre: ['padre', 'papá', 'papi'],
+      hijo: ['hijo'], hija: ['hija'], hijos: ['hijo', 'hija'],
+      hermano: ['hermano'], hermana: ['hermana'],
+      socio: ['socio'], socia: ['socia'],
+      instalador: ['instalador'], proveedor: ['proveedor'],
+      pareja: ['pareja', 'novi', 'esposo', 'esposa'],
+      novia: ['novia', 'pareja'], novio: ['novio', 'pareja'],
+    };
+    const variantes = variantesPorTerm[termRel] ?? [termRel];
+
+    // Buscar tarjetas con esas palabras en narrativa o notas. Cargo solo persona_id
+    // de tarjetas no-comerciales (filtro previo) y matcheo por texto.
+    const noComercialesIds = indice.filter(f => f.tipo !== 'comercial').map(f => f.chat_id);
+    let matchesPorTexto: number[] = [];
+    if (noComercialesIds.length) {
+      // OR de ILIKE para cada variante. Postgres permite construir con .or
+      const orCond = variantes.map(v => `narrativa.ilike.%${v}%,notas_libres_str.ilike.%${v}%`).join(',');
+      const { data: tjMatches } = await sb.from('tarjeta')
+        .select('chat_id, narrativa, notas').in('chat_id', noComercialesIds);
+      matchesPorTexto = (tjMatches ?? [])
+        .filter((t: any) => {
+          const blob = (String(t.narrativa ?? '') + ' ' + (Array.isArray(t.notas) ? t.notas.join(' ') : '')).toLowerCase();
+          return variantes.some(v => blob.includes(v));
+        })
+        .map((t: any) => t.chat_id);
+    }
+    plan.puede_responder_con_indice = false;
+    plan.respuesta_directa = null;
+    // Si encontré match exacto en narrativa, priorizo esas (cargo todas, hasta 5).
+    // Si no, fallback a todas las no-comerciales (hasta 5 para no pasar el slice).
+    plan.chat_ids = (matchesPorTexto.length ? matchesPorTexto : noComercialesIds).slice(0, 5);
+  } else if (lexicoLectura && !queryEsPedidoExplicitoDeLista) {
+    // Caso A: hay teléfono → ya el match-por-teléfono más abajo lo resuelve.
+    // Caso B: hay nombre conocido → forzar esa tarjeta.
+    // Caso C: "leeme las tarjetas" sin nombre → cargar 5 más relevantes.
+    if (tieneTelefono) {
+      // El bloque chatIdsByPhone más abajo se encarga; acá solo aseguramos
+      // que no caigamos en respuesta_directa basura.
+      plan.puede_responder_con_indice = false;
+      plan.respuesta_directa = null;
+    } else if (mencionaContactoConocido) {
+      // Encontrar la tarjeta cuyo nombre matchea mejor a la query.
+      const palabrasMin4 = palabrasPregunta;
+      const matches = indice
+        .map(f => {
+          const nombreLow = f.nombre.toLowerCase();
+          const score = palabrasMin4.filter(p => nombreLow.includes(p)).length;
+          return { f, score };
+        })
+        .filter(x => x.score > 0)
+        .sort((a, b) => b.score - a.score);
+      if (matches.length) {
+        plan.puede_responder_con_indice = false;
+        plan.respuesta_directa = null;
+        plan.chat_ids = matches.slice(0, 3).map(m => m.f.chat_id);
+      }
+    } else {
+      // "leeme las tarjetas" / "puedes leer las tarjetas" sin nombre → cargar
+      // las 5 con estado activo (espera_jhon o sin_responder).
+      plan.puede_responder_con_indice = false;
+      plan.respuesta_directa = null;
+      plan.chat_ids = indice
+        .filter(f => f.estado === 'espera_jhon' || f.estado === 'sin_responder')
+        .slice(0, 5).map(f => f.chat_id);
+    }
+  }
+  // Sub-clasificación: dentro del pedido de lista, ¿pidió SOLO tareas, SOLO
+  // agenda, o ambos? Si dice "tareas" sin "agenda" → solo TE TOCA. Si dice
+  // "agenda" sin "tareas" → solo AGENDA. Si menciona ambos o ninguno explícito
+  // ("dame pendientes", "qué tengo pendiente") → los dos bloques.
+  const mencionaTareas = /\b(tareas?|te\s+toca|acciones?|pendiente)\b/i.test(pregunta);
+  const mencionaAgenda = /\b(agenda|cita|calendari|reuni[oó]n)\b/i.test(pregunta);
+  const pidioSoloTareas = mencionaTareas && !mencionaAgenda;
+  const pidioSoloAgenda = mencionaAgenda && !mencionaTareas;
+
   if (plan.puede_responder_con_indice && plan.respuesta_directa) {
     return { respuesta: String(plan.respuesta_directa), tarjetas_usadas: [], via_indice: true, costo_usd: costo };
+  }
+
+  // Anti-loop determinístico: si el LLM va a delegar al fallback de listado
+  // PERO el último turno de Junior ya fue un listado del fallback (empieza con
+  // "📅 AGENDA próxima"), forzamos respuesta conversacional con cargarDetalle
+  // de las 5 tarjetas más relevantes (te toca). Esto rompe loops donde Jhon
+  // pregunta "por qué me das todo" / "que te pasa" y Junior vuelve a listar.
+  const ultimoJunior = [...historial].reverse().find(h => h.rol === 'junior')?.texto ?? '';
+  const ultimoFueListado = ultimoJunior.startsWith('📅 AGENDA próxima') || ultimoJunior.startsWith('✅ TE TOCA');
+  // Detectar si el último turno de Junior fue una ACCIÓN (creó/actualizó nota o
+  // nombre). Caso reportado: Jhon dice "es otra señora del conjunto Madeira" tras
+  // una nota mal asignada → Junior contestó con AGENDA completa en vez de pedir
+  // aclaración. Frases de confirmación: "Listo, en la tarjeta de X: anoté/actualicé".
+  const ultimoFueAccion = /^Listo,?\s+en\s+la\s+tarjeta\s+de\b/i.test(ultimoJunior)
+    || /\b(anot[eé]|actualic[eé]|guard[eé])\b.*tarjeta/i.test(ultimoJunior);
+  if (ultimoFueListado && !queryEsPedidoExplicitoDeLista &&
+      !plan.respuesta_directa && (!Array.isArray(plan.chat_ids) || plan.chat_ids.length === 0)) {
+    // Construir 5 chat_ids más relevantes (espera_jhon o sin_responder) para que el
+    // paso 2 los lea y responda de forma conversacional.
+    plan.chat_ids = indice
+      .filter(f => f.estado === 'espera_jhon' || f.estado === 'sin_responder')
+      .slice(0, 5).map(f => f.chat_id);
+  }
+  // Si el último fue una acción y Jhon está aclarando/corrigiendo ("es otra
+  // señora", "no, era X", "te equivocaste"), NO disparar el fallback de listado.
+  // Forzamos respuesta conversacional cargando la tarjeta donde se hizo la acción.
+  if (ultimoFueAccion && !queryEsPedidoExplicitoDeLista &&
+      !plan.respuesta_directa && (!Array.isArray(plan.chat_ids) || plan.chat_ids.length === 0)) {
+    // Extraer el nombre del contacto del mensaje de confirmación: "Listo, en la
+    // tarjeta de <NOMBRE>: ...". Match laxo.
+    const m = ultimoJunior.match(/tarjeta\s+de\s+([^:]+?):/i);
+    const nombreAccionado = m ? m[1].trim() : null;
+    const tarjetaAccion = nombreAccionado
+      ? indice.find(f => f.nombre.toLowerCase().includes(nombreAccionado.toLowerCase().split(/\s+/)[0]))
+      : null;
+    if (tarjetaAccion) plan.chat_ids = [tarjetaAccion.chat_id];
+    else plan.chat_ids = indice.filter(f => f.estado === 'espera_jhon').slice(0, 3).map(f => f.chat_id);
   }
 
   // ── Paso 2: cargar solo las tarjetas relevantes y responder ─────────────
@@ -224,10 +912,69 @@ export async function responderJuniorTarjeta(
   if (chatIds.length === 0) {
     // Defensa: aunque derivarChecklist filtre no-acciones, hacemos un segundo
     // pase acá para no mostrar a Jhon items de pura observación / indecisión.
-    const NO_ACCION = /(mantener(se)?|esperar|observar|monitorear|sin\s+acci[oó]n|ninguna\s+acci[oó]n|quedar\s+atento|atento\s+a|expectativa|reclasificar.*como.*o\s+mantener|decidir\s+si\s+\w+\s+o\s+\w+)/i;
-    const teToca = indice
-      .filter(f => f.estado === 'espera_jhon' || f.estado === 'sin_responder')
-      .filter(f => !f.proximo || !NO_ACCION.test(f.proximo));
+    const NO_ACCION = /(mantener(se)?|esperar(\s+contacto|\s+a\s+que|\s+oportunidades)?|observar|monitorear|sin\s+acci[oó]n|ninguna\s+acci[oó]n|quedar\s+atento|atento\s+a|expectativa|reclasificar.*como.*o\s+mantener|decidir\s+si\s+\w+\s+o\s+\w+|bloquear\s+contacto|cerrar\s+(caso|contacto|cliente)|verificar\s+si.*lista\s+de\s+contactos)/i;
+    // TE TOCA reescrito: leemos las TAREAS REALES (tarjeta_tarea, 86 items en BD)
+    // en vez del 'proximo_paso' (un resumen, 1 por tarjeta). Antes solo veíamos 11;
+    // ahora vemos todas las pendientes excepto cerradas / no-cliente / no-acción.
+    const { data: todasTareas } = await sb.from('tarjeta_tarea')
+      .select('chat_id, titulo, prioridad').order('prioridad');
+    const { data: estadosCks } = await sb.from('tarjeta_checklist').select('chat_id, estado_conversacion');
+    const estadoPorChat = new Map((estadosCks ?? []).map((c: any) => [c.chat_id, c.estado_conversacion]));
+    const infoPorChat = new Map(indice.map(f => [f.chat_id, f]));
+    type GrupoTareas = { nombre: string; tel: string; estado: string; items: string[] };
+    const grupos = new Map<number, GrupoTareas>();
+    for (const t of (todasTareas ?? []) as any[]) {
+      const info = infoPorChat.get(t.chat_id);
+      if (!info) continue;  // tarjeta no-cliente (ya filtrada por cargarIndice)
+      const estado = estadoPorChat.get(t.chat_id);
+      if (estado === 'cerrado') continue;  // ruido: "Cerrar caso de X"
+      if (NO_ACCION.test(t.titulo)) continue;  // "Esperar contacto", "Bloquear", etc.
+      if (!grupos.has(t.chat_id)) {
+        grupos.set(t.chat_id, { nombre: info.nombre, tel: info.tel, estado: estado ?? '?', items: [] });
+      }
+      grupos.get(t.chat_id)!.items.push(String(t.titulo).trim());
+    }
+    // Para tarjetas con estado activo (espera_jhon/sin_responder) que NO tienen
+    // entries en tarjeta_tarea, caemos al 'proximo_paso' como respaldo — así no
+    // perdemos casos donde el agente puso el resumen pero no derivó tareas.
+    for (const f of indice) {
+      if (grupos.has(f.chat_id)) continue;
+      if (f.estado !== 'espera_jhon' && f.estado !== 'sin_responder') continue;
+      if (!f.proximo || NO_ACCION.test(f.proximo)) continue;
+      grupos.set(f.chat_id, { nombre: f.nombre, tel: f.tel, estado: f.estado, items: [f.proximo] });
+    }
+    // Sumar tareas de `tareas` V1 que tienen persona_id (creadas por Junior o
+    // por el panel) y aún no completadas. Las mapeo por persona → chat para
+    // mezclar con `grupos` existente. Sin esto, las tareas que crea Junior
+    // aparecen en panel UI pero no en el listado "TE TOCA" que da por chat.
+    const personasConTarjeta = new Map<number, FilaIndice>();
+    {
+      const personaIds = await sb.from('tarjeta').select('chat_id, persona_id').not('persona_id', 'is', null);
+      for (const t of (personaIds.data ?? []) as any[]) {
+        const info = infoPorChat.get(t.chat_id);
+        if (info) personasConTarjeta.set(t.persona_id, info);
+      }
+    }
+    const personaIdsActivos = [...personasConTarjeta.keys()];
+    if (personaIdsActivos.length) {
+      const { data: tareasV1 } = await sb.from('tareas')
+        .select('id, titulo, persona_id').in('persona_id', personaIdsActivos)
+        .is('deleted_at', null).eq('completada', false).eq('shadow', false);
+      for (const t of (tareasV1 ?? []) as any[]) {
+        const info = personasConTarjeta.get(t.persona_id);
+        if (!info) continue;
+        if (NO_ACCION.test(t.titulo)) continue;
+        if (!grupos.has(info.chat_id)) {
+          grupos.set(info.chat_id, { nombre: info.nombre, tel: info.tel, estado: info.estado, items: [] });
+        }
+        // Evitar duplicar: si ya está el mismo título no lo agrego de nuevo.
+        const g = grupos.get(info.chat_id)!;
+        if (!g.items.some(it => it.toLowerCase() === String(t.titulo).toLowerCase().trim())) {
+          g.items.push(String(t.titulo).trim());
+        }
+      }
+    }
+    const teToca = [...grupos.values()];
 
     // Próximos agendamientos (7 días) — para que la respuesta empiece con calendario.
     const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
@@ -272,16 +1019,47 @@ export async function responderJuniorTarjeta(
       ? dedup.slice(0, 12).map((a: any) => `• ${a.fecha}${a.hora_inicio ? ' ' + String(a.hora_inicio).slice(0,5) : ''} — ${conTel(a.personas?.nombre, a.personas?.telefono_e164)}: ${a.titulo}`).join('\n')
       : null;
 
-    if (!teToca.length && !agendaTxt) {
+    // Tareas transversales: viven en `tareas` V1 con persona_id=NULL. Solo
+    // mostramos las activas (no completadas, no soft-deleted). Cualquiera puede
+    // crearlas — incluyo todas, no solo las mías.
+    const { data: tareasTransv } = await sb.from('tareas')
+      .select('id, titulo, descripcion').is('persona_id', null)
+      .is('deleted_at', null).eq('completada', false).eq('shadow', false)
+      .order('created_at', { ascending: false });
+
+    if (!teToca.length && !agendaTxt && !(tareasTransv?.length)) {
       return { respuesta: 'No tenés nada pendiente de tu lado ahora mismo. 👏 Si querés ver un caso puntual, nombrame el cliente.', tarjetas_usadas: [], via_indice: true, costo_usd: costo };
     }
 
+    // Respeta el ámbito de la pregunta: "tareas" → solo TE TOCA + transversales,
+    // "agenda" → solo AGENDA, vago → todo.
     const partes: string[] = [];
-    if (agendaTxt) partes.push(`📅 AGENDA próxima (7 días):\n${agendaTxt}`);
-    if (teToca.length) {
-      const lista = teToca.slice(0, 25).map(f => `• ${conTel(f.nombre, f.tel)}${f.proximo ? ` — ${f.proximo}` : ''}`).join('\n');
-      const extra = teToca.length > 25 ? `\n…y ${teToca.length - 25} más` : '';
-      partes.push(`✅ TE TOCA (acciones concretas):\n${lista}${extra}`);
+    if (agendaTxt && !pidioSoloTareas) partes.push(`📅 AGENDA próxima (7 días):\n${agendaTxt}`);
+    if (teToca.length && !pidioSoloAgenda) {
+      // Agrupado por cliente: una sola entrada por contacto, todas sus tareas
+      // debajo con guión. Sin truncar (Jhon pidió completas). Si un día son 200,
+      // ya veremos cómo paginar — hoy ~50 tras filtros.
+      const bloques = teToca.map(g => {
+        const cab = `• ${conTel(g.nombre, g.tel)}`;
+        if (g.items.length === 1) return `${cab} — ${g.items[0]}`;
+        return `${cab}\n${g.items.map(it => `   – ${it}`).join('\n')}`;
+      });
+      partes.push(`✅ TE TOCA (acciones concretas):\n${bloques.join('\n')}`);
+    }
+    if (tareasTransv?.length && !pidioSoloAgenda) {
+      const bloques = tareasTransv.map((t: any) => {
+        const cab = `• ${t.titulo} [#${t.id}]`;
+        return t.descripcion ? `${cab}\n   – ${t.descripcion}` : cab;
+      });
+      partes.push(`📌 TRANSVERSALES (sin contacto asignado):\n${bloques.join('\n')}`);
+    }
+    if (!partes.length) {
+      const msg = pidioSoloTareas
+        ? 'No tenés tareas pendientes ahora mismo. 👏'
+        : pidioSoloAgenda
+          ? 'No hay agendamientos en los próximos 7 días.'
+          : 'No tenés nada pendiente de tu lado ahora mismo. 👏';
+      return { respuesta: msg, tarjetas_usadas: [], via_indice: true, costo_usd: costo };
     }
     return { respuesta: partes.join('\n\n'), tarjetas_usadas: [], via_indice: true, costo_usd: costo };
   }
@@ -302,6 +1080,10 @@ export async function responderJuniorTarjeta(
         `3. Si Jhon afirma algo que la tarjeta NO muestra, decilo claro: "la tarjeta no lo refleja todavía (puede estar actualizándose)" — ` +
         `NO inventes el dato para coincidir con él.\n` +
         `4. Las NOTAS DE JHON (verdad) mandan sobre los hechos de los agentes.\n` +
+        `4b. La AGENDA que ves en cada tarjeta SON las citas DE ESE CONTACTO — la query las filtró por persona_id antes de pasártelas. ` +
+        `Si la sección AGENDA de la tarjeta de X dice "Encuentro con cliente (2026-05-31 10:00)", eso ES una cita CON X, aunque el título ` +
+        `sea genérico. NUNCA digas "esa cita no está vinculada a esta persona" cuando aparece bajo su sección AGENDA — sí lo está, ` +
+        `por construcción de la query. Caso reportado: respondiste "no tenés cita con Lorena" cuando su tarjeta SÍ mostraba la cita en AGENDA.\n` +
         `5. ⚠ ACCIONES — sos READ-ONLY en este paso. NO podés cerrar, marcar, ajustar, cambiar estado, actualizar checklist, ni nada ` +
         `parecido desde acá. PROHIBIDO escribir frases que afirmen una acción hecha: "voy a actualizar", "ya cerré", "marqué", ` +
         `"ya quedó reflejado", "actualicé la tarjeta", "lo guardé", "completé". Las ÚNICAS escrituras que el sistema acepta son ` +
