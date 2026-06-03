@@ -60,3 +60,5 @@ _audit_shots/
 
 # Artifacts del stress test (snapshots, JSONL, bitácora, reportes — efímeros)
 tests/_*
+
+.vercel
