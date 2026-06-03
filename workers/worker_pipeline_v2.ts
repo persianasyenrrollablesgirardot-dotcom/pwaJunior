@@ -59,6 +59,7 @@ import { responderJunior, type NuevoCliente } from '../agentes/sintesis/junior_c
 import { cascadaCierreChecklist } from '../agentes/sintesis/cascada.js';
 import { cicloTarjetas } from '../agentes/sintesis/tarjeta_engine.js';
 import { cicloCartera } from '../agentes/batch/cartera.js';
+import { cicloPdfWorker } from '../agentes/batch/pdf_worker.js';
 import { fusionarPersonas } from '../identidad/fusionar_personas.js';
 import { cicloFusionPorTelefono } from '../identidad/fusion_telefono.js';
 
@@ -1290,6 +1291,15 @@ async function main() {
     .catch(e => console.error('[V2/FUSION-TEL]', e?.message));
   setTimeout(dispararFusionTel, 90_000);
   setInterval(dispararFusionTel, 6 * 3600 * 1000);
+
+  // PDFs server-side: el worker lee los PDFs descifrados del almacenamiento local
+  // de la extensión, los transcribe con pdf.js (lo que el extractor de la extensión
+  // no podía: FlateDecode/escaneados) y los mete al pipeline. Cada 10 min + a 120s.
+  const dispararPdf = () => cicloPdfWorker(sb, m => console.log('[V2/PDF]', m))
+    .then(r => { if (r.recuperados) console.log(`[V2/PDF] ${r.recuperados}/${r.pendientes} PDF(s) recuperados (${r.pdfsEnDisco} en disco)`); })
+    .catch(e => console.error('[V2/PDF]', e?.message));
+  setTimeout(dispararPdf, 120_000);
+  setInterval(dispararPdf, 10 * 60 * 1000);
 
   setInterval(() => console.log(`[V2] stats: ${JSON.stringify(stats)}`), STATS_INTERVAL_MS);
 
