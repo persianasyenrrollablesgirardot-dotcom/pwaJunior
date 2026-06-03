@@ -10,13 +10,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { linkifyTelefonos } from '../lib/linkify';
+import { parseQuery, matchContacto } from '../lib/busqueda';
 
 type EstadoConv = 'cerrado' | 'espera_jhon' | 'espera_cliente' | 'sin_responder';
 interface ModuloCtx { modulo: string; titulo: string; sintesis: string; alerta: string | null }
 interface TarjetaRow {
   chat_id: number; persona_id: number | null; tipo_contacto: string;
   narrativa: string | null; notas: string[]; contexto: ModuloCtx[];
-  actualizado_at: string; dirty: boolean; personas: { nombre: string | null } | null;
+  actualizado_at: string; dirty: boolean; personas: { nombre: string | null; telefono_e164: string | null } | null;
 }
 interface Checklist { chat_id: number; estado_conversacion: EstadoConv; proximo_paso: string | null }
 interface Tarea { id: number; titulo: string; prioridad: number }
@@ -69,6 +70,7 @@ export function TarjetaV2() {
   const [filtroEstado, setFiltroEstado] = useState<'activos' | 'cerrados' | 'todos'>('activos');
   const [filtroTipo, setFiltroTipo] = useState<string | null>(null); // null = todos
   const [verSinIdentificar, setVerSinIdentificar] = useState(false);
+  const [busqueda, setBusqueda] = useState('');
   const [agCanon, setAgCanon] = useState<AgCanon[]>([]);
   const [editandoAg, setEditandoAg] = useState<number | null>(null);
   const [editFecha, setEditFecha] = useState('');
@@ -95,7 +97,7 @@ export function TarjetaV2() {
 
   const cargarLista = useCallback(async () => {
     const { data } = await supabase.from('tarjeta')
-      .select('chat_id, persona_id, tipo_contacto, narrativa, notas, contexto, actualizado_at, dirty, personas(nombre)')
+      .select('chat_id, persona_id, tipo_contacto, narrativa, notas, contexto, actualizado_at, dirty, personas(nombre, telefono_e164)')
       .order('actualizado_at', { ascending: false });
     const rows = (data as any as TarjetaRow[]) ?? [];
     setLista(rows);
@@ -208,6 +210,30 @@ export function TarjetaV2() {
   }, [filtroEstado, filtroTipo, verSinIdentificar, lista, checklists, sel]);
 
 
+  // Terminar un ítem "por coordinar" (agenda sin fecha) SIN agendarlo: deja una
+  // nota de cierre y el worker dispara la MISMA cascada que cualquier cierre por
+  // nota (checklist→cerrado, tareas completadas, agenda cancelada, tarjeta
+  // 'cerrado'). Mismo patrón que guardarNota; el prefijo "Cerrar caso:" garantiza
+  // el match con RE_CIERRE del worker. No tocamos cascada.ts/tarjeta_engine.ts.
+  async function terminarPorCoordinar(titulo: string) {
+    if (!t?.persona_id) return;
+    const motivo = window.prompt(
+      `Cerrar el caso de ${t.personas?.nombre ?? 'este cliente'} sin agendar "${titulo}".\n` +
+      `Esto completa TODAS sus tareas y cancela su agenda.\n\nMotivo (opcional):`,
+      '',
+    );
+    if (motivo === null) return; // canceló
+    await supabase.from('notas_libres').insert({
+      persona_id: t.persona_id,
+      contenido: `Cerrar caso: ${motivo.trim() || `${titulo} — sin pendientes de agenda`}`,
+      visible_para: ['todos'], creado_por: 1,
+    } as any);
+    await supabase.from('personas').update({ sintesis_pendiente: true } as any).eq('id', t.persona_id);
+    await supabase.from('tarjeta').update({ dirty: true } as any).eq('chat_id', t.chat_id);
+    await cargarLista();
+    if (sel != null) await cargarDerivados(sel);
+  }
+
   async function guardarNota() {
     if (!t?.persona_id || !borrador.trim()) return;
     setGuardando(true);
@@ -270,7 +296,12 @@ export function TarjetaV2() {
         const tras2 = filtroTipo ? tras1.filter(x => x.tipo_contacto === filtroTipo) : tras1;
         // 3er filtro: ocultar placeholders "⏳ Identificando…" salvo que verSinIdentificar.
         const sinIdentificarN = tras2.filter(esSinIdentificar).length;
-        const listaFiltrada = verSinIdentificar ? tras2 : tras2.filter(x => !esSinIdentificar(x));
+        const qBusq = parseQuery(busqueda);
+        const listaFiltrada = (verSinIdentificar ? tras2 : tras2.filter(x => !esSinIdentificar(x)))
+          .filter(x => matchContacto(qBusq, {
+            chatId: x.chat_id, personaId: x.persona_id,
+            nombre: x.personas?.nombre, telefono: x.personas?.telefono_e164,
+          }));
         // Conteos para chips estado (sobre TODA la lista — los counts no dependen del tipo).
         const cerradas = lista.filter(x => checklists[x.chat_id]?.estado_conversacion === 'cerrado').length;
         const activas = lista.length - cerradas;
@@ -298,6 +329,18 @@ export function TarjetaV2() {
         );
         return (
         <>
+          {/* Buscador unificado */}
+          <input
+            type="search"
+            value={busqueda}
+            onChange={e => setBusqueda(e.target.value)}
+            placeholder="🔍 Buscar por nombre, teléfono, #chat o #persona…"
+            style={{
+              width: '100%', padding: '8px 12px', fontSize: 12, boxSizing: 'border-box',
+              border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-page)',
+              outline: 'none', marginBottom: 12,
+            }}
+          />
           {/* Filtro por estado */}
           <div style={{ display: 'flex', gap: 8, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' }}>
             <span style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 700, minWidth: 50 }}>Estado:</span>
@@ -501,10 +544,23 @@ export function TarjetaV2() {
                         </div>
                       );
                     })}
-                    {/* Items 'por coordinar' (sin fecha) del agente, solo lectura */}
+                    {/* Items 'por coordinar' (sin fecha) del agente: terminar con nota (cierra el caso) */}
                     {agenda.filter(x => !x.cuando || x.cuando === 'por coordinar').map(x => (
-                      <div key={`tc-${x.id}`} style={{ fontSize: 13, padding: '4px 0', color: 'var(--text-muted)' }}>
-                        <span style={{ fontWeight: 600 }}>{x.titulo}</span> <span style={{ fontSize: 11 }}>· por coordinar</span>
+                      <div key={`tc-${x.id}`} style={{ fontSize: 13, padding: '4px 0', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          <span style={{ fontWeight: 600 }}>{x.titulo}</span> <span style={{ fontSize: 11 }}>· por coordinar</span>
+                        </span>
+                        {t?.persona_id && (
+                          <button
+                            onClick={() => terminarPorCoordinar(x.titulo)}
+                            title="Cerrar el caso con una nota, sin agendar (sincroniza checklist, tareas y agenda)"
+                            style={{
+                              flexShrink: 0, padding: '3px 9px', fontSize: 10, fontWeight: 700,
+                              background: 'white', color: '#16a34a', border: '1px solid #86efac',
+                              borderRadius: 6, cursor: 'pointer', whiteSpace: 'nowrap',
+                            }}
+                          >✓ Terminar</button>
+                        )}
                       </div>
                     ))}
                   </Derivado>
