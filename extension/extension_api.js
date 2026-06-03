@@ -120,6 +120,10 @@ chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => 
           sendResponse(await setRealtimeFlag(request.enabled));
           return;
 
+        case 'V3_WA_STATUS':
+          sendResponse(await getWaStatus());
+          return;
+
         default:
           sendResponse({ error: 'tipo desconocido: ' + t });
       }
@@ -189,7 +193,7 @@ async function listarChats() {
     const s = stats.get(md.jid) || null;
     const isGroup = !!md.isGroup || md.jid.endsWith('@g.us');
     const isStatus = md.jid === 'status@broadcast';
-    const titulo = md.name || md.verifiedName || md.phoneNumber || tituloFallback(md.jid);
+    const titulo = tituloContacto(md.jid, md.name, md.verifiedName, md.phoneNumber);
     const noCliente = s ? detectarNoCliente(s.textoConcatenado) : { tags: [], score: 0 };
 
     out.push({
@@ -300,7 +304,7 @@ async function procesarChat(jid) {
   const mensajesLocal = await obtenerMensajes(jid, 100000);
   if (mensajesLocal.length === 0) return { error: 'chat sin mensajes capturados todavía' };
 
-  const titulo = meta.name || meta.verifiedName || meta.phoneNumber || tituloFallback(jid);
+  const titulo = tituloContacto(jid, meta.name, meta.verifiedName, meta.phoneNumber);
   const isGroup = !!meta.isGroup || jid.endsWith('@g.us');
 
   // 3. Upsert chat → obtiene chat_id_db (función ya definida en visor_pg_sync.js)
@@ -550,7 +554,7 @@ async function transcribirMediaChat(jid) {
 
   // Resolver chat_id_db (cache o upsert)
   const meta = await tx('chat_metadata', 'readonly', s => reqAsync(s.get(jid)));
-  const titulo = meta?.name || meta?.verifiedName || meta?.phoneNumber || tituloFallback(jid);
+  const titulo = tituloContacto(jid, meta?.name, meta?.verifiedName, meta?.phoneNumber);
   const isGroup = !!meta?.isGroup || jid.endsWith('@g.us');
   const chat_id_db = await upsertChat({ supabaseKey, jid, titulo, isGroup });
 
@@ -796,6 +800,41 @@ async function setRealtimeFlag(enabled) {
   await chrome.storage.local.set(patch);
   console.log('[VPG-API] V3_SET_REALTIME:', on ? 'ON' : 'OFF');
   return { ok: true, realtime: on };
+}
+
+// ─── V3_WA_STATUS — semáforo de conexión de WhatsApp Web ──────────────
+//
+// El Visor lo consulta cada ~10s para mostrar 🟢 Capturando / 🔴 Desconectado.
+// Estrategia: ¿hay pestaña de web.whatsapp.com? -> preguntarle al content
+// script si está vivo y logueado (#pane-side presente). Sin pestaña o sin
+// respuesta => desconectado (no captura en tiempo real).
+async function getWaStatus() {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: 'https://web.whatsapp.com/*' });
+  } catch (e) {
+    return { ok: true, conectado: false, motivo: 'error_tabs', detalle: 'No se pudo consultar pestañas: ' + e.message };
+  }
+  if (!tabs.length) {
+    return { ok: true, conectado: false, motivo: 'sin_pestana', detalle: 'WhatsApp Web no está abierto' };
+  }
+  for (const tab of tabs) {
+    try {
+      const r = await chrome.tabs.sendMessage(tab.id, { type: 'WA_PING' });
+      if (r?.alive) {
+        if (r.loggedIn) {
+          return { ok: true, conectado: true, motivo: 'ok', detalle: 'Capturando en tiempo real', estado: r.estado };
+        }
+        return {
+          ok: true, conectado: false,
+          motivo: r.estado === 'qr' ? 'qr' : 'cargando',
+          detalle: r.estado === 'qr' ? 'WhatsApp Web abierto: escaneá el QR' : 'WhatsApp Web cargando…',
+          estado: r.estado,
+        };
+      }
+    } catch (_) { /* content script no responde en esta pestaña: probar la siguiente */ }
+  }
+  return { ok: true, conectado: false, motivo: 'sin_respuesta', detalle: 'WhatsApp Web abierto pero no responde (recargá la pestaña)' };
 }
 
 console.log('[VPG-API] cargado v' + VISOR_API_VERSION);

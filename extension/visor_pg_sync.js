@@ -85,9 +85,36 @@ function tituloFallback(jid) {
 }
 self.tituloFallback = tituloFallback;
 
-// ¿El valor es un nombre PROVISIONAL (identificador crudo / placeholder) y
-// no un nombre humano real? Garantiza que el corrector nunca pise un nombre
-// bueno: un nombre real ("Nancy Bermúdez") o un teléfono ("+57…") no matchea.
+// ¿El texto tiene al menos una letra? Un emoji o símbolos solos (p.ej. "🪬") NO.
+function tieneLetras(s) { return /\p{L}/u.test(String(s || '')); }
+self.tieneLetras = tieneLetras;
+
+// Normaliza un teléfono a +E.164 si parece válido; si no, null.
+function normTelefono(raw) {
+  const t = String(raw || '').replace(/[\s-]/g, '');
+  if (/^\+?\d{8,15}$/.test(t)) return t.startsWith('+') ? t : '+' + t;
+  return null;
+}
+self.normTelefono = normTelefono;
+
+// Mejor título para un contacto. Prioriza un NOMBRE HUMANO (con letras); si no
+// hay, usa el TELÉFONO — clave para contactos @lid, cuyo jid es opaco y cuyo
+// push_name puede ser un emoji ("🪬"). Último recurso: el placeholder.
+function tituloContacto(jid, name, verifiedName, phoneNumber) {
+  for (const cand of [name, verifiedName]) {
+    const v = String(cand || '').trim();
+    if (v && tieneLetras(v) && !esTituloProvisional(v, jid)) return v;
+  }
+  const tel = normTelefono(phoneNumber) || jidToTelefono(jid);
+  if (tel) return tel;
+  return tituloFallback(jid);
+}
+self.tituloContacto = tituloContacto;
+
+// ¿El valor es un nombre PROVISIONAL (identificador crudo / placeholder / emoji
+// sin letras) y no un nombre humano real? Garantiza que el corrector nunca pise
+// un nombre bueno: un nombre real ("Nancy Bermúdez") o un teléfono ("+57…") no
+// matchea. Un emoji/símbolo solo ("🪬") SÍ → se reemplaza por el teléfono.
 function esTituloProvisional(valor, jid) {
   if (!valor) return true;
   const crudo = String(jid || '').replace(/@.*$/, '');
@@ -95,7 +122,8 @@ function esTituloProvisional(valor, jid) {
       || valor === jid
       || valor === TITULO_PENDIENTE
       || valor === 'desconocido'
-      || /^\d{6,}$/.test(valor);
+      || /^\d{6,}$/.test(valor)
+      || (!tieneLetras(valor) && !normTelefono(valor));   // emoji/símbolos sin teléfono útil
 }
 
 // Corrector universal de contactos (reemplaza al corrector @lid parcial).
@@ -171,10 +199,12 @@ async function reconciliarContactos(metadataList, supabaseKey) {
     if (res.ok) {
       for (const c of await res.json()) {
         const ent = mapa.get(c.canal_chat_id);
-        if (!ent?.name || ent.name === c.titulo) continue;
-        if (!esTituloProvisional(c.titulo, c.canal_chat_id)) continue;
-        if (await patchExacto('chats', 'canal_chat_id', c.canal_chat_id, 'titulo', c.titulo, ent.name)) {
-          nombresOK++;
+        if (!ent) continue;
+        if (!esTituloProvisional(c.titulo, c.canal_chat_id)) continue;   // título ya bueno → no tocar
+        const nuevo = ent.name || ent.phoneNumber;   // nombre humano preferido; si no, el teléfono (@lid)
+        if (nuevo && nuevo !== c.titulo &&
+            await patchExacto('chats', 'canal_chat_id', c.canal_chat_id, 'titulo', c.titulo, nuevo)) {
+          if (ent.name) nombresOK++; else telefonosOK++;
         }
       }
     }
@@ -190,10 +220,13 @@ async function reconciliarContactos(metadataList, supabaseKey) {
         const ent = mapa.get(p.jid);
         if (!ent) continue;
         let cambio = false;
-        // 2.a Nombre — solo si el actual es provisional.
-        if (ent.name && ent.name !== p.nombre && esTituloProvisional(p.nombre, p.jid)) {
-          if (await patchExacto('personas', 'jid', p.jid, 'nombre', p.nombre, ent.name)) {
-            nombresOK++;
+        // 2.a Nombre — solo si el actual es provisional. Nombre humano preferido;
+        // si no hay, el teléfono (contactos @lid sin nombre real).
+        if (esTituloProvisional(p.nombre, p.jid)) {
+          const nuevoNombre = ent.name || ent.phoneNumber;
+          if (nuevoNombre && nuevoNombre !== p.nombre &&
+              await patchExacto('personas', 'jid', p.jid, 'nombre', p.nombre, nuevoNombre)) {
+            if (ent.name) nombresOK++;
             cambio = true;
           }
         }

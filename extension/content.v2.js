@@ -1217,6 +1217,16 @@
     // Pero los onMessage handlers NO se throttlan — el SW puede dispararlos
     // siempre que quiera vía chrome.alarms (que tampoco se throttla).
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg?.type === 'WA_PING') {
+        // Semáforo de conexión para el Visor. #pane-side = panel lateral de
+        // chats, solo existe cuando hay sesión activa (logueado). El canvas/QR
+        // aparece cuando WhatsApp pide escanear. Si no hay ninguno → cargando.
+        const paneSide = document.querySelector('#pane-side');
+        const qr = document.querySelector('canvas[aria-label*="Scan" i], div[data-ref], [data-testid="qrcode"]');
+        const estado = paneSide ? 'logueado' : (qr ? 'qr' : 'cargando');
+        sendResponse({ alive: true, loggedIn: !!paneSide, estado, ts: Date.now() });
+        return false;
+      }
       if (msg?.type === 'V2_TICK_BACKFILL') {
         backfillCycle();
         processCycle();
