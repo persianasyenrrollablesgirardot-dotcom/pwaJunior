@@ -100,7 +100,7 @@ export interface PdfDoc { texto: string; numPages: number; }
 async function textoDePdf(bytes: Buffer, maxPages = 2): Promise<PdfDoc | null> {
   try {
     const data = new Uint8Array(bytes);
-    const doc = await pdfjs.getDocument({ data, isEvalSupported: false }).promise;
+    const doc = await pdfjs.getDocument({ data, isEvalSupported: false, verbosity: 0 }).promise;
     let texto = '';
     const n = Math.min(maxPages, doc.numPages);
     for (let p = 1; p <= n; p++) {
@@ -154,9 +154,16 @@ export async function cicloPdfWorker(sb: SupabaseClient, log: (m: string) => voi
   // 1) Mensajes 'documento' con transcripción fallida/vacía y aún no recuperados.
   const { data: msgs } = await sb.from('mensajes')
     .select('id, chat_id, metadata, ts_canal').eq('tipo', 'documento').is('deleted_at', null);
+  // Throttle: un mensaje sin match confiable (PDF no está en el caché de la
+  // extensión, nombre no matchea) se reintenta a lo sumo cada 12h, no cada ciclo
+  // — si no, se re-escanean los blobs eternamente y se spamea el log.
+  const ahora = Date.now();
+  const TRIED_TTL_MS = 12 * 3600 * 1000;
   const pendientes = (msgs ?? []).filter((m: any) => {
     const md = m.metadata || {};
     if (md.pdf_via) return false;                          // ya recuperado por el worker
+    const tried = md.pdf_worker_tried ? Date.parse(md.pdf_worker_tried) : 0;
+    if (tried && ahora - tried < TRIED_TTL_MS) return false;
     const t = md.ai_text || '';
     return !t || RE_FALLO.test(t);
   });
@@ -178,11 +185,17 @@ export async function cicloPdfWorker(sb: SupabaseClient, log: (m: string) => voi
   log(`${pendientes.length} PDFs pendientes · ${docs.length} PDFs legibles en disco`);
 
   // 3) Matchear cada mensaje pendiente con su PDF por nombre del cliente.
+  // Estampa pdf_worker_tried en los sin-match para no re-escanearlos cada ciclo.
+  const marcarIntento = async (m: any) => {
+    if (opts.dryRun) return;
+    const md = { ...(m.metadata || {}), pdf_worker_tried: new Date().toISOString() };
+    await sb.from('mensajes').update({ metadata: md } as any).eq('id', m.id);
+  };
   let recuperados = 0, sinMatch = 0;
   const lote = pendientes.slice(0, MAX_POR_CICLO);
   for (const m of lote) {
     const per = await nombrePersona(sb, m.chat_id);
-    if (!per) { sinMatch++; log(`msg ${m.id}: sin persona resoluble`); continue; }
+    if (!per) { sinMatch++; await marcarIntento(m); log(`msg ${m.id}: sin persona resoluble`); continue; }
     // Score contra cada PDF; quedarse con el mejor + verificar margen vs 2º.
     const scored = docs.map(d => ({ d, ...scoreMatch(per.nombre, d.norm) }))
       .sort((a, b) => b.score - a.score || b.matched - a.matched);
@@ -192,6 +205,7 @@ export async function cicloPdfWorker(sb: SupabaseClient, log: (m: string) => voi
       && (!segundo || best.matched > segundo.matched || best.score > segundo.score + 0.15);
     if (!ok) {
       sinMatch++;
+      await marcarIntento(m);
       log(`msg ${m.id} (${per.nombre}): sin match confiable (mejor ${best ? `${best.matched}/${best.total}` : '—'}) → NO toco`);
       continue;
     }
