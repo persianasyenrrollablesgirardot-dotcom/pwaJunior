@@ -1294,12 +1294,15 @@ async function main() {
 
   // PDFs server-side: el worker lee los PDFs descifrados del almacenamiento local
   // de la extensión, los transcribe con pdf.js (lo que el extractor de la extensión
-  // no podía: FlateDecode/escaneados) y los mete al pipeline. Cada 10 min + a 120s.
+  // no podía: FlateDecode/escaneados) y los mete al pipeline.
+  // Intervalo CORTO (90s) para cazar el PDF mientras está fresco en el caché —
+  // el caché LRU de la extensión corrompe los blobs viejos con el tiempo. El ciclo
+  // sale temprano si no hay PDFs nuevos pendientes (no escanea), así que es barato.
   const dispararPdf = () => cicloPdfWorker(sb, m => console.log('[V2/PDF]', m))
     .then(r => { if (r.recuperados) console.log(`[V2/PDF] ${r.recuperados}/${r.pendientes} PDF(s) recuperados (${r.pdfsEnDisco} en disco)`); })
     .catch(e => console.error('[V2/PDF]', e?.message));
-  setTimeout(dispararPdf, 120_000);
-  setInterval(dispararPdf, 10 * 60 * 1000);
+  setTimeout(dispararPdf, 45_000);
+  setInterval(dispararPdf, 90_000);
 
   setInterval(() => console.log(`[V2] stats: ${JSON.stringify(stats)}`), STATS_INTERVAL_MS);
 
