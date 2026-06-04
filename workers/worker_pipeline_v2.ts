@@ -95,6 +95,14 @@ const BATCH_IDENTIDAD     = 20;
 const BATCH_PIPELINE      = 20;
 const MAX_CHECKLIST_POR_CICLO = 4;
 const PARALLEL_CHATS      = 3;
+// FIX bug #1 (2026-06-03): eventos del MISMO chat se procesaban 1×1 en serie →
+// un backlog de 40+ mensajes tras un apagón tardaba ~1h (cada evento ~30-80s).
+// Cada evento toma su propio lock por id (no compiten) y los agentes del pipeline
+// escriben evento_pg con distinto agente_origen; A3 solo lee/dedup-inserta. Por
+// eso se pueden procesar en grupos concurrentes acotados. Tope bajo (3) para no
+// saturar DeepSeek combinado con PARALLEL_CHATS. La fase 'identidad' (A3 serial)
+// sigue intacta dentro de cada evento; esto paraleliza EVENTOS, no esa fase.
+const PARALLEL_EVENTOS_POR_CHAT = 3;
 const STATS_INTERVAL_MS   = 30_000;
 const QUERY_TIMEOUT_MS    = 10_000;
 const LEASE_PIPELINE_S    = 300;
@@ -386,11 +394,33 @@ async function procesarEventoPipeline(evt: any): Promise<void> {
 // UNA vez al final, no una vez por batch.
 const personasSintesisPendiente = new Set<number>();
 
+// FIX bug #2 (2026-06-03) — coalescing por tiempo para frenar el sangrado de plata.
+// Bajo drenaje lento/por goteo (ej. catch-up tras un apagón: pocos eventos por
+// ciclo), drenarSintesis se llamaba en CADA ciclo parcial y re-sintetizaba a la
+// MISMA persona una y otra vez (visto: persona 243 sintetizada ~8 veces seguidas).
+// Cada síntesis reescribe modulo_sintesis con texto LLM nuevo → cicloTarjetas
+// detecta "síntesis nueva" y reconstruye la tarjeta pagando narrativa otra vez.
+// Con un cooldown por persona, una ráfaga la sintetiza ~1 vez por ventana: si se
+// re-encola dentro del cooldown, se DIFIERE (se deja pendiente) en vez de re-correr
+// los ~9 LLM. NO aplica al path manual de Jhon (cicloSintesisPendiente), que debe
+// reflejar al instante una reclasificación.
+const SINTESIS_COOLDOWN_MS = 90_000;
+const ultimaSintesisPersona = new Map<number, number>();
+
 async function drenarSintesis(): Promise<void> {
   if (personasSintesisPendiente.size === 0) return;
+  const ahora = Date.now();
   const pendientes = [...personasSintesisPendiente];
   personasSintesisPendiente.clear();
   for (const pid of pendientes) {
+    const ult = ultimaSintesisPersona.get(pid) ?? 0;
+    if (ahora - ult < SINTESIS_COOLDOWN_MS) {
+      // Sintetizada hace poco → diferir para coalescer la ráfaga. Vuelve a la
+      // cola; el próximo ciclo con cola vacía la reintenta cuando pase el cooldown.
+      personasSintesisPendiente.add(pid);
+      continue;
+    }
+    ultimaSintesisPersona.set(pid, ahora);
     try {
       const r = await sintetizarPersona(sb, pid);
       stats.pi_costo_usd += r.costo_usd;
@@ -527,7 +557,13 @@ async function cicloPipeline(): Promise<number> {
     for (let i = 0; i < claves.length; i += PARALLEL_CHATS) {
       const lote = claves.slice(i, i + PARALLEL_CHATS);
       await Promise.all(lote.map(async (chatKey) => {
-        for (const evt of grupos.get(chatKey)!) await procesarEventoPipeline(evt);
+        // Dentro del chat: grupos concurrentes acotados (no 1×1). Drena el
+        // catch-up de un apagón en minutos en vez de una hora. Ver PARALLEL_EVENTOS_POR_CHAT.
+        const evts = grupos.get(chatKey)!;
+        for (let j = 0; j < evts.length; j += PARALLEL_EVENTOS_POR_CHAT) {
+          const sub = evts.slice(j, j + PARALLEL_EVENTOS_POR_CHAT);
+          await Promise.all(sub.map(evt => procesarEventoPipeline(evt)));
+        }
       }));
     }
     stats.pi_ciclos++;

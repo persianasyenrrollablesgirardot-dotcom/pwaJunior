@@ -973,7 +973,20 @@ async function runAITask(task) {
     }
     await removeTask(task.qid);
   } catch (e) {
-    console.warn(`[WS-BG-V2] AI falló ${task.messageId}: ${e.message}`);
+    // "openaiKey vacío" (o cualquier key no lista) NO es un fallo del media: es que
+    // las keys todavía no se sincronizaron a la extensión. Pasa en el backfill tras
+    // un apagón, antes de que el Visor cargue y haga V3_SET_KEYS. Marcarlo 'failed'
+    // + agotar MAX_ATTEMPTS lo dejaba MUERTO para siempre (caso PDFs salientes de
+    // Jhon Guerrero). Fix 2026-06-03: lo dejamos PENDIENTE sin marcar failed ni gastar
+    // intentos; reintenta cada minuto y se procesa solo cuando la key llega.
+    const keysNoListas = /openaiKey vac|deepseekKey vac|supabaseKey/i.test(e.message || '');
+    console.warn(`[WS-BG-V2] AI ${keysNoListas ? 'diferido (keys no listas)' : 'falló'} ${task.messageId}: ${e.message}`);
+    if (keysNoListas) {
+      task.lastError = 'keys no sincronizadas — reintenta al llegar';
+      task.nextAt = Date.now() + 60_000;
+      await tx('pending_queue', 'readwrite', s => reqAsync(s.put(task)));
+      return;
+    }
     if (msg?.media) {
       msg.media.ai_status = 'failed';
       msg.media.ai_error = e.message.slice(0, 200);

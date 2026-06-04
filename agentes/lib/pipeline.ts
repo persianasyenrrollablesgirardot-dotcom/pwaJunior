@@ -170,7 +170,19 @@ export async function ejecutarPipeline(
     const ejecuciones = agentesACorrer.map(codigo => () => correrUnAgente(sb, codigo, params, pipeline.shadow, contexto, tag));
     let resultados: { codigo: string; result: ResultadoEjecucion | null; error?: string }[] = [];
 
-    if (fase.modo === 'paralelo') {
+    // FIX bug #1 (2026-06-03) — los agentes de una fase 'routing' (operativo:
+    // A4_COTIZ, A4_COMPAT, A6_MEDIDAS, A6_RIESGO, A4_REFERIDOS… hasta 7) son
+    // analizadores de dominio INDEPENDIENTES: ninguno lee el output de otro
+    // (nadie consume `_contexto_pipeline`) y cada uno emite su propio evento_pg
+    // con distinto agente_origen → no hay race entre ellos. Antes corrían en
+    // SERIE (caían al else), sumando ~7×latencia y haciendo que cada evento del
+    // pipeline tardara ~79s. Corriéndolos en paralelo (como ya hace 'paralelo')
+    // el evento baja a ~30s → el catch-up tras un apagón drena mucho más rápido.
+    // 'serial' se respeta (identidad A3_* sí tiene dependencia/escritura sobre
+    // la misma persona — esa fase NO se toca).
+    const correrEnParalelo = fase.modo === 'paralelo' || fase.modo === 'routing';
+
+    if (correrEnParalelo) {
       resultados = await Promise.all(ejecuciones.map((f, i) =>
         f().then(r => ({ codigo: agentesACorrer[i], result: r }))
           .catch(e => ({ codigo: agentesACorrer[i], result: null, error: e.message }))));

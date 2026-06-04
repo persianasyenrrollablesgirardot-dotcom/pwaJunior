@@ -279,6 +279,18 @@ export function Captura() {
               costoTexto={costoTexto} costoMedia={costoMedia}
               chatIdDbProcesado={procesadosPorJid.get(chat.jid)}
               onProcesar={() => setModal({ tipo: 'procesar', chat })}
+              onProcesarNuevos={async () => {
+                try {
+                  const r = await procesarChat(chat.jid);
+                  const partes: string[] = [];
+                  if (r.mensajes_subidos > 0) partes.push(`${r.mensajes_subidos} mensaje(s) nuevo(s)`);
+                  if ((r.reparados ?? 0) > 0) partes.push(`${r.reparados} reparado(s) (evento sin mensaje)`);
+                  setFeedback({ tipo: 'ok', msg: partes.length
+                    ? `✓ ${partes.join(' + ')} — se procesan en breve (de ${r.mensajes_total ?? '?'} en total).`
+                    : 'No hay mensajes nuevos por procesar: ya está todo al día.' });
+                  recargar();
+                } catch (e: any) { setFeedback({ tipo: 'err', msg: e.message }); }
+              }}
               onBloquear={() => setModal({ tipo: 'bloquear', chat })}
               onEliminar={() => setModal({ tipo: 'eliminar', chat })}
               onDesbloquear={async () => {
@@ -429,11 +441,11 @@ function Tag({ color, children }: { color: string; children: React.ReactNode }) 
   return <span style={{ fontSize: 9, fontWeight: 600, color, border: `1px solid ${color}`, padding: '1px 5px', borderRadius: 8 }}>{children}</span>;
 }
 
-function DetalleChat({ chat, mensajes, cargando, costoTexto, costoMedia, chatIdDbProcesado, onProcesar, onBloquear, onDesbloquear, onEliminar }: {
+function DetalleChat({ chat, mensajes, cargando, costoTexto, costoMedia, chatIdDbProcesado, onProcesar, onProcesarNuevos, onBloquear, onDesbloquear, onEliminar }: {
   chat: ChatCaptura; mensajes: MensajeCanonico[]; cargando: boolean;
   costoTexto: number; costoMedia: number;
   chatIdDbProcesado?: number;     // si está seteado, el chat ya fue procesado (existe en Supabase)
-  onProcesar: () => void; onBloquear: () => void; onDesbloquear: () => void; onEliminar: () => void;
+  onProcesar: () => void; onProcesarNuevos: () => void; onBloquear: () => void; onDesbloquear: () => void; onEliminar: () => void;
 }) {
   const costoEst = chat.stats.texto * costoTexto + (chat.stats.imagen + chat.stats.audio + chat.stats.video + chat.stats.documento) * costoMedia;
   const initial = (chat.titulo || '').split(' ').filter(Boolean).map(s => s[0] || '').join('').slice(0, 2).toUpperCase() || '?';
@@ -462,7 +474,10 @@ function DetalleChat({ chat, mensajes, cargando, costoTexto, costoMedia, chatIdD
             <button onClick={onDesbloquear} style={btnSec}>Desbloquear</button>
           ) : yaProcesado ? (
             <>
-              <button onClick={onEliminar} style={btnDanger} title="Borra este chat de Supabase para poder re-procesarlo limpio. La extensión conserva los mensajes en local.">
+              <button onClick={onProcesarNuevos} style={btnPrim} title="Sube y procesa SOLO los mensajes nuevos (los que entraron después del último procesamiento — ej. mientras el Visor estuvo sin conexión). No borra ni reprocesa lo ya hecho.">
+                🔄 Procesar nuevos
+              </button>
+              <button onClick={onEliminar} style={btnDanger} title="Borra este chat de Supabase para re-procesarlo desde cero. La extensión conserva los mensajes en local.">
                 🗑 Eliminar y re-procesar
               </button>
             </>
@@ -696,8 +711,13 @@ function ModalEliminar({ chat, chatIdDb, onClose, onDone, onError }: {
         <button onClick={onClose} style={btnSec}>Cancelar</button>
         <button
           onClick={confirmar}
-          disabled={aplicando || confirmacionTexto.trim().toLowerCase() !== 'eliminar' || cargandoPreview}
-          style={{ ...btnDanger, background: confirmacionTexto.trim().toLowerCase() === 'eliminar' && !aplicando ? 'var(--red)' : 'white', color: confirmacionTexto.trim().toLowerCase() === 'eliminar' && !aplicando ? 'white' : 'var(--red)', opacity: aplicando || confirmacionTexto.trim().toLowerCase() !== 'eliminar' || cargandoPreview ? 0.5 : 1 }}
+          // El preview (cargandoPreview) es SOLO informativo (muestra los counts a
+          // borrar). NO debe gatear la acción destructiva: si el preview se cuelga o
+          // tarda (ej. bajo carga del worker + Realtime), el botón quedaba deshabilitado
+          // para siempre aunque escribieras "eliminar" → no se podía reprocesar.
+          // Fix 2026-06-03: el botón depende solo del texto tipeado + no estar aplicando.
+          disabled={aplicando || confirmacionTexto.trim().toLowerCase() !== 'eliminar'}
+          style={{ ...btnDanger, background: confirmacionTexto.trim().toLowerCase() === 'eliminar' && !aplicando ? 'var(--red)' : 'white', color: confirmacionTexto.trim().toLowerCase() === 'eliminar' && !aplicando ? 'white' : 'var(--red)', opacity: aplicando || confirmacionTexto.trim().toLowerCase() !== 'eliminar' ? 0.5 : 1 }}
         >
           {aplicando ? 'Eliminando…' : '🗑 Eliminar definitivo'}
         </button>

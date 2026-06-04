@@ -92,7 +92,7 @@ export async function obtenerMensajes(jid: string, limit: number = 200): Promise
   return r.data;
 }
 
-export async function procesarChat(jid: string): Promise<{ ok: true; chat_id_db: number; mensajes_subidos: number; eventos_creados: number }> {
+export async function procesarChat(jid: string): Promise<{ ok: true; chat_id_db: number; mensajes_subidos: number; eventos_creados: number; re_sync?: boolean; mensajes_total?: number; reparados?: number }> {
   return await send({ type: 'V3_PROCESS_CHAT', jid });
 }
 

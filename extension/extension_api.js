@@ -283,9 +283,14 @@ async function procesarChat(jid) {
     );
     if (r.ok) chatPrevio = (await r.json())[0] ?? null;
   } catch (_) {}
-  if (chatPrevio && !chatPrevio.deleted_at && chatPrevio.ia_historico_procesado === true) {
-    return { error: 'chat ya procesado anteriormente. Andá al módulo Captura y usá "🗑 Eliminar y re-procesar" si querés volver a subirlo.' };
-  }
+  // Re-sync INCREMENTAL: si el chat ya estaba procesado (vivo) NO lo rechazamos.
+  // Antes acá retornábamos error y obligaba a "🗑 Eliminar y re-procesar" (destructivo);
+  // por eso los mensajes/PDFs que entraban mientras el Visor estaba SIN CONEXIÓN
+  // (apagón → PC apagado) nunca se subían a un chat ya procesado. Ahora subimos todo
+  // lo local de forma idempotente (ignore-duplicates) y SOLO los mensajes nuevos
+  // generan evento_pg NUEVO → el worker procesa lo nuevo sin tocar lo ya procesado
+  // ni borrar nada. (Fix reprocesar 2026-06-03)
+  const esReSync = !!(chatPrevio && !chatPrevio.deleted_at && chatPrevio.ia_historico_procesado === true);
   if (chatPrevio?.deleted_at && typeof self.resucitarChatSoftDeleted === 'function') {
     try {
       await self.resucitarChatSoftDeleted(supabaseKey, chatPrevio.id, chatPrevio.proyecto_id);
@@ -310,27 +315,74 @@ async function procesarChat(jid) {
   // 3. Upsert chat → obtiene chat_id_db (función ya definida en visor_pg_sync.js)
   const chatIdDb = await upsertChat({ supabaseKey, jid, titulo, isGroup });
 
-  // 4. Insertar mensajes (idempotente por UNIQUE chat_id+canal_msg_id)
+  // 3.5 ¿Cuáles mensajes son NUEVOS? Los que todavía NO tienen su evento base
+  //     (agente_origen=null) en este chat. En un re-sync incremental, solo estos
+  //     deben emitir evento NUEVO; lo ya procesado se queda como está. También
+  //     re-emite el evento de un mensaje cuyo evento se hubiera perdido.
+  let yaConEvento = new Set();
+  try {
+    const rEx = await fetch(
+      `${SUPABASE_URL}/rest/v1/evento_pg?chat_id=eq.${chatIdDb}&agente_origen=is.null&select=canal_msg_id`,
+      { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } },
+    );
+    if (rEx.ok) yaConEvento = new Set((await rEx.json()).map(e => e.canal_msg_id));
+  } catch (_) {}
+  const mensajesNuevos = mensajesLocal.filter(m => !yaConEvento.has(m.id));
+
+  // 4. Upsert mensajes — MERGE (no ignore-duplicates): un re-sync no solo inserta lo
+  //    que falta, también CORRIGE filas que quedaron con contenido viejo/incompleto
+  //    (ej. un mensaje que se sincronizó como tipo provisional antes de parsearse bien).
   const mensajesRows = mensajesLocal.map(m => canonicalToMensajeRow(m, chatIdDb));
   const headers = {
     'Content-Type':  'application/json',
     'apikey':        supabaseKey,
     'Authorization': `Bearer ${supabaseKey}`,
-    'Prefer':        'resolution=ignore-duplicates,return=minimal',
+    'Prefer':        'resolution=merge-duplicates,return=minimal',
   };
+  const hGet = { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` };
   // Subir en chunks de 500 para evitar timeouts en chats grandes
   const CHUNK = 500;
   for (let i = 0; i < mensajesRows.length; i += CHUNK) {
     const chunk = mensajesRows.slice(i, i + CHUNK);
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/mensajes`, { method: 'POST', headers, body: JSON.stringify(chunk) });
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/mensajes?on_conflict=chat_id,canal_msg_id`, { method: 'POST', headers, body: JSON.stringify(chunk) });
     if (!r.ok && r.status !== 409) {
       const err = await r.text();
       throw new Error(`insert mensajes ${r.status}: ${err.slice(0, 200)}`);
     }
   }
 
-  // 5. Insertar evento_pg para CADA mensaje (estado=NUEVO → worker pipeline lo identificará)
-  const eventosRows = mensajesLocal.map(m => canonicalToEventoRow(m, chatIdDb));
+  // 4.5 SELF-HEALING — reparar mensajes que tienen EVENTO pero NO su fila en `mensajes`.
+  //     Bug visto en media SALIENTE (PDFs/audios que envía Jhon): el evento se creaba
+  //     pero la fila del mensaje no aterrizaba en el batch → el chat quedaba "procesado"
+  //     pero SIN contenido, y el reprocesar no lo recuperaba (el evento ya existía, así
+  //     que no contaba como nuevo). Acá verificamos qué filas locales NO quedaron en
+  //     Supabase, las reinsertamos, y reseteamos su evento base a NUEVO para que el
+  //     worker las re-sintetice ahora que la fila SÍ está. Así el próximo apagón se cura solo.
+  let reparados = 0;
+  try {
+    const rChk = await fetch(`${SUPABASE_URL}/rest/v1/mensajes?chat_id=eq.${chatIdDb}&select=canal_msg_id`, { headers: hGet });
+    if (rChk.ok) {
+      const presentes = new Set((await rChk.json()).map(x => x.canal_msg_id));
+      const faltantes = mensajesRows.filter(row => !presentes.has(row.canal_msg_id));
+      if (faltantes.length > 0) {
+        const rRep = await fetch(`${SUPABASE_URL}/rest/v1/mensajes?on_conflict=chat_id,canal_msg_id`, { method: 'POST', headers, body: JSON.stringify(faltantes) });
+        if (rRep.ok || rRep.status === 409) {
+          reparados = faltantes.length;
+          for (const row of faltantes) {
+            await fetch(`${SUPABASE_URL}/rest/v1/evento_pg?chat_id=eq.${chatIdDb}&agente_origen=is.null&canal_msg_id=eq.${encodeURIComponent(row.canal_msg_id)}`, {
+              method: 'PATCH', headers,
+              body: JSON.stringify({ estado: 'NUEVO', ts_procesado: null, procesando_por: null, procesando_hasta: null }),
+            });
+          }
+          console.log(`[VPG-API] self-healing: ${reparados} mensaje(s) con evento sin fila → reinsertados + reprocesando`);
+        }
+      }
+    }
+  } catch (e) { console.warn('[VPG-API] self-healing falló:', e?.message); }
+
+  // 5. Insertar evento_pg SOLO para los mensajes nuevos (estado=NUEVO → el worker
+  //    pipeline los identifica y procesa). Los ya procesados no se re-emiten.
+  const eventosRows = mensajesNuevos.map(m => canonicalToEventoRow(m, chatIdDb));
   for (let i = 0; i < eventosRows.length; i += CHUNK) {
     const chunk = eventosRows.slice(i, i + CHUNK);
     const r = await fetch(`${SUPABASE_URL}/rest/v1/evento_pg`, { method: 'POST', headers, body: JSON.stringify(chunk) });
@@ -359,8 +411,11 @@ async function procesarChat(jid) {
   return {
     ok: true,
     chat_id_db: chatIdDb,
-    mensajes_subidos: mensajesLocal.length,
-    eventos_creados: eventosRows.length,
+    re_sync: esReSync,                         // true = el chat ya estaba procesado, esto fue incremental
+    mensajes_subidos: mensajesNuevos.length,   // mensajes NUEVOS subidos (los que importan)
+    mensajes_total: mensajesLocal.length,      // total re-sincronizado (idempotente)
+    reparados,                                 // filas que faltaban (evento sin mensaje) y se curaron
+    eventos_creados: eventosRows.length,       // = mensajes nuevos que el worker procesará
   };
 }
 
