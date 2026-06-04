@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Visor PG · Captura WhatsApp",
-  "version": "5.1.0",
+  "version": "5.1.1",
   "description": "Visor PG — captura WhatsApp local. Sin sync automático: el Visor decide qué chat procesar (procesa = sube + IA en un click).",
   "permissions": [
     "storage",

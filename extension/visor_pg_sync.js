@@ -380,6 +380,15 @@ function canonicalToMensajeRow(m, chatIdDb) {
       type_original:      m.type,
       subtype:            m.subtype || null,
       sys_raw:            m.sys_raw || null,
+      // Claves de media → descarga+descifrado SERVER-SIDE (worker media_downloader).
+      // El extractor de la extensión a veces NO baja el media SALIENTE
+      // (download_status='failed'); con media_key+direct_path el worker lo descarga
+      // del CDN de WhatsApp y lo descifra (HKDF + AES-256-CBC), sin depender de la
+      // extensión ni del caché del navegador. Solo se incluyen si hay media.
+      media_key:          m.media?.media_key || null,
+      direct_path:        m.media?.direct_path || null,
+      mms_url:            m.media?.mms_url || null,
+      media_size:         m.media?.size || null,
     },
     ts_canal:       tsCanal,
   };

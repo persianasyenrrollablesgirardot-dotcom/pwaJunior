@@ -60,6 +60,7 @@ import { cascadaCierreChecklist } from '../agentes/sintesis/cascada.js';
 import { cicloTarjetas } from '../agentes/sintesis/tarjeta_engine.js';
 import { cicloCartera } from '../agentes/batch/cartera.js';
 import { cicloPdfWorker } from '../agentes/batch/pdf_worker.js';
+import { cicloMediaDescarga } from '../agentes/batch/media_downloader.js';
 import { fusionarPersonas } from '../identidad/fusionar_personas.js';
 import { cicloFusionPorTelefono } from '../identidad/fusion_telefono.js';
 
@@ -1339,6 +1340,16 @@ async function main() {
     .catch(e => console.error('[V2/PDF]', e?.message));
   setTimeout(dispararPdf, 45_000);
   setInterval(dispararPdf, 90_000);
+
+  // Descarga+descifrado server-side de media SALIENTE que la extensión no bajó
+  // (download_status='failed'): usa media_key+direct_path de mensajes.metadata
+  // para bajar del CDN de WhatsApp y descifrar. Independiente de la extensión y
+  // del caché del navegador. Corre seguido porque el token del direct_path expira.
+  const dispararMediaDL = () => cicloMediaDescarga(sb, m => console.log('[V2/MEDIA-DL]', m))
+    .then(r => { if (r.recuperados || r.fallidos) console.log(`[V2/MEDIA-DL] ${r.recuperados} recuperados, ${r.fallidos} fallidos (${r.pendientes} pendientes)`); })
+    .catch(e => console.error('[V2/MEDIA-DL]', e?.message));
+  setTimeout(dispararMediaDL, 60_000);
+  setInterval(dispararMediaDL, 120_000);
 
   setInterval(() => console.log(`[V2] stats: ${JSON.stringify(stats)}`), STATS_INTERVAL_MS);
 
