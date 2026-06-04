@@ -516,6 +516,27 @@
     }
   }
 
+  // ─── Auto-recuperación de "Extension context invalidated" ────────
+  // Cuando la extensión se recarga (botón ↻ o bump de versión del manifest),
+  // ESTE content script queda HUÉRFANO: su chrome.runtime apunta a un background
+  // que ya no existe y todo sendMessage tira "Extension context invalidated".
+  // No hay forma de reconectar el content script viejo → la única salida es
+  // recargar la página para que Chrome inyecte uno fresco (lo mismo que un F5
+  // manual). Lo hacemos AUTOMÁTICO, con guard anti-loop (una sola recarga).
+  let _ctxRecuperando = false;
+  function contextoVivo() {
+    // chrome.runtime.id queda undefined cuando el contexto fue invalidado.
+    try { return !!(chrome.runtime && chrome.runtime.id); } catch { return false; }
+  }
+  function recuperarSiContextoInvalidado(origen, errMsg) {
+    if (_ctxRecuperando) return;
+    const invalidado = !contextoVivo() || /context invalidated/i.test(errMsg || '');
+    if (!invalidado) return;
+    _ctxRecuperando = true;
+    console.warn(`[WS-CONTENT-V2] contexto invalidado (${origen}) → recargando WhatsApp Web para reconectar con la extensión`);
+    setTimeout(() => { try { location.reload(); } catch {} }, 2000);
+  }
+
   // ─── Dispatch al background ───────────────────────────────────────
   function dispatchBatch(msgs) {
     if (!msgs.length) return;
@@ -526,6 +547,7 @@
       });
     } catch (e) {
       console.warn('[WS-CONTENT-V2] dispatchBatch falló:', e.message);
+      recuperarSiContextoInvalidado('dispatchBatch', e.message);
     }
   }
 
@@ -1211,6 +1233,11 @@
     // Sincronización periódica de metadata de chats.
     setTimeout(syncChatMetadataToBackground, 5000);
     setInterval(syncChatMetadataToBackground, 20000);
+
+    // Auto-recuperación si la extensión se recargó y este content script quedó
+    // huérfano: chequeo periódico → recarga sola la pestaña (no más "Extension
+    // context invalidated" pegado ni F5 manual cada vez).
+    setInterval(() => recuperarSiContextoInvalidado('check-periodico'), 15000);
 
     // Listener para ticks del SW. Cuando WA Web está en background, los
     // setInterval se throttlan agresivamente (Chrome los corre cada minuto).
