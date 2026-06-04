@@ -1233,6 +1233,25 @@
         sendResponse({ ok: true });
         return false;
       }
+      if (msg?.type === 'V2_RESET_SWEEP') {
+        // Re-barrer el historial completo desde cero (lo dispara el botón
+        // "Re-barrer historial" del Visor vía V3_RESET_SWEEP). Resetea los
+        // cursores en memoria + borra el estado persistido, y dispara un ciclo:
+        // con firstSweepDone=false y lastProcessedRowId=0, processCycle hace el
+        // barrido inicial (1000 recientes) y backfillCycle baja por el resto.
+        // No requiere F5 — el content script vivo se reinicia solo.
+        lastProcessedRowId = 0;
+        lastBackfillRowId  = 0;
+        firstSweepDone     = false;
+        backfillExhausted  = false;
+        chrome.storage.local.remove(STATE_KEY, () => {
+          processCycle();
+          setTimeout(() => backfillCycle(), 1500);
+        });
+        console.log('[WS-CONTENT-V2] 🔄 V2_RESET_SWEEP: estado de barrido reseteado → re-barriendo historial');
+        sendResponse({ ok: true });
+        return false;
+      }
       if (msg?.type === 'V2_OPEN_AND_SCROLL_CHAT' && msg.jid) {
         openAndScrollChat(msg.jid, msg.name || null, msg.phoneNumber || null)
           .then(r => sendResponse(r))

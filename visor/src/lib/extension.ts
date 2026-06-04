@@ -109,6 +109,13 @@ export async function listarBloqueados(): Promise<string[]> {
   return r.data;
 }
 
+// Re-barrer el historial completo de WhatsApp: resetea el estado de barrido del
+// content script (ws_v2_state) para que vuelva a capturar TODO el historial, no
+// solo tiempo real. Útil cuando Captura muestra los chats "sin mensajes".
+export async function reBarrerHistorial(): Promise<{ ok: boolean; avisados: number; nota: string }> {
+  return await send({ type: 'V3_RESET_SWEEP' });
+}
+
 // Prende/apaga el modo IA tiempo real en la extensión (procesamiento automático).
 export async function setRealtimeExtension(enabled: boolean): Promise<{ ok: boolean; realtime: boolean }> {
   return await send({ type: 'V3_SET_REALTIME', enabled });

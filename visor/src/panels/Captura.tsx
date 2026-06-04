@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { chequearExtension, listarChats, obtenerMensajes, procesarChat, bloquearChatExt, desbloquearChatExt, type ChatCaptura, type MensajeCanonico } from '../lib/extension';
+import { chequearExtension, listarChats, obtenerMensajes, procesarChat, bloquearChatExt, desbloquearChatExt, reBarrerHistorial, type ChatCaptura, type MensajeCanonico } from '../lib/extension';
 import { fetchConfiguracion, eliminarChatProcesado, previewEliminarChat, type PreviewEliminarChat, type ResultadoEliminarChat } from '../lib/queries';
 import { parseQuery, matchContacto } from '../lib/busqueda';
 import { supabase } from '../lib/supabase';
@@ -23,6 +23,7 @@ export function Captura() {
   const [seleccionado, setSeleccionado] = useState<string | null>(null);
   const [mensajes, setMensajes] = useState<MensajeCanonico[]>([]);
   const [cargandoMsgs, setCargandoMsgs] = useState(false);
+  const [reBarriendo, setReBarriendo] = useState(false);
   const [filtro, setFiltro] = useState<FiltroEstado>('crudos');
   const [orden, setOrden] = useState<Orden>('reciente');   // F1.19 fix aplicado: usa chatT real de WA Web
   const [busqueda, setBusqueda] = useState('');
@@ -124,6 +125,23 @@ export function Captura() {
       });
   }
 
+  // Re-barrer historial: resetea el estado de barrido de la extensión para que
+  // vuelva a capturar TODO el historial (no solo tiempo real). Útil cuando los
+  // chats aparecen "sin mensajes". Recarga la lista a los ~90s, cuando el
+  // content script ya repobló la captura local.
+  async function reBarrer() {
+    setReBarriendo(true);
+    try {
+      const r = await reBarrerHistorial();
+      setFeedback({ tipo: 'ok', msg: r.nota || 'Re-barriendo el historial de WhatsApp…' });
+      setTimeout(() => { recargar(); if (seleccionado) obtenerMensajes(seleccionado, 300).then(setMensajes).catch(() => {}); }, 90_000);
+    } catch (e: any) {
+      setFeedback({ tipo: 'err', msg: 'No se pudo re-barrer: ' + e.message + ' (¿WhatsApp Web abierto?)' });
+    } finally {
+      setReBarriendo(false);
+    }
+  }
+
   // Estadísticas globales
   const stats = useMemo(() => {
     const totalCaptura = chats.length;
@@ -200,7 +218,13 @@ export function Captura() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Captura</h1>
           <span style={{ fontSize: 10, padding: '2px 8px', background: 'var(--accent-soft)', color: 'var(--accent)', borderRadius: 10, fontWeight: 600, textTransform: 'uppercase' }}>local · IndexedDB extensión</span>
-          <button onClick={recargar} style={{ ...btnSec, marginLeft: 'auto' }}>↻ Recargar</button>
+          <button
+            onClick={reBarrer}
+            disabled={reBarriendo}
+            style={{ ...btnSec, marginLeft: 'auto', opacity: reBarriendo ? 0.6 : 1 }}
+            title="Si los chats aparecen SIN mensajes (solo entra tiempo real), esto resetea el estado de barrido de la extensión y vuelve a capturar TODO el historial de WhatsApp. Tarda 1-2 min."
+          >{reBarriendo ? '🔄 Re-barriendo…' : '🔄 Re-barrer historial'}</button>
+          <button onClick={recargar} style={btnSec}>↻ Recargar</button>
         </div>
         <p style={{ margin: '4px 0 16px', fontSize: 12, color: 'var(--text-muted)' }}>
           Todos los chats que la extensión sniffeó. Los datos están <strong>en local</strong> hasta que vos elijas <strong>Procesar</strong> (sube a Supabase + IA en un click) o <strong>Bloquear</strong>.

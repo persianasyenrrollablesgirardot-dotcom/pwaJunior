@@ -25,7 +25,7 @@
 var SUPABASE_URL = 'https://olububjdvboiqgmihsmk.supabase.co';
 
 
-const VISOR_API_VERSION = '5.0.0';
+const VISOR_API_VERSION = '5.1.0';   // 5.1.0: + V3_RESET_SWEEP (re-barrer historial)
 
 // Expresiones regex para detectar candidatos a no-cliente
 const PATRONES_NO_CLIENTE = [
@@ -122,6 +122,10 @@ chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => 
 
         case 'V3_WA_STATUS':
           sendResponse(await getWaStatus());
+          return;
+
+        case 'V3_RESET_SWEEP':
+          sendResponse(await resetSweep());
           return;
 
         default:
@@ -890,6 +894,38 @@ async function getWaStatus() {
     } catch (_) { /* content script no responde en esta pestaña: probar la siguiente */ }
   }
   return { ok: true, conectado: false, motivo: 'sin_respuesta', detalle: 'WhatsApp Web abierto pero no responde (recargá la pestaña)' };
+}
+
+// ─── V3_RESET_SWEEP — re-barrer el historial completo de WhatsApp ──────
+//
+// El content script guarda su estado de barrido en chrome.storage.local
+// (key 'ws_v2_state' = {lastProcessedRowId, lastBackfillRowId, backfillExhausted}).
+// Cuando queda con backfillExhausted=true / lastProcessedRowId alto, SOLO captura
+// tiempo real y no rehace el historial → los chats se ven "sin mensajes" en
+// Captura (que lee de la IndexedDB local de la extensión, no de Supabase).
+// Esto pasa si la captura local se vacía/desincroniza pero el estado dice "ya
+// barrí todo" (visto 2026-06-03: messages local en 104 vs ~26k reales).
+//
+// Este handler borra ese estado y avisa al content script de cada pestaña de
+// WhatsApp Web para que resetee su estado EN MEMORIA y re-barra TODO en vivo,
+// sin necesidad de F5. Reemplaza el fix manual (editar el LevelDB del perfil).
+async function resetSweep() {
+  await chrome.storage.local.remove('ws_v2_state');
+  let avisados = 0;
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://web.whatsapp.com/*' });
+    for (const tab of tabs) {
+      try { await chrome.tabs.sendMessage(tab.id, { type: 'V2_RESET_SWEEP' }); avisados++; } catch (_) { /* content script no responde en esa pestaña */ }
+    }
+  } catch (_) { /* sin permiso de tabs o sin pestañas */ }
+  console.log('[VPG-API] V3_RESET_SWEEP: ws_v2_state borrado · content scripts avisados=' + avisados);
+  return {
+    ok: true,
+    avisados,
+    nota: avisados
+      ? 'Re-barriendo el historial de WhatsApp… aparece en 1-2 min en Captura.'
+      : 'Estado reseteado. Abrí o recargá la pestaña de WhatsApp Web para re-barrer.',
+  };
 }
 
 console.log('[VPG-API] cargado v' + VISOR_API_VERSION);
