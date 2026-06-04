@@ -257,6 +257,30 @@ export class IdentidadService {
 
   private async crearPersonaDesdeJid(jid: string, titulo: string | null, ambito: string): Promise<{ id: number; nombre: string | null }> {
     const tel = jidToTelefonoE164(jid);
+    // ANTES de crear: ¿existe una persona SOFT-DELETED con este mismo jid?
+    // matchExactoPersona excluye borradas (deleted_at IS NULL), así que si una
+    // persona se borró SIN mover sus datos (chat/checklist/citas siguen colgando
+    // de ella), el matcher caería acá y crearía una persona NUEVA vacía → el
+    // historial queda huérfano bajo la borrada y la activa nace sin nada. Ese fue
+    // el bug del par #251(borrada, con datos)/#265(activa, vacía) de Jhon Guerrero
+    // (2026-06-03). Fix: REVIVIR la borrada (la más antigua = la original con
+    // historial) en vez de crear una nueva. El índice único parcial no se viola
+    // porque estamos en el create path: no hay ninguna activa con este jid.
+    if (jid) {
+      const { data: borrada } = await this.sb.from('personas')
+        .select('id, nombre')
+        .eq('jid', jid)
+        .not('deleted_at', 'is', null)
+        .order('id', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (borrada) {
+        await this.sb.from('personas')
+          .update({ deleted_at: null, ambito_principal: ambito, sintesis_pendiente: true })
+          .eq('id', borrada.id);
+        return borrada;
+      }
+    }
     const row = {
       nombre:           titulo || tel || jid,
       jid,

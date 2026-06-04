@@ -162,6 +162,7 @@ export async function cicloPdfWorker(sb: SupabaseClient, log: (m: string) => voi
   const pendientes = (msgs ?? []).filter((m: any) => {
     const md = m.metadata || {};
     if (md.pdf_via) return false;                          // ya recuperado por el worker
+    if (md.media_inexistente) return false;                // documento saliente sin media capturada (no hay nada que extraer)
     const tried = md.pdf_worker_tried ? Date.parse(md.pdf_worker_tried) : 0;
     if (tried && ahora - tried < TRIED_TTL_MS) return false;
     const t = md.ai_text || '';
