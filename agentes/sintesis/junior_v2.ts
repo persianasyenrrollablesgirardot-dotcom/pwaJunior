@@ -220,7 +220,10 @@ export async function responderJuniorTarjeta(
   }
 
   // ── Paso 1: ruteo ──────────────────────────────────────────────────────
-  const hoyISO = new Date().toISOString().slice(0, 10);   // para resolver fechas relativas de citas
+  // HOY en zona Colombia. ANTES usaba toISOString() = UTC → de tarde/noche (UTC-5)
+  // ya marcaba el día siguiente y Junior alucinaba: "agendamientos de hoy" devolvía
+  // los de mañana. Fix (2026-06-05): America/Bogota, consistente con el resto.
+  const hoyISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
   const ruteo: ChatMessage[] = [
     {
       role: 'system',
@@ -317,9 +320,7 @@ export async function responderJuniorTarjeta(
         `  • "moveme esta tarea a otro contacto" → no puedo mover, pero PUEDO crearla en el nuevo y BORRAR la del viejo (si origen=junior) o dejar nota CANCELADA si la creó el agente.\n` +
         `  • "marcala como hecha / completada / dale check" → no puedo marcar tareas como hechas. Si fue creada por mí (origen=junior) puedo BORRARLA. Si la creó el agente, te dejo nota "Completada el <fecha>" o vos le hacés check en la UI.\n` +
         `  • "editá esta tarea / cambiale el título" → no puedo editar. Pero PUEDO borrar la vieja (si origen=junior) y crear una nueva con el título correcto, lo hago en un solo paso.\n` +
-        `  • "agendá visita el <fecha> a las <hora>" / "crea agendamiento" → no puedo escribir en el calendario. Andá al panel Agendamientos y agregala ahí (botón 📅 Agendar).\n` +
-        `  • "borrá esta cita / cancelá agendamiento" → no puedo. Andá a Agendamientos y borrala desde ahí.\n` +
-        `  • "editá esta cita" → no puedo. Tocá ✏️ en la cita del panel Agendamientos.\n` +
+        `  • "editá esta cita / cambiá fecha u hora" → no edito en el lugar, pero PUEDO cancelarla y crear una nueva con los datos correctos (cancelar_agendamiento + nuevo_agendamiento) en un solo paso.\n` +
         `  • "creá un contacto nuevo" → no puedo crear contactos desde cero. Los contactos vienen automáticos del WhatsApp. Si es alguien sin WhatsApp registrado, dejala como tarea_transversal con la descripción.\n` +
         `  • "borrá este contacto / este cliente" → no puedo. Andá al panel del cliente y archivalo ahí.\n` +
         `  • "mandale un mensaje / WhatsApp a X" → no puedo enviar mensajes por vos. Te puedo abrir el link de WhatsApp con clic en el teléfono.\n` +
@@ -576,6 +577,9 @@ export async function responderJuniorTarjeta(
     const { error } = await sb.from('agendamientos').insert({
       persona_id: personaId, titulo: String(accNuevoAg.titulo).trim().slice(0, 200),
       tipo, fecha: accNuevoAg.fecha, hora_inicio: hora, origen: 'junior',
+      // Jhon agendó explícitamente: compromiso fijo. Instalaciones/visitas → protegido
+      // (la cascada de cierre no las borra).
+      protegido: (tipo === 'instalacion' || tipo === 'visita_medidas'),
     } as any);
     if (error) return { respuesta: `Quise agendar pero hubo un error: ${error.message}`, tarjetas_usadas: [accNuevoAg.chat_id], via_indice: false, costo_usd: costo };
     return { respuesta: `Listo, agendé «${String(accNuevoAg.titulo).trim()}» con ${nombre} para el ${accNuevoAg.fecha}${hora ? ` a las ${accNuevoAg.hora}` : ''}. Lo ves en el calendario.`, tarjetas_usadas: [accNuevoAg.chat_id], via_indice: false, costo_usd: costo };

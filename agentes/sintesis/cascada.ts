@@ -60,14 +60,19 @@ export async function cascadaCierreChecklist(
     .select('id');
   if (errT) throw new Error(`cascada tareas persona ${personaId}: ${errT.message}`);
 
-  // 3. Cancelar (soft-delete) TODOS los agendamientos de la persona — pasados Y
-  //    futuros. Caso cerrado = sin agenda vigente. (Antes filtraba fecha>=hoy →
-  //    una instalación con fecha pasada quedaba visible en un caso cerrado.
-  //    Bug "Instalación casa de Maritza Alameda" 2026-05-31.)
+  // 3. Cancelar (soft-delete) los agendamientos de la persona — pasados Y futuros.
+  //    Caso cerrado = sin agenda vigente. (Antes filtraba fecha>=hoy → una
+  //    instalación con fecha pasada quedaba visible en un caso cerrado. Bug
+  //    "Instalación casa de Maritza Alameda" 2026-05-31.)
+  //    EXCEPCIÓN (2026-06-05, pedido de Jhon): los agendamientos PROTEGIDOS son
+  //    compromisos fijos reales (ej. instalación agendada) que pueden generar
+  //    sub-tareas; cerrar el caso (o completar una sub-tarea que lo cierre) NO
+  //    debe borrar el compromiso fijo. La cascada los respeta.
   const { data: agsUpd, error: errA } = await sb.from('agendamientos')
     .update({ deleted_at: ahoraIso } as any)
     .eq('persona_id', personaId)
     .is('deleted_at', null)
+    .neq('protegido', true)
     .select('id');
   if (errA) throw new Error(`cascada agendamientos persona ${personaId}: ${errA.message}`);
 

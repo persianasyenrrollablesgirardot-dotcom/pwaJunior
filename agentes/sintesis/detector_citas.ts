@@ -21,8 +21,9 @@ const TIPOS: TipoAgenda[] = ['visita_medidas', 'instalacion', 'reunion_proveedor
 
 interface CitaDetectada {
   titulo: string;
-  fecha: string;       // YYYY-MM-DD
-  hora: string;        // HH:MM
+  fecha: string;       // YYYY-MM-DD ('' si pendiente)
+  hora: string;        // HH:MM ('' si pendiente)
+  pendiente: boolean;  // true = por agendar (sin fecha concreta)
   tipo: TipoAgenda;
   lugar: string;
 }
@@ -74,22 +75,28 @@ export async function detectarCitasUniversales(
       role: 'system',
       content:
         `Sos el DETECTOR DE CITAS del Visor PG. Tu único trabajo: leer una conversación entre Jhon y ${nombreContacto} y extraer ` +
-        `agendamientos concretos (visitas, reuniones, encuentros, llamadas con hora) que estén CONFIRMADOS o ACORDADOS. NO inventes citas.\n` +
-        `HOY es ${hoy} (zona America/Bogota). Resolvé fechas relativas contra HOY:\n` +
-        `  • "mañana" → ${new Date(Date.now() + 86400_000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })}\n` +
-        `  • "pasado mañana" → ${new Date(Date.now() + 2 * 86400_000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })}\n` +
-        `  • "el lunes/martes/...", "este sábado", "próxima semana" — calculá vos.\n` +
-        `Una cita está CONFIRMADA si: una parte la propone Y la otra confirma ("ok", "dale", "perfecto", "confirmado", "listo", emoji 👍, etc) ` +
+        `agendamientos (visitas, reuniones, encuentros, instalaciones) que estén CONFIRMADOS o ACORDADOS. NO inventes citas.\n` +
+        `\n` +
+        `⚠ FECHAS — REGLA CRÍTICA: resolvé las fechas relativas ("mañana", "el lunes", "pasado mañana", "el sábado") SIEMPRE contra ` +
+        `LA FECHA DEL MENSAJE donde aparece la expresión, NUNCA contra "hoy". Cada línea trae su fecha entre corchetes [YYYY-MM-DD HH:MM]. ` +
+        `Ej: si un mensaje del [2026-05-28] dice "nos vemos mañana", la fecha es 2026-05-29 (no la de hoy). Esto es vital: el chat puede ` +
+        `reprocesarse días después y NO debe correrse la fecha. (Solo de referencia, hoy es ${hoy} zona America/Bogota.)\n` +
+        `\n` +
+        `FIJA vs PENDIENTE:\n` +
+        `  • FIJA = hay fecha CONCRETA acordada (día explícito o relativo resoluble). Devolvé "fecha":"YYYY-MM-DD", "pendiente":false.\n` +
+        `  • PENDIENTE = hay intención/acuerdo de agendar pero SIN fecha concreta ("hay que coordinar la visita", "te aviso cuándo", ` +
+        `"la semana que viene vemos", "cuando puedas pasás"). Devolvé "fecha":"", "hora":"", "pendiente":true. NO le inventes una fecha.\n` +
+        `\n` +
+        `Una cita está CONFIRMADA si: una parte la propone Y la otra confirma ("ok", "dale", "perfecto", "confirmado", "listo", 👍, etc) ` +
         `O Jhon mismo dice "agendá X" / "anotame X". Si solo hubo propuesta sin confirmación, NO la incluyas.\n` +
         `Tipo de cita: instalacion, visita_medidas, reunion_proveedor, personal (encuentros personales/familia), otro.\n` +
         `\n` +
         `⚠ TÍTULO DESCRIPTIVO Y ESPECÍFICO — NO genérico:\n` +
         `Mal: "Encuentro con cliente", "Cita", "Reunión", "Visita programada".\n` +
         `Bien: "Encuentro con ${nombreContacto}", "Instalación cortinas en casa de ${nombreContacto}", "${nombreContacto} viene al local", ` +
-        `"Visita técnica medidas ${nombreContacto}". USÁ el nombre real del contacto en el título — la cita será visible para Jhon y ` +
-        `debe poder identificar a quién se refiere de un vistazo.\n` +
+        `"Visita técnica medidas ${nombreContacto}". USÁ el nombre real del contacto en el título.\n` +
         `Si NO hay citas claras, devolvé citas:[].\n` +
-        `Devolvé SOLO JSON: {"citas": [{"titulo": "qué (≤80 chars, INCLUÍ '${nombreContacto}')", "fecha": "YYYY-MM-DD", "hora": "HH:MM (24h)", "tipo": "personal|otro|...", "lugar": "si lo hay"}]}`,
+        `Devolvé SOLO JSON: {"citas": [{"titulo": "qué (≤80 chars, INCLUÍ '${nombreContacto}')", "fecha": "YYYY-MM-DD o vacío si pendiente", "hora": "HH:MM (24h) o vacío", "pendiente": true|false, "tipo": "personal|otro|...", "lugar": "si lo hay"}]}`,
     },
     { role: 'user', content: `CONVERSACIÓN (últimos mensajes, orden cronológico):\n${conversacion}` },
   ];
@@ -100,38 +107,58 @@ export async function detectarCitasUniversales(
   let citas: CitaDetectada[] = [];
   try {
     const obj = JSON.parse(r.contenido);
-    citas = (Array.isArray(obj.citas) ? obj.citas : []).map((x: any) => ({
-      titulo: String(x.titulo ?? '').trim().slice(0, 200),
-      fecha: /^\d{4}-\d{2}-\d{2}$/.test(x.fecha ?? '') ? x.fecha : '',
-      hora: /^\d{1,2}:\d{2}/.test(x.hora ?? '') ? String(x.hora).slice(0, 5).padStart(5, '0') : '09:00',
-      tipo: TIPOS.includes(x.tipo) ? x.tipo : 'otro',
-      lugar: String(x.lugar ?? '').trim(),
-    })).filter((c: CitaDetectada) => c.titulo && c.fecha);
+    citas = (Array.isArray(obj.citas) ? obj.citas : []).map((x: any) => {
+      const fechaOk = /^\d{4}-\d{2}-\d{2}$/.test(x.fecha ?? '');
+      const pendiente = !!x.pendiente || !fechaOk;   // sin fecha válida → pendiente por agendar
+      return {
+        titulo: String(x.titulo ?? '').trim().slice(0, 200),
+        fecha: pendiente ? '' : x.fecha,
+        // Fija sin hora explícita: 09:00 por defecto. Pendiente: sin hora.
+        hora: pendiente ? '' : (/^\d{1,2}:\d{2}/.test(x.hora ?? '') ? String(x.hora).slice(0, 5).padStart(5, '0') : '09:00'),
+        pendiente,
+        tipo: TIPOS.includes(x.tipo) ? x.tipo : 'otro',
+        lugar: String(x.lugar ?? '').trim(),
+      };
+    }).filter((c: CitaDetectada) => c.titulo && (c.fecha || c.pendiente));   // ya NO se descartan los pendientes
   } catch {
     return result;
   }
   result.citas_detectadas = citas.length;
   if (!citas.length) return result;
 
-  // 4. Dedup: traer agendamientos existentes de esta persona (activos) y descartar
-  //    cualquier cita detectada que choque por (fecha, hora). No tocamos lo que
-  //    ya está — el detector solo AGREGA lo nuevo, jamás pisa.
+  // 4. Dedup contra lo que ya existe (activo) de esta persona. El detector solo
+  //    AGREGA lo nuevo, jamás pisa. Las FIJAS se deduplican por (fecha, hora);
+  //    las PENDIENTES por título normalizado (una persona no debe acumular 5
+  //    "coordinar visita" idénticos).
   const { data: existentes } = await sb.from('agendamientos')
-    .select('fecha, hora_inicio, titulo, origen').eq('persona_id', personaId).is('deleted_at', null);
-  const yaAgendado = new Set((existentes ?? []).map((a: any) =>
-    `${a.fecha}|${(a.hora_inicio ?? '').slice(0, 5)}`));
+    .select('fecha, hora_inicio, titulo, pendiente').eq('persona_id', personaId).is('deleted_at', null);
+  const norm = (s: string) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const fijasYa = new Set((existentes ?? []).filter((a: any) => a.fecha).map((a: any) => `${a.fecha}|${(a.hora_inicio ?? '').slice(0, 5)}`));
+  const pendsYa = new Set((existentes ?? []).filter((a: any) => a.pendiente).map((a: any) => norm(a.titulo)));
 
   const nuevas = citas.filter(c => {
+    if (c.pendiente) {
+      if (pendsYa.has(norm(c.titulo))) { result.citas_saltadas_por_dedup++; return false; }
+      pendsYa.add(norm(c.titulo));
+      return true;
+    }
     const k = `${c.fecha}|${c.hora}`;
-    if (yaAgendado.has(k)) { result.citas_saltadas_por_dedup++; return false; }
+    if (fijasYa.has(k)) { result.citas_saltadas_por_dedup++; return false; }
+    fijasYa.add(k);
     return true;
   });
   if (!nuevas.length) return result;
 
-  // 5. INSERT con origen='detector_citas' (no pisa nada porque dedup arriba).
+  // 5. INSERT con origen='detector_citas'. Las instalaciones/visitas FIJAS se
+  //    marcan `protegido` (compromisos de campo que la cascada de cierre no debe
+  //    borrar). Los pendientes van con fecha/hora NULL + pendiente=true.
   const { error } = await sb.from('agendamientos').insert(nuevas.map(c => ({
-    persona_id: personaId, titulo: c.titulo, tipo: c.tipo, fecha: c.fecha,
-    hora_inicio: c.hora, direccion: c.lugar || null, origen: 'detector_citas',
+    persona_id: personaId, titulo: c.titulo, tipo: c.tipo,
+    fecha: c.pendiente ? null : c.fecha,
+    hora_inicio: c.pendiente ? null : c.hora,
+    direccion: c.lugar || null, origen: 'detector_citas',
+    pendiente: c.pendiente,
+    protegido: !c.pendiente && (c.tipo === 'instalacion' || c.tipo === 'visita_medidas'),
   })) as any);
   if (!error) result.citas_insertadas = nuevas.length;
   return result;

@@ -200,14 +200,20 @@ export async function reconstruirTarjeta(
   // si Jhon ya reprogramó una cita (mismo persona + fecha + hora), NO emito otra
   // del agente para no duplicar visualmente.
   await sb.from('agendamientos').delete().eq('persona_id', personaId).eq('origen', 'agente_v2');
-  const { data: manuales } = await sb.from('agendamientos')
-    .select('fecha, hora_inicio').eq('persona_id', personaId).eq('origen', 'manual_edit');
-  const yaManual = new Set((manuales ?? []).map((m: any) => `${m.fecha}|${m.hora_inicio ?? ''}`));
+  // Dedup contra TODO lo que NO es agente_v2 (detector_citas, manual_edit, junior,
+  // manual): si la cita ya existe por OTRA fuente, agente_v2 NO la duplica. Antes
+  // solo miraba manual_edit → re-creaba lo que detector_citas ya tenía (bug de
+  // duplicados William/Sandra 2026-06-05). Hora normalizada a HH:MM ('14:00:00'
+  // del tipo time vs '14:00' del agente no matcheaban).
+  const { data: otrosAg } = await sb.from('agendamientos')
+    .select('fecha, hora_inicio').eq('persona_id', personaId).neq('origen', 'agente_v2').is('deleted_at', null);
+  const yaExiste = new Set((otrosAg ?? []).map((m: any) => `${m.fecha}|${String(m.hora_inicio ?? '').slice(0, 5)}`));
   const conFecha = age.agendamientos.filter(x => x.fecha);
   const vistos = new Set<string>();
   const dedupAge = conFecha.filter(x => {
-    if (yaManual.has(`${x.fecha}|${x.hora ?? ''}`)) return false;
-    const k = `${x.fecha}|${x.hora ?? ''}|${(x.titulo ?? '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 30)}`;
+    const hk = String(x.hora ?? '').slice(0, 5);
+    if (yaExiste.has(`${x.fecha}|${hk}`)) return false;
+    const k = `${x.fecha}|${hk}|${(x.titulo ?? '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 30)}`;
     if (vistos.has(k)) return false;
     vistos.add(k); return true;
   });
@@ -215,6 +221,7 @@ export async function reconstruirTarjeta(
     await sb.from('agendamientos').insert(dedupAge.map(x => ({
       persona_id: personaId, titulo: x.titulo, tipo: x.tipo, fecha: x.fecha,
       hora_inicio: x.hora, direccion: x.lugar || null, origen: 'agente_v2',
+      protegido: (x.tipo === 'instalacion' || x.tipo === 'visita_medidas'),
     })) as any);
   }
 
