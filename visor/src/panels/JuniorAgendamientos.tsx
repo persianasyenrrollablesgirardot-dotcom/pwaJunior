@@ -500,7 +500,7 @@ export function JuniorAgendamientos() {
                   </h4>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {g.citas.map(a => {
-                      const meta = TIPO_META[a.tipo];
+                      const meta = TIPO_META[a.tipo] ?? TIPO_META.otro;
                       return (
                         <div key={a.id} style={{
                           border: '1px solid var(--border-soft)',

@@ -43,6 +43,10 @@ const ESTADO_META: Record<EstadoConv, { label: string; punto: string; color: str
   sin_responder: { label: 'Sin responder', punto: '🔴', color: '#dc2626' },
 };
 const tipoMeta = (t: string) => TIPO_META[t] ?? TIPO_META.desconocido;
+// Acceso seguro a ESTADO_META: un estado fuera del enum (futuro estado nuevo en
+// backend sin actualizar la UI) ya no crashea el render; cae a un neutro.
+const ESTADO_FALLBACK = { label: 'Sin evaluar', punto: '⚪', color: '#999' };
+const estadoMeta = (e: string | null | undefined) => (e && ESTADO_META[e as EstadoConv]) || ESTADO_FALLBACK;
 const nombreDe = (t: TarjetaRow) => t.personas?.nombre || `Chat #${t.chat_id}`;
 // Placeholder de contactos @lid que WA Web no logró resolver (FASE 9.1).
 const esSinIdentificar = (t: TarjetaRow) => {
@@ -122,7 +126,7 @@ export function TarjetaV2() {
     if (pid) {
       const { data: ags } = await supabase.from('agendamientos')
         .select('id, titulo, tipo, fecha, hora_inicio, direccion, origen')
-        .eq('persona_id', pid).order('fecha', { ascending: true });
+        .eq('persona_id', pid).is('deleted_at', null).order('fecha', { ascending: true });
       setAgCanon((ags as any) ?? []);
     } else { setAgCanon([]); }
     const { data: md } = await supabase.from('mensajes')
@@ -375,7 +379,7 @@ export function TarjetaV2() {
             {listaFiltrada.map(x => {
               const tm = tipoMeta(x.tipo_contacto);
               const est = checklists[x.chat_id]?.estado_conversacion;
-              const punto = est ? ESTADO_META[est].punto : '⚪';
+              const punto = estadoMeta(est).punto;
               return (
                 <button key={x.chat_id} onClick={() => setSel(x.chat_id)} style={{
                   display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', borderRadius: 999, fontSize: 12,
@@ -388,11 +392,11 @@ export function TarjetaV2() {
 
           {t && (
             <>
-              <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-soft)', borderTop: `3px solid ${chkSel ? ESTADO_META[chkSel.estado_conversacion].color : '#999'}`, borderRadius: 12, padding: '16px 18px', boxShadow: 'var(--shadow-sm)' }}>
+              <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-soft)', borderTop: `3px solid ${estadoMeta(chkSel?.estado_conversacion).color}`, borderRadius: 12, padding: '16px 18px', boxShadow: 'var(--shadow-sm)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                   <h2 style={{ margin: 0, fontSize: 20 }}>{nombreDe(t)}</h2>
                   <Chip texto={tipoMeta(t.tipo_contacto).label} color={tipoMeta(t.tipo_contacto).color} />
-                  {chkSel && <Chip texto={`${ESTADO_META[chkSel.estado_conversacion].punto} ${ESTADO_META[chkSel.estado_conversacion].label}`} color={ESTADO_META[chkSel.estado_conversacion].color} />}
+                  {chkSel && <Chip texto={`${estadoMeta(chkSel.estado_conversacion).punto} ${estadoMeta(chkSel.estado_conversacion).label}`} color={estadoMeta(chkSel.estado_conversacion).color} />}
                   <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-muted)' }}>
                     chat #{t.chat_id} · {hace(t.actualizado_at)}{t.dirty ? ' · 🔄 actualizando…' : ''}
                   </span>
@@ -495,9 +499,9 @@ export function TarjetaV2() {
               <div style={{ marginTop: 18 }}>
                 <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6, color: 'var(--text-muted)', marginBottom: 10 }}>⬇ Derivado de esta tarjeta por los 3 agentes</div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
-                  <Derivado icono="✅" titulo="Checklist" color={chkSel ? ESTADO_META[chkSel.estado_conversacion].color : '#999'}>
+                  <Derivado icono="✅" titulo="Checklist" color={estadoMeta(chkSel?.estado_conversacion).color}>
                     {chkSel ? (<>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: ESTADO_META[chkSel.estado_conversacion].color, marginBottom: 4 }}>{ESTADO_META[chkSel.estado_conversacion].punto} {ESTADO_META[chkSel.estado_conversacion].label}</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: estadoMeta(chkSel.estado_conversacion).color, marginBottom: 4 }}>{estadoMeta(chkSel.estado_conversacion).punto} {estadoMeta(chkSel.estado_conversacion).label}</div>
                       <div style={{ fontSize: 13 }}>→ {chkSel.proximo_paso || 'sin próximo paso'}</div>
                     </>) : <Vacio />}
                   </Derivado>

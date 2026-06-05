@@ -199,14 +199,18 @@ export async function reconstruirTarjeta(
   // Dedup dentro de la lista del agente + dedup contra manual_edit existentes:
   // si Jhon ya reprogramó una cita (mismo persona + fecha + hora), NO emito otra
   // del agente para no duplicar visualmente.
-  await sb.from('agendamientos').delete().eq('persona_id', personaId).eq('origen', 'agente_v2');
-  // Dedup contra TODO lo que NO es agente_v2 (detector_citas, manual_edit, junior,
-  // manual): si la cita ya existe por OTRA fuente, agente_v2 NO la duplica. Antes
-  // solo miraba manual_edit → re-creaba lo que detector_citas ya tenía (bug de
-  // duplicados William/Sandra 2026-06-05). Hora normalizada a HH:MM ('14:00:00'
-  // del tipo time vs '14:00' del agente no matcheaban).
+  // Borro los agente_v2 para re-emitirlos desde la narrativa actual, PERO conservo
+  // los PROTEGIDOS (instalaciones/visitas fijas): un compromiso protegido no debe
+  // parpadear de id ni desaparecer si la narrativa cambia (la cascada de cierre ya
+  // los respeta; este delete tenía que hacerlo igual). Bug de auditoría 2026-06-05.
+  await sb.from('agendamientos').delete().eq('persona_id', personaId).eq('origen', 'agente_v2').neq('protegido', true);
+  // Dedup contra TODO lo activo (incluye los agente_v2 protegidos que acaban de
+  // sobrevivir al delete + detector_citas + manual_edit + junior): si la cita ya
+  // existe por CUALQUIER fuente, agente_v2 NO la duplica. Antes solo miraba lo
+  // no-agente_v2 → habría re-creado el protegido sobreviviente como duplicado.
+  // Hora normalizada a HH:MM ('14:00:00' del tipo time vs '14:00' del agente).
   const { data: otrosAg } = await sb.from('agendamientos')
-    .select('fecha, hora_inicio').eq('persona_id', personaId).neq('origen', 'agente_v2').is('deleted_at', null);
+    .select('fecha, hora_inicio').eq('persona_id', personaId).is('deleted_at', null);
   const yaExiste = new Set((otrosAg ?? []).map((m: any) => `${m.fecha}|${String(m.hora_inicio ?? '').slice(0, 5)}`));
   const conFecha = age.agendamientos.filter(x => x.fecha);
   const vistos = new Set<string>();
