@@ -32,11 +32,12 @@ interface Agendamiento {
   persona_id: number | null;
   titulo: string;
   tipo: TipoEvento;
-  fecha: string; // YYYY-MM-DD
-  hora_inicio: string; // HH:MM
+  fecha: string | null; // YYYY-MM-DD — NULL si es pendiente por agendar
+  hora_inicio: string | null; // HH:MM — NULL si es pendiente por agendar
   hora_fin: string | null;
   direccion: string | null;
   notas: string | null;
+  pendiente: boolean; // true = pendiente por agendar (sin fecha real), fuera del calendario
   persona?: { nombre: string } | null;
 }
 
@@ -85,8 +86,8 @@ export function JuniorAgendamientos() {
       titulo: a.titulo,
       tipo: a.tipo,
       persona_id: a.persona_id ?? '',
-      fecha: a.fecha,
-      hora: a.hora_inicio.slice(0, 5),
+      fecha: a.fecha ?? '',
+      hora: a.hora_inicio ? a.hora_inicio.slice(0, 5) : '',
       direccion: a.direccion ?? '',
       notas: a.notas ?? '',
     });
@@ -98,7 +99,7 @@ export function JuniorAgendamientos() {
     setCargando(true);
     const { data: ags } = await supabase
       .from('agendamientos')
-      .select('id,persona_id,titulo,tipo,fecha,hora_inicio,hora_fin,direccion,notas,persona:personas(nombre)')
+      .select('id,persona_id,titulo,tipo,fecha,hora_inicio,hora_fin,direccion,notas,pendiente,persona:personas(nombre)')
       .is('deleted_at', null);
     setAgendamientos((ags as any) ?? []);
 
@@ -168,6 +169,13 @@ export function JuniorAgendamientos() {
   const selectFechaStr = fechaSeleccionada.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
   const agendaDelDia = getAgendamientosDelDia(selectFechaStr);
 
+  // Pendientes por agendar = agendamientos con pendiente=true (intención de cita
+  // SIN fecha real acordada). Tienen fecha/hora NULL → no entran al calendario;
+  // se muestran en el panel "Pendientes de Agendar" junto a las tareas sin fecha,
+  // agrupados por contacto (lo que pidió Jhon).
+  const pendientesAgendar = agendamientos.filter(a => a.pendiente);
+  const totalBacklog = backlogTareas.length + pendientesAgendar.length;
+
   // Crear o EDITAR agendamiento. En modo edit dispara la misma cascada que
   // TarjetaV2: PATCH con origen='manual_edit' (protege contra delete+insert
   // del agente) + nota de cambio + sintesis_pendiente + tarjeta dirty.
@@ -183,8 +191,9 @@ export function JuniorAgendamientos() {
       // evitar reasignaciones accidentales).
       const original = agendamientos.find(a => a.id === editandoId);
       const personaId = original?.persona_id ?? (form.persona_id ? Number(form.persona_id) : null);
+      const eraPendiente = !!original?.pendiente;
       const nuevoFH = `${form.fecha}${form.hora ? ' ' + form.hora : ''}`;
-      const viejoFH = original ? `${original.fecha}${original.hora_inicio ? ' ' + original.hora_inicio.slice(0,5) : ''}` : '?';
+      const viejoFH = original?.fecha ? `${original.fecha}${original.hora_inicio ? ' ' + original.hora_inicio.slice(0,5) : ''}` : '(pendiente)';
       const { error } = await supabase.from('agendamientos').update({
         titulo: form.titulo,
         tipo: form.tipo,
@@ -193,13 +202,16 @@ export function JuniorAgendamientos() {
         direccion: form.direccion || null,
         notas: form.notas || null,
         origen: 'manual_edit',
+        pendiente: false, // agendar (ponerle fecha) lo saca del backlog → compromiso fijo
       } as any).eq('id', editandoId);
       if (error) { alert('Error al actualizar: ' + error.message); return; }
       // Cascada: nota + re-síntesis + tarjeta dirty (solo si hay persona).
       if (personaId) {
         await supabase.from('notas_libres').insert({
           persona_id: personaId,
-          contenido: `Agenda actualizada por Jhon (desde calendario): "${form.titulo}" reprogramado de ${viejoFH} a ${nuevoFH}.`,
+          contenido: eraPendiente
+            ? `Agenda: Jhon agendó "${form.titulo}" para ${nuevoFH} (estaba pendiente por agendar).`
+            : `Agenda actualizada por Jhon (desde calendario): "${form.titulo}" reprogramado de ${viejoFH} a ${nuevoFH}.`,
           visible_para: ['todos'], creado_por: 1,
         } as any);
         await supabase.from('personas').update({ sintesis_pendiente: true } as any).eq('id', personaId);
@@ -512,7 +524,7 @@ export function JuniorAgendamientos() {
                           </div>
 
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                            <div>⏰ <strong>{a.hora_inicio.slice(0, 5)}</strong>{a.hora_fin ? ` a ${a.hora_fin.slice(0, 5)}` : ''}</div>
+                            <div>⏰ <strong>{a.hora_inicio ? a.hora_inicio.slice(0, 5) : '—'}</strong>{a.hora_fin ? ` a ${a.hora_fin.slice(0, 5)}` : ''}</div>
                             {a.direccion && <div>📍 <strong>Lugar:</strong> {a.direccion}</div>}
                             {a.notas && <div style={{ background: 'white', padding: '6px 8px', borderRadius: 6, marginTop: 4, border: '1px solid var(--border-soft)', fontStyle: 'italic' }}>📝 {a.notas}</div>}
                           </div>
@@ -548,10 +560,10 @@ export function JuniorAgendamientos() {
           >
             <div style={{ minWidth: 0 }}>
               <h3 style={{ margin: 0, fontSize: isMobile ? 15 : 14, fontWeight: 700, color: '#475569' }}>
-                📥 Pendientes de Agendar {isMobile && backlogTareas.length > 0 ? `(${backlogTareas.length})` : ''}
+                📥 Pendientes de Agendar {isMobile && totalBacklog > 0 ? `(${totalBacklog})` : ''}
               </h3>
               <span style={{ fontSize: isMobile ? 12 : 11, color: 'var(--text-muted)' }}>
-                Tareas críticas sin fecha definida
+                Tareas y citas sin fecha definida
               </span>
             </div>
             {isMobile && (
@@ -568,48 +580,112 @@ export function JuniorAgendamientos() {
           }}>
             {cargando ? (
               <p style={{ textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>Cargando backlog...</p>
-            ) : backlogTareas.length === 0 ? (
+            ) : totalBacklog === 0 ? (
               <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--text-muted)' }}>
                 <span style={{ fontSize: 24 }}>✨</span>
                 <p style={{ fontSize: 11, margin: '8px 0 0' }}>Bolsa de parqueo vacía.</p>
               </div>
             ) : (
-              backlogTareas.map(t => (
-                <div key={t.id} style={{
-                  border: '1px dashed #cbd5e1', borderRadius: 8, padding: '10px 12px', background: 'white',
-                  display: 'flex', flexDirection: 'column', gap: 4, cursor: 'pointer',
-                  transition: 'background 0.2s'
-                }} onClick={() => {
-                  setEditandoId(null);
-                  setForm({
-                    titulo: t.titulo,
-                    tipo: 'visita_medidas',
-                    persona_id: t.persona_id ?? '',
-                    fecha: '',
-                    hora: '',
-                    direccion: '',
-                    notas: `Sincronizado desde tarea #${t.id}`
-                  });
-                  setModalAbierto(true);
-                }}
-                onMouseEnter={e => e.currentTarget.style.background = '#f1f5f9'}
-                onMouseLeave={e => e.currentTarget.style.background = 'white'}
-                >
-                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{t.titulo}</div>
-                  <div style={{ fontSize: 11, color: '#64748b', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                    <span>{t.persona ? `👤 ${t.persona.nombre}` : 'Transversal'}</span>
-                    {t.fecha_vence && <span>📅 {t.fecha_vence}</span>}
-                    <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-                      <button
-                        onClick={e => { e.stopPropagation(); terminarConNota(t); }}
-                        title={t.persona_id ? 'Cerrar el caso con una nota, sin agendar (sincroniza checklist, tareas y agenda)' : 'Completar esta tarea sin agendar'}
-                        style={btnTerminar}
-                      >✓ Terminar</button>
-                      <span style={{ color: 'var(--accent)', fontWeight: 600 }}>Agendar →</span>
-                    </span>
+              // Agrupado POR CLIENTE (mismo patrón que "Agenda del día"): en cada
+              // contacto van primero sus CITAS pendientes por agendar (agendamientos
+              // pendiente=true, intención de cita sin fecha acordada) y luego sus
+              // TAREAS sin fecha. Los sin-persona caen en "Transversales" al final.
+              (() => {
+                type Grupo = { nombre: string; citas: Agendamiento[]; tareas: typeof backlogTareas };
+                const mapa = new Map<number | 'transversales', Grupo>();
+                const grupoDe = (persona_id: number | null, nombre?: string | null): Grupo => {
+                  const k = persona_id ?? 'transversales';
+                  if (!mapa.has(k)) {
+                    mapa.set(k, {
+                      nombre: persona_id ? (nombre ?? `Cliente #${persona_id}`) : 'Transversales / Administrativas',
+                      citas: [], tareas: [],
+                    });
+                  }
+                  return mapa.get(k)!;
+                };
+                for (const a of pendientesAgendar) grupoDe(a.persona_id, a.persona?.nombre).citas.push(a);
+                for (const t of backlogTareas)    grupoDe(t.persona_id, t.persona?.nombre).tareas.push(t);
+                const grupos = Array.from(mapa.values());
+                grupos.sort((a, b) => {
+                  if (a.nombre === 'Transversales / Administrativas') return 1;
+                  if (b.nombre === 'Transversales / Administrativas') return -1;
+                  return a.nombre.localeCompare(b.nombre);
+                });
+                return grupos.map((g, idx) => (
+                  <div key={idx} style={{ marginBottom: 14 }}>
+                    <h4 style={{ margin: '0 0 8px', fontSize: 12, fontWeight: 700, color: g.nombre === 'Transversales / Administrativas' ? '#0891b2' : '#7c3aed', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      👤 {g.nombre} ({g.citas.length + g.tareas.length})
+                    </h4>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {/* CITAS pendientes por agendar (agendamientos pendiente=true) */}
+                      {g.citas.map(a => {
+                        const meta = TIPO_META[a.tipo] ?? TIPO_META.otro;
+                        return (
+                          <div key={`ag-${a.id}`} style={{
+                            border: '1px dashed #fbbf24', borderRadius: 8, padding: '10px 12px', background: '#fffbeb',
+                            display: 'flex', flexDirection: 'column', gap: 4, cursor: 'pointer', transition: 'background 0.2s'
+                          }} onClick={() => iniciarEdit(a)}
+                          onMouseEnter={e => e.currentTarget.style.background = '#fef3c7'}
+                          onMouseLeave={e => e.currentTarget.style.background = '#fffbeb'}
+                          >
+                            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                              <span>{meta.emoji}</span>{a.titulo}
+                              <span style={{ padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 600, color: 'white', background: meta.color }}>{meta.label}</span>
+                            </div>
+                            <div style={{ fontSize: 11, color: '#64748b', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                              <span style={{ color: '#b45309' }}>🕓 cita sin fecha acordada</span>
+                              <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                                <button
+                                  onClick={e => { e.stopPropagation(); handleCancelar(a.id); }}
+                                  title="Descartar esta cita pendiente (no se agenda)"
+                                  style={btnDescartar}
+                                >✕ Descartar</button>
+                                <span style={{ color: 'var(--accent)', fontWeight: 600 }}>Agendar →</span>
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {/* TAREAS sin fecha */}
+                      {g.tareas.map(t => (
+                        <div key={`tarea-${t.id}`} style={{
+                          border: '1px dashed #cbd5e1', borderRadius: 8, padding: '10px 12px', background: 'white',
+                          display: 'flex', flexDirection: 'column', gap: 4, cursor: 'pointer',
+                          transition: 'background 0.2s'
+                        }} onClick={() => {
+                          setEditandoId(null);
+                          setForm({
+                            titulo: t.titulo,
+                            tipo: 'visita_medidas',
+                            persona_id: t.persona_id ?? '',
+                            fecha: '',
+                            hora: '',
+                            direccion: '',
+                            notas: `Sincronizado desde tarea #${t.id}`
+                          });
+                          setModalAbierto(true);
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.background = '#f1f5f9'}
+                        onMouseLeave={e => e.currentTarget.style.background = 'white'}
+                        >
+                          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{t.titulo}</div>
+                          <div style={{ fontSize: 11, color: '#64748b', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                            {t.fecha_vence ? <span>📅 vence {t.fecha_vence}</span> : <span style={{ color: '#94a3b8' }}>sin fecha</span>}
+                            <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                              <button
+                                onClick={e => { e.stopPropagation(); terminarConNota(t); }}
+                                title={t.persona_id ? 'Cerrar el caso con una nota, sin agendar (sincroniza checklist, tareas y agenda)' : 'Completar esta tarea sin agendar'}
+                                style={btnTerminar}
+                              >✓ Terminar</button>
+                              <span style={{ color: 'var(--accent)', fontWeight: 600 }}>Agendar →</span>
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ))
+                ));
+              })()
             )}
           </div>
         </div>
@@ -791,6 +867,17 @@ const btnTerminar: React.CSSProperties = {
   background: 'white',
   color: '#16a34a',
   border: '1px solid #86efac',
+  borderRadius: 6,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
+};
+const btnDescartar: React.CSSProperties = {
+  padding: '3px 9px',
+  fontSize: 10,
+  fontWeight: 700,
+  background: 'white',
+  color: '#b91c1c',
+  border: '1px solid #fca5a5',
   borderRadius: 6,
   cursor: 'pointer',
   whiteSpace: 'nowrap',
