@@ -66,6 +66,31 @@ function aportaHallazgo(payload: any): boolean {
  * así el motor puede calcular el hash y decidir si hace falta rehacer ANTES de
  * gastar en la narrativa.
  */
+/**
+ * Transcripciones COMPLETAS de los documentos del cliente (cotizaciones,
+ * comprobantes, guías), verbatim. Es la fuente de verdad que NO debe resumirse:
+ * las síntesis M1-M7 ya capturan el gist, pero el detalle (ítems, medidas,
+ * sistemas, montos por línea) solo está acá. Se ordena por fecha.
+ */
+async function leerDocumentosVerbatim(sb: SupabaseClient, personaId: number): Promise<ModuloCtx | null> {
+  const { data: proys } = await sb.from('proyectos').select('id').eq('persona_id', personaId);
+  const proyIds = (proys ?? []).map((p: any) => p.id);
+  if (!proyIds.length) return null;
+  const { data: chatsP } = await sb.from('chats').select('id').in('proyecto_id', proyIds).is('deleted_at', null);
+  const chatIds = (chatsP ?? []).map((c: any) => c.id);
+  if (!chatIds.length) return null;
+  const { data: docs } = await sb.from('mensajes')
+    .select('texto, metadata, ts_canal')
+    .in('chat_id', chatIds).eq('tipo', 'documento').is('deleted_at', null)
+    .order('ts_canal', { ascending: true });
+  const trans = (docs ?? [])
+    .map((d: any) => String((d.metadata as any)?.ai_text || d.texto || '').trim())
+    .filter((t: string) => t.length > 20);
+  if (!trans.length) return null;
+  const texto = trans.map((t: string, i: number) => `— Documento ${i + 1} —\n${t}`).join('\n\n');
+  return { modulo: 'documentos', titulo: '📄 Documentos (transcripción completa)', sintesis: texto, alerta: null };
+}
+
 export async function leerInsumosTarjeta(sb: SupabaseClient, personaId: number): Promise<Insumos> {
   const { data: persona, error } = await sb.from('personas')
     .select('id, nombre, ambito_principal, notas').eq('id', personaId).maybeSingle();
@@ -105,6 +130,15 @@ export async function leerInsumosTarjeta(sb: SupabaseClient, personaId: number):
     contexto_estructurado.push({ modulo: 'agentes', titulo: '🧩 Qué entendieron los agentes', sintesis: texto, alerta: null });
   }
 
+  // DOCUMENTOS VERBATIM (2026-06-04): las síntesis M1-M7 RESUMEN y dropean el
+  // detalle de los documentos (cotizaciones: ítems por ventana, medidas, sistemas,
+  // montos por línea). Resultado: a la tarjeta llegaban los TOTALES pero no el
+  // detalle (reportado en Jhon Guerrero). Para no perder esa información, se
+  // incluye la transcripción COMPLETA de cada documento del cliente, verbatim,
+  // como un módulo más (aparece en la UI sin tocar el front, igual que 'agentes').
+  const moduloDocs = await leerDocumentosVerbatim(sb, personaId);
+  if (moduloDocs) contexto_estructurado.push(moduloDocs);
+
   // Notas de Jhon (verdad prioritaria): columna personas.notas + tabla notas_libres.
   const { data: notasRows } = await sb.from('notas_libres')
     .select('contenido').eq('persona_id', personaId).is('deleted_at', null);
@@ -126,7 +160,15 @@ export async function redactarNarrativa(ins: Insumos): Promise<{ narrativa: stri
     return { narrativa: '(sin datos suficientes para redactar el estado general)', costo_usd: 0 };
   }
   const bloqueHechos = ins.contexto_estructurado.length
-    ? ins.contexto_estructurado.map(c => `[${c.titulo}] ${c.sintesis}${c.alerta ? ` (⚠ ${c.alerta})` : ''}`).join('\n')
+    ? ins.contexto_estructurado.map(c => {
+        // El módulo de documentos va COMPLETO a la tarjeta (UI), pero en el prompt
+        // de la narrativa solo un preview: la narrativa son 4 frases, no necesita
+        // el PDF entero. Ahorra tokens; el detalle queda íntegro en la tarjeta.
+        const s = c.modulo === 'documentos' && c.sintesis.length > 1200
+          ? c.sintesis.slice(0, 1200) + '… [documento completo en la tarjeta]'
+          : c.sintesis;
+        return `[${c.titulo}] ${s}${c.alerta ? ` (⚠ ${c.alerta})` : ''}`;
+      }).join('\n')
     : '(sin síntesis por módulo todavía)';
   const bloqueNotas = ins.notas.length ? `\n\nNOTAS DE JHON (verdad — si contradicen un hecho, mandan): ${ins.notas.join(' · ')}` : '';
 
