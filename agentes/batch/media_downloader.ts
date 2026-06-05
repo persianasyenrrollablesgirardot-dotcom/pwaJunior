@@ -79,6 +79,34 @@ async function textoDePdf(bytes: Buffer, maxPages = 2): Promise<{ texto: string;
   } catch { return null; }
 }
 
+// OCR de PDFs SIN capa de texto (escaneados/de imagen): pdf.js no extrae nada
+// (ej. los PDFs salientes de Jhon Guerrero, que la extensión también daba como
+// ai=failed). OpenAI acepta el PDF directo como `file` input y lo transcribe.
+// Con timeout duro (AbortController) para que NUNCA cuelgue el ciclo.
+const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
+async function ocrPdfOpenAI(bytes: Buffer): Promise<string | null> {
+  if (!OPENAI_KEY) return null;
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 60_000);
+  try {
+    const body = {
+      model: 'gpt-4o-mini', max_tokens: 900,
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: 'Transcribí el contenido de este PDF (puede ser escaneado/imagen). Si es cotización/factura/comprobante: cliente, items con medidas y montos, y total. En español, claro, sin markdown excesivo.' },
+        { type: 'file', file: { filename: 'doc.pdf', file_data: `data:application/pdf;base64,${bytes.toString('base64')}` } },
+      ]}],
+    };
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST', headers: { Authorization: `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), signal: ctrl.signal,
+    });
+    if (!r.ok) return null;
+    const j: any = await r.json();
+    const txt = (j.choices?.[0]?.message?.content || '').trim();
+    return txt.length >= 20 ? txt.slice(0, 6000) : null;
+  } catch { return null; } finally { clearTimeout(to); }
+}
+
 // ─── Ciclo principal ──────────────────────────────────────────────────────────
 export interface ResultadoMediaDL { pendientes: number; recuperados: number; fallidos: number; }
 
@@ -118,10 +146,27 @@ export async function cicloMediaDescarga(sb: SupabaseClient, log: (m: string) =>
     }
 
     const doc = await textoDePdf(plain, 2);
-    if (!doc) { fallidos++; await sb.from('mensajes').update({ metadata: { ...md, media_dl_tried: new Date().toISOString() } } as any).eq('id', m.id); log(`msg ${m.id}: PDF bajado pero sin texto extraíble`); continue; }
+    let texto: string, via: string;
+    if (doc) {
+      texto = `📄 Documento PDF (${doc.numPages} pág.):\n${doc.texto}`;
+      via = 'server_decrypt';
+    } else {
+      // PDF sin capa de texto (escaneado/imagen) → OCR con OpenAI.
+      const ocr = await ocrPdfOpenAI(plain);
+      if (!ocr) {
+        fallidos++;
+        const intentos = (md.media_dl_intentos || 0) + 1;
+        const patch: any = { ...md, media_dl_tried: new Date().toISOString(), media_dl_intentos: intentos };
+        if (intentos >= MAX_INTENTOS) { patch.media_inexistente = true; patch.media_inexistente_motivo = 'PDF de imagen sin texto y OCR no devolvió contenido tras ' + intentos + ' intentos'; }
+        await sb.from('mensajes').update({ metadata: patch } as any).eq('id', m.id);
+        log(`msg ${m.id}: PDF de imagen, OCR sin contenido (intento ${intentos})`);
+        continue;
+      }
+      texto = `📄 Documento PDF (OCR):\n${ocr}`;
+      via = 'server_ocr';
+    }
 
-    const texto = `📄 Documento PDF (${doc.numPages} pág.):\n${doc.texto}`;
-    const meta = { ...md, ai_text: texto, ai_kind: 'pdf', ai_status: 'processed', pdf_via: 'server_decrypt' };
+    const meta = { ...md, ai_text: texto, ai_kind: 'pdf', ai_status: 'processed', pdf_via: via };
     delete (meta as any).extractor_done;   // re-extracción de los agentes (montos, etc.)
     const { error } = await sb.from('mensajes').update({ texto, metadata: meta } as any).eq('id', m.id);
     if (error) { fallidos++; log(`msg ${m.id}: error al escribir ${error.message}`); continue; }
@@ -131,7 +176,7 @@ export async function cicloMediaDescarga(sb: SupabaseClient, log: (m: string) =>
     if (cl?.persona_id) await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', cl.persona_id);
     await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', m.chat_id);
     recuperados++;
-    log(`msg ${m.id} ✓ PDF descargado+descifrado del CDN (${doc.numPages} pág.)`);
+    log(`msg ${m.id} ✓ PDF del CDN (${via === 'server_ocr' ? 'OCR imagen' : doc!.numPages + ' pág. texto'})`);
   }
   return { pendientes: pend.length, recuperados, fallidos };
 }
