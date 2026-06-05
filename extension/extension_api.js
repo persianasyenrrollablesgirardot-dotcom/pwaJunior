@@ -604,6 +604,17 @@ async function estimarMediaChat(jid) {
 // Transcribe todo el media procesable de un chat.
 // Pool 3 paralelo (igual que MAX_AI_CONCURRENCY del background).
 // Para cada media: descarga (si falta) → Whisper/Vision/PDF → UPDATE Supabase.
+// Race contra un timeout: si un paso (descarga, refresh, IA/rasterizado de un
+// PDF de imagen…) se cuelga, NO debe trabar el worker pool → la transcripción
+// nunca volvería y el Visor queda "procesando" para siempre. El error de timeout
+// matchea esTemporal → el ítem se marca y el ciclo sigue.
+function conTimeout(promise, ms, etiqueta) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout ${etiqueta} (${ms}ms)`)), ms)),
+  ]);
+}
+
 async function transcribirMediaChat(jid) {
   if (!jid) return { error: 'jid requerido' };
 
@@ -646,13 +657,13 @@ async function transcribirMediaChat(jid) {
         if (!msg.media?.sha256) {
           let result;
           try {
-            result = await downloadAndDecryptMedia(msg);
+            result = await conTimeout(downloadAndDecryptMedia(msg), 60000, `download ${msg.id}`);
           } catch (e) {
             // URL del CDN expirada o HMAC inválido → intentar refresh via WA Web
             const expirable = /expirada|HTTP \d|HMAC/i.test(e.message);
             if (!expirable) throw e;
             try {
-              result = await refreshMediaViaContent(msg);
+              result = await conTimeout(refreshMediaViaContent(msg), 45000, `refresh ${msg.id}`);
             } catch (refreshErr) {
               // Refresh también falló → archivo IRRECUPERABLE (CDN borró >17d)
               throw new Error('IRRECUPERABLE_CDN: ' + (refreshErr?.message || e.message));
@@ -667,7 +678,7 @@ async function transcribirMediaChat(jid) {
 
         // 2. IA con cache SHA-256 (processMediaWithAI hace check)
         const cachedAntes = await tx('media_processed', 'readonly', s => reqAsync(s.get(msg.media.sha256)));
-        const entry = await processMediaWithAI(msg);
+        const entry = await conTimeout(processMediaWithAI(msg), 90000, `IA ${msg.id}`);
         if (cachedAntes?.text) stats.cache_hits++;
 
         if (!entry?.text) continue;   // unsupported / vacío
