@@ -598,6 +598,20 @@ async function poblarTareas(sb: SupabaseClient, personaId: number, data: any): P
   const proy = (await sb.from('proyectos').select('id').eq('persona_id', personaId).limit(1)).data?.[0];
   await borrarDeAgente(sb, 'tareas', personaId);
 
+  // CIERRE CONSCIENTE (fix auditoría 2026-06-05): M5 opera por PERSONA y no conoce
+  // el cierre por chat. Sin esto, tras la cascada de cierre (que completa las
+  // tareas), el siguiente ciclo de síntesis RE-INSERTA tareas leyendo la misma
+  // conversación → "caso cerrado con tareas vivas". Si TODOS los chats de la
+  // persona están cerrados a mano (`cerrado_manual=true`, la señal autoritativa de
+  // cierre en V2), no re-creamos: las viejas de M5 ya se borraron arriba.
+  const { data: chks } = await sb.from('chat_checklist')
+    .select('cerrado_manual').eq('persona_id', personaId);
+  const casoCerrado = (chks?.length ?? 0) > 0 && chks!.every((c: any) => c.cerrado_manual === true);
+  if (casoCerrado) {
+    if (tareas.length) console.log(`[A_SINTESIS_M5] persona ${personaId}: caso cerrado → no re-creo ${tareas.length} tarea(s)`);
+    return;
+  }
+
   // Tareas activas del chat/manuales — NO se tocan, pero usamos sus títulos para
   // evitar que M5 cree duplicados conceptuales.
   const { data: tareasChat } = await sb.from('tareas')
