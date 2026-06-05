@@ -16,6 +16,18 @@
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
+// Tipos de mensaje que SÍ son conversación real (no notificaciones de sistema).
+// Se usa para decidir si un chat merece persona/proyecto: un chat que solo tiene
+// notification_template / call_log / protocol / e2e_notification queda sin
+// materializar (no más contactos "⏳ Identificando…" sin nada que identificar).
+const TIPOS_CONTENIDO = new Set([
+  'text', 'chat', 'extendedtext', 'texto',
+  'image', 'imagen', 'video', 'audio', 'ptt',
+  'document', 'documento', 'location', 'live_location', 'ubicacion',
+  'vcard', 'contact', 'contacto', 'sticker', 'album',
+  'buttons_response', 'list_response', 'template_button_reply',
+]);
+
 interface EventoNuevo {
   id: number;
   canal: string;
@@ -104,6 +116,18 @@ export class IdentidadService {
         persona = { id: match.id, nombre: match.nombre };
         cruceTelefono = match.matchedBy === 'telefono';
       } else {
+        // Opción 3 (2026-06-04): NO materializar persona/proyecto para chats que
+        // SOLO tienen notificaciones de sistema (call_log, notification_template,
+        // protocol, e2e_notification, change_number…) sin NINGUNA conversación
+        // real. Estos contactos @lid sin nombre ni teléfono quedaban como
+        // "⏳ Identificando…" para siempre (WhatsApp no expone con qué resolverlos).
+        // Si más adelante llega un mensaje real, ahí sí se crea la persona. El
+        // evento queda AMBIGUO (estado terminal, no reintenta).
+        const tipoCanon = String(evt.payload?.tipo_canonical ?? evt.payload?.tipo ?? '').toLowerCase();
+        const esSistema = !!tipoCanon && !TIPOS_CONTENIDO.has(tipoCanon);
+        if (esSistema && !(await this.chatTieneContenidoReal(chat.id))) {
+          return null;
+        }
         persona = await this.crearPersonaDesdeJid(personaJid, chat.titulo, chat.ambito);
         fueCreado = true;
       }
@@ -168,6 +192,21 @@ export class IdentidadService {
       })
       .eq('id', eventoId);
     if (error) throw new Error(`update evento_pg ${eventoId}: ${error.message}`);
+  }
+
+  /**
+   * ¿El chat tiene algún mensaje de CONTENIDO real (no de sistema)? Se usa para
+   * no crear persona/proyecto en chats que solo registran notificaciones/llamadas.
+   */
+  private async chatTieneContenidoReal(chatId: number): Promise<boolean> {
+    const { data } = await this.sb
+      .from('mensajes')
+      .select('id')
+      .eq('chat_id', chatId)
+      .neq('tipo', 'sistema')
+      .is('deleted_at', null)
+      .limit(1);
+    return !!(data && data.length);
   }
 
   /** Persona asociada a un chat (vía su proyecto) — para atribuir mensajes salientes. */
