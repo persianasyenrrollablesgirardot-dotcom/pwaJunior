@@ -523,6 +523,40 @@ async function cicloSintesisPendiente(): Promise<void> {
   }
 }
 
+// RED DE SEGURIDAD DURABLE contra "tarjetas en blanco".
+//
+// La cola de síntesis del pipeline (personasSintesisPendiente) vive en MEMORIA:
+// si el worker se reinicia (apagón, crash, hot-reload de Vite) entre que el
+// pipeline marca un evento PROCESADO y que drenarSintesis corre, esa persona se
+// pierde para siempre — sus eventos ya están PROCESADO (el pipeline no los relee)
+// y nadie pone sintesis_pendiente=true → queda sin modulo_sintesis → tarjeta en
+// blanco PERMANENTE.
+//
+// Este ciclo es la red de seguridad que faltaba: cada pocos minutos consulta la
+// RPC `personas_sintesis_desfasada` (migración 050) — personas con eventos
+// PROCESADO pero CERO síntesis — y las re-encola vía sintesis_pendiente. El
+// camino rápido en memoria sigue intacto; esto solo recupera las que se cayeron.
+// IDEMPOTENTE: una vez sintetizadas, la RPC deja de devolverlas.
+let reconciliarEnCurso = false;
+async function cicloReconciliarSintesis(): Promise<void> {
+  if (reconciliarEnCurso) return;
+  reconciliarEnCurso = true;
+  try {
+    const { data, error } = await sb.rpc('personas_sintesis_desfasada');
+    if (error) { console.error('[V2/RECONCILIAR] RPC:', error.message); return; }
+    const ids = (data ?? []).map((r: any) => r.persona_id);
+    if (ids.length === 0) return;
+    const { error: upErr } = await sb.from('personas')
+      .update({ sintesis_pendiente: true } as any).in('id', ids);
+    if (upErr) { console.error('[V2/RECONCILIAR] update:', upErr.message); return; }
+    console.log(`[V2/RECONCILIAR] ${ids.length} persona(s) huérfana(s) sin síntesis → re-encoladas: ${ids.join(',')}`);
+  } catch (e: any) {
+    console.error('[V2/RECONCILIAR]', e?.message);
+  } finally {
+    reconciliarEnCurso = false;
+  }
+}
+
 async function cicloPipeline(): Promise<number> {
   if (pipelineEnCurso) return 0;
   pipelineEnCurso = true;
@@ -1313,6 +1347,11 @@ async function main() {
   setInterval(() => { cicloSintesisPendiente().catch(e => console.error('[V2/SINT-MANUAL]', e?.message)); }, 4000);
   // V2: motor de tarjetas embebido (antes proceso aparte worker_tarjetas).
   setInterval(() => { cicloTarjetas(sb, m => console.log('[V2/TARJETAS]', m)).catch(e => console.error('[V2/TARJETAS]', e?.message)); }, 10000);
+  // Red de seguridad: recupera personas con eventos PROCESADO pero sin síntesis
+  // (cola en memoria perdida por reinicio/apagón/hot-reload). Disparo inicial a
+  // los 30s para limpiar huérfanas tras cada arranque, luego cada 3 min.
+  setTimeout(() => { cicloReconciliarSintesis().catch(e => console.error('[V2/RECONCILIAR]', e?.message)); }, 30_000);
+  setInterval(() => { cicloReconciliarSintesis().catch(e => console.error('[V2/RECONCILIAR]', e?.message)); }, 3 * 60 * 1000);
 
   // Disparador batch de A5_CARTERA (cobros pendientes): no es tiempo real → cada
   // 6h + un disparo inicial a los 60s del arranque. Throttle interno por persona.
