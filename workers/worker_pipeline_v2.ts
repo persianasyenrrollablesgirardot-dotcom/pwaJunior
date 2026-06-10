@@ -1384,11 +1384,20 @@ async function main() {
   // (download_status='failed'): usa media_key+direct_path de mensajes.metadata
   // para bajar del CDN de WhatsApp y descifrar. Independiente de la extensión y
   // del caché del navegador. Corre seguido porque el token del direct_path expira.
-  const dispararMediaDL = () => cicloMediaDescarga(sb, m => console.log('[V2/MEDIA-DL]', m))
-    .then(r => { if (r.recuperados || r.fallidos) console.log(`[V2/MEDIA-DL] ${r.recuperados} recuperados, ${r.fallidos} fallidos (${r.pendientes} pendientes)`); })
-    .catch(e => console.error('[V2/MEDIA-DL]', e?.message));
-  setTimeout(dispararMediaDL, 60_000);
-  setInterval(dispararMediaDL, 120_000);
+  // Guard anti-reentrada: un ciclo puede tardar más que el intervalo (cada media
+  // = descarga CDN + Whisper/Vision), no queremos dos corriendo a la vez (re-pago).
+  let mediaDlEnCurso = false;
+  const dispararMediaDL = async () => {
+    if (mediaDlEnCurso) return;
+    mediaDlEnCurso = true;
+    try {
+      const r = await cicloMediaDescarga(sb, m => console.log('[V2/MEDIA-DL]', m));
+      if (r.recuperados || r.fallidos) console.log(`[V2/MEDIA-DL] ${r.recuperados} recuperados, ${r.fallidos} fallidos (${r.pendientes} pendientes)`);
+    } catch (e: any) { console.error('[V2/MEDIA-DL]', e?.message); }
+    finally { mediaDlEnCurso = false; }
+  };
+  setTimeout(dispararMediaDL, 15_000);
+  setInterval(dispararMediaDL, 45_000);
 
   setInterval(() => console.log(`[V2] stats: ${JSON.stringify(stats)}`), STATS_INTERVAL_MS);
 

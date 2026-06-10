@@ -34,7 +34,7 @@ const HKDF_INFO: Record<string, string> = {
   video:     'WhatsApp Video Keys',
   audio:     'WhatsApp Audio Keys',
 };
-const MAX_POR_CICLO = Number(process.env.MEDIA_DL_MAX) || 6;
+const MAX_POR_CICLO = Number(process.env.MEDIA_DL_MAX) || 10;
 const TRIED_TTL_MS  = 3 * 3600 * 1000;   // reintento cada 3h
 const MAX_INTENTOS  = 6;                 // tras 6 fallos → media_inexistente
 const RE_FALLO = /dañad|no es legible|no se pudo extraer|ilegible|no contiene inform/i;
