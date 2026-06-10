@@ -16,6 +16,7 @@
  * M1 y M7 son textuales (no pueblan tabla). M2-M6 son estructurados.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import crypto from 'node:crypto';
 import { deepseekChat } from '../lib/llm.js';
 
 // ── Catálogos de validación (evitan romper FKs / CHECKs al poblar) ──────────
@@ -211,8 +212,9 @@ function parsear(texto: string): SintesisParseada {
 export async function sintetizarPersona(
   sb: SupabaseClient,
   personaId: number,
+  forzar = false,
 ): Promise<{ ok: number; fallidos: number; costo_usd: number }> {
-  const persona = (await sb.from('personas').select('nombre,notas,ambito_principal').eq('id', personaId).maybeSingle()).data;
+  const persona = (await sb.from('personas').select('nombre,notas,ambito_principal,sintesis_input_hash').eq('id', personaId).maybeSingle()).data;
   if (!persona) return { ok: 0, fallidos: 0, costo_usd: 0 };
 
   const proys = (await sb.from('proyectos').select('id').eq('persona_id', personaId)).data ?? [];
@@ -322,6 +324,22 @@ export async function sintetizarPersona(
     ...((notasLibres ?? []).map((n: any) => `- ${n.contenido}`)),
   ].filter(Boolean);
   const bloqueNotas = lineasNotas.length > 0 ? lineasNotas.join('\n') : '(ninguna)';
+
+  // IDEMPOTENCIA POR HASH DE INPUT (fix del ~40% de re-trabajo): la síntesis (8 LLM
+  // de M1-M7 + auditor + Junior) se re-dispara cada vez que algo marca la persona
+  // (evento, sintesis_pendiente, reconciliador, etc.), aunque el CONTENIDO no haya
+  // cambiado → re-paga LLM y bumpea generado_at → cicloTarjetas reconstruye la
+  // tarjeta de gusto. Si el input determinístico (conversación + notas + correcciones
+  // + datos de agentes + ámbito) es idéntico al de la última síntesis, no hay nada
+  // nuevo que sintetizar → salimos sin gastar. NO incluimos `hoy` a propósito: no
+  // queremos re-sintetizar a diario; cuando llegue contenido real, el hash cambia.
+  const inputHash = crypto.createHash('sha1').update(JSON.stringify({
+    c: conversacion, n: bloqueNotas, k: bloqueCorrecciones, a: datosAgentes, am: ambitoPersona,
+  })).digest('hex');
+  if (!forzar && (persona as any).sintesis_input_hash === inputHash) {
+    console.log(`[A_SINTESIS] persona ${personaId} sin cambios (hash de input igual) → skip síntesis (no se gastan LLM)`);
+    return { ok: 0, fallidos: 0, costo_usd: 0 };
+  }
 
   // Fecha de Colombia (America/Bogota), no UTC.
   const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
@@ -436,6 +454,13 @@ ${datosAgentes || '(nada relevante)'}`;
   } catch (e: any) {
     fallidos++;
     console.error(`[A10_JUNIOR] ${e.message}`);
+  }
+
+  // Guardar el hash del input recién sintetizado → la próxima vez que marquen esta
+  // persona sin que cambie el contenido, se salta la síntesis. Solo si NO hubo fallos
+  // (un fallo parcial debe reintentarse en la próxima corrida, no quedar cacheado).
+  if (fallidos === 0) {
+    await sb.from('personas').update({ sintesis_input_hash: inputHash } as any).eq('id', personaId);
   }
 
   return { ok, fallidos, costo_usd };
