@@ -494,8 +494,15 @@ async function sintetizarEstructurado(
 // con los que estructuró el analista. Los registros hechos a mano por Jhon
 // (agente_origen NULL) nunca se tocan.
 
-async function borrarDeAgente(sb: SupabaseClient, tabla: string, personaId: number, conItems?: string): Promise<void> {
-  const viejos = (await sb.from(tabla).select('id').eq('persona_id', personaId).not('agente_origen', 'is', null)).data ?? [];
+// `soloAgente`: si se pasa, borra SOLO las filas de ESE agente_origen (no todas las
+// agente_origen no-null). Necesario para `tareas`, la única tabla con varios agentes
+// escribiendo (A_SINTESIS_M5 + A7_TAREAS + junior_v2): M5 no debe borrar las que
+// dictó Jhon por Junior. Las demás tablas (cotizaciones/abonos/medidas/garantías)
+// tienen un solo agente → siguen borrando todo lo agente_origen no-null.
+async function borrarDeAgente(sb: SupabaseClient, tabla: string, personaId: number, conItems?: string, soloAgente?: string): Promise<void> {
+  let sel = sb.from(tabla).select('id').eq('persona_id', personaId);
+  sel = soloAgente ? sel.eq('agente_origen', soloAgente) : sel.not('agente_origen', 'is', null);
+  const viejos = (await sel).data ?? [];
   if (viejos.length === 0) return;
   const ids = viejos.map((v: any) => v.id);
   if (conItems) await sb.from(conItems).delete().in('cotizacion_id', ids);
@@ -596,7 +603,11 @@ function normalizarTitulo(t: string): string {
 async function poblarTareas(sb: SupabaseClient, personaId: number, data: any): Promise<void> {
   const tareas = Array.isArray(data.tareas) ? data.tareas : [];
   const proy = (await sb.from('proyectos').select('id').eq('persona_id', personaId).limit(1)).data?.[0];
-  await borrarDeAgente(sb, 'tareas', personaId);
+  // Solo las de M5 (como dice la doc): A7_TAREAS y junior_v2 (tareas que dictó Jhon
+  // por Junior) tienen su propio agente_origen y NO se tocan. Antes esto borraba
+  // TODA tarea con agente_origen no-null y M5 solo recreaba las suyas → las de
+  // A7/junior se PERDÍAN en cada re-síntesis (bug auditoría 2026-06-05).
+  await borrarDeAgente(sb, 'tareas', personaId, undefined, 'A_SINTESIS_M5');
 
   // CIERRE CONSCIENTE (fix auditoría 2026-06-05): M5 opera por PERSONA y no conoce
   // el cierre por chat. Sin esto, tras la cascada de cierre (que completa las
