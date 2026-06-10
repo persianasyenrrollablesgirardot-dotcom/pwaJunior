@@ -45,10 +45,23 @@ export default function App() {
   // Sync de keys Visor → extensión al arrancar (independiente del módulo activo).
   // Si la extensión no está conectada, falla silencioso y la próxima acción que la
   // necesite muestra el error explícito.
+  //
+  // RE-SYNC PERIÓDICO (fix audios "media_pending" eternos): la extensión persiste
+  // las keys en chrome.storage.local, PERO si su service worker arrancó sin ellas
+  // (tras un reinicio/apagón) el Visor nunca las re-empujaba — solo sincronizaba
+  // 1 vez por carga (guard keysSincronizadasYa). Resultado: la openaiKey faltaba,
+  // toda la transcripción de media (audio/imagen) quedaba diferida con
+  // "keys no sincronizadas" y el mensaje nunca llegaba a Supabase (syncToVisorPG
+  // solo sube los ready_to_sync, y la media pasa a ready_to_sync recién al
+  // transcribirse). Con re-sync forzado cada 2 min, las keys siempre vuelven a
+  // estar presentes y el keepalive alarm de la extensión drena la cola sola.
   useEffect(() => {
-    sincronizarKeysExtension()
+    const sync = (force: boolean) => sincronizarKeysExtension(force)
       .then(r => console.log('[VPG-INIT] sync keys extensión:', r))
       .catch(e => console.warn('[VPG-INIT] sync keys falló:', e.message));
+    sync(true);
+    const id = setInterval(() => sync(true), 2 * 60 * 1000);
+    return () => clearInterval(id);
   }, []);
 
   return (
