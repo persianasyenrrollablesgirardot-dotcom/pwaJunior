@@ -330,7 +330,14 @@ async function saveMessages(batch) {
         const prevState = existing?.processing_state;
 
         if (msg.media) {
-          msg.processing_state = msg.processing_state || prevState || 'media_pending';
+          // La media sube a Supabase de INMEDIATO con su media_key (canonicalToMensajeRow
+          // las incluye), sin esperar la transcripción local. Antes esperaba en
+          // 'media_pending'; si la IA local fallaba (key no sincronizada, descarga del
+          // CDN expirada) el mensaje NUNCA llegaba a Supabase y el worker server-side
+          // (media_downloader) tampoco lo veía → media perdida. Ahora ready_to_sync:
+          // el worker la baja FRESCA del CDN y la transcribe; la IA local, si corre,
+          // la PATCHea antes (idempotente). Igual se encola para download/AI abajo.
+          msg.processing_state = prevState === 'synced' ? 'synced' : (msg.processing_state || 'ready_to_sync');
         } else if (msg.is_owner) {
           // OUTGOING (vos lo escribiste): no hay nada que esperar a descifrar
           // de la contraparte. Siempre ready_to_sync — el evento del mensaje
@@ -2132,7 +2139,50 @@ async function fireBackfillTicks() {
   }
 }
 
+// ─── Flush de backlog de media (fix audios/imágenes que nunca subían) ──────
+// Media capturada antes del fix quedó en 'media_pending' y NUNCA se sincronizó a
+// Supabase (syncToVisorPG solo sube ready_to_sync; la media pasaba a ready_to_sync
+// recién al transcribirse localmente, y si eso fallaba quedaba atascada para
+// siempre). Al arrancar el SW, promovemos esa media a ready_to_sync para que suba
+// CON su media_key; el worker server-side (media_downloader) la baja del CDN y la
+// transcribe. Idempotente: solo toca processing_state==='media_pending' con key.
+async function flushMediaPendingBacklog() {
+  try {
+    let promovidos = 0;
+    const db = await openDB();
+    try {
+      const t = db.transaction(['messages', 'processing_state'], 'readwrite');
+      const sMsg = t.objectStore('messages');
+      const sState = t.objectStore('processing_state');
+      await new Promise((res) => {
+        const cur = sMsg.openCursor();
+        cur.onsuccess = (e) => {
+          const c = e.target.result;
+          if (!c) { res(); return; }
+          const m = c.value;
+          if (m.processing_state === 'media_pending' && m.media && m.media.media_key) {
+            m.processing_state = 'ready_to_sync';
+            c.update(m);
+            sState.put({ id: m.id, state: 'ready_to_sync', attempts: 0, lastError: null, updatedAt: Date.now() });
+            promovidos++;
+          }
+          c.continue();
+        };
+        cur.onerror = () => res();
+      });
+      await new Promise((res, rej) => { t.oncomplete = () => res(); t.onerror = () => rej(t.error); });
+    } finally { db.close(); }
+    if (promovidos > 0) {
+      console.log(`[WS-BG-V2] flush backlog media: ${promovidos} promovidos a ready_to_sync`);
+      if (typeof syncToVisorPG === 'function') syncToVisorPG();
+    }
+  } catch (e) {
+    console.warn('[WS-BG-V2] flushMediaPendingBacklog error:', e.message);
+  }
+}
+
 // ─── Init ─────────────────────────────────────────────────────────
 console.log('[WS-BG-V2] background.v2.js cargado · sync tiempo real vía alarm cada ' + ALARM_PERIOD_MIN + ' min');
 drainQueue();
 syncToVisorPG();
+flushMediaPendingBacklog();

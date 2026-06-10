@@ -107,17 +107,69 @@ async function ocrPdfOpenAI(bytes: Buffer): Promise<string | null> {
   } catch { return null; } finally { clearTimeout(to); }
 }
 
+// ─── Transcripción de AUDIO (Whisper) ──────────────────────────────────────────
+// Nota de voz de WhatsApp = OGG/Opus. Whisper acepta ogg directo (multipart).
+async function transcribirAudioWhisper(bytes: Buffer, mime: string): Promise<string | null> {
+  if (!OPENAI_KEY) return null;
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 90_000);
+  try {
+    const ext = /mp3|mpeg/.test(mime) ? 'mp3' : /m4a|mp4|aac/.test(mime) ? 'm4a' : /wav/.test(mime) ? 'wav' : 'ogg';
+    const fd = new FormData();
+    fd.append('file', new Blob([bytes], { type: mime || 'audio/ogg' }), `audio.${ext}`);
+    fd.append('model', 'whisper-1');
+    fd.append('language', 'es');
+    const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST', headers: { Authorization: `Bearer ${OPENAI_KEY}` }, body: fd, signal: ctrl.signal,
+    });
+    if (!r.ok) return null;
+    const j: any = await r.json();
+    const txt = (j.text || '').trim();
+    return txt.length >= 1 ? txt.slice(0, 6000) : null;
+  } catch { return null; } finally { clearTimeout(to); }
+}
+
+// ─── Descripción de IMAGEN (Vision) ─────────────────────────────────────────────
+async function describirImagenVision(bytes: Buffer, mime: string): Promise<string | null> {
+  if (!OPENAI_KEY) return null;
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 60_000);
+  try {
+    const dataUri = `data:${mime || 'image/jpeg'};base64,${bytes.toString('base64')}`;
+    const body = {
+      model: 'gpt-4o-mini', max_tokens: 600,
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: 'Describí esta imagen en español, conciso. Si tiene texto (cotización, factura, comprobante, medidas, dirección), transcribilo fielmente con sus montos y números.' },
+        { type: 'image_url', image_url: { url: dataUri } },
+      ]}],
+    };
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST', headers: { Authorization: `Bearer ${OPENAI_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), signal: ctrl.signal,
+    });
+    if (!r.ok) return null;
+    const j: any = await r.json();
+    const txt = (j.choices?.[0]?.message?.content || '').trim();
+    return txt.length >= 1 ? txt.slice(0, 6000) : null;
+  } catch { return null; } finally { clearTimeout(to); }
+}
+
 // ─── Ciclo principal ──────────────────────────────────────────────────────────
 export interface ResultadoMediaDL { pendientes: number; recuperados: number; fallidos: number; }
 
+const TIPOS_MEDIA = ['documento', 'audio', 'imagen'];
+
 export async function cicloMediaDescarga(sb: SupabaseClient, log: (m: string) => void = () => {}): Promise<ResultadoMediaDL> {
-  // Por ahora solo documentos (PDFs). Con media_key + url, sin texto, no descartados.
+  // Documentos (PDF), audios (Whisper) e imágenes (Vision). Con media_key + url y
+  // sin texto bueno todavía. El server-side NO depende de la extensión: si la
+  // transcripción local falla (key no sincronizada, descarga local expirada),
+  // este worker baja FRESCO del CDN con la media_key y transcribe igual.
   const { data: msgs } = await sb.from('mensajes')
-    .select('id, chat_id, tipo, texto, metadata').eq('tipo', 'documento').is('deleted_at', null);
+    .select('id, chat_id, tipo, texto, media_mime, metadata').in('tipo', TIPOS_MEDIA).is('deleted_at', null);
   const ahora = Date.now();
   const pend = (msgs ?? []).filter((m: any) => {
     const md = m.metadata || {};
-    if (md.pdf_via) return false;                                  // ya recuperado
+    if (md.pdf_via || md.media_via) return false;                  // ya recuperado server-side
     if (md.media_inexistente) return false;                        // sin media o irrecuperable
     if (!md.media_key || !(md.mms_url || md.direct_path)) return false;  // sin claves → no podemos bajar
     const t = md.ai_text || m.texto || '';
@@ -135,38 +187,41 @@ export async function cicloMediaDescarga(sb: SupabaseClient, log: (m: string) =>
     const info = HKDF_INFO[m.tipo] || HKDF_INFO.documento;
     const plain = await descargarYDescifrar(md.media_key, url, info);
 
-    if (!plain || plain.subarray(0, 5).toString('latin1') !== '%PDF-') {
+    const fallar = async (motivo: string) => {
       fallidos++;
       const intentos = (md.media_dl_intentos || 0) + 1;
       const patch: any = { ...md, media_dl_tried: new Date().toISOString(), media_dl_intentos: intentos };
-      if (intentos >= MAX_INTENTOS) { patch.media_inexistente = true; patch.media_inexistente_motivo = 'media saliente no descargable del CDN (expiró o no es PDF) tras ' + intentos + ' intentos'; }
+      if (intentos >= MAX_INTENTOS) { patch.media_inexistente = true; patch.media_inexistente_motivo = motivo + ' tras ' + intentos + ' intentos'; }
       await sb.from('mensajes').update({ metadata: patch } as any).eq('id', m.id);
-      log(`msg ${m.id}: descarga/descifrado falló (intento ${intentos}${intentos >= MAX_INTENTOS ? ' → marcado irrecuperable' : ''})`);
-      continue;
-    }
+      log(`msg ${m.id} (${m.tipo}): ${motivo} (intento ${intentos}${intentos >= MAX_INTENTOS ? ' → irrecuperable' : ''})`);
+    };
 
-    const doc = await textoDePdf(plain, 2);
-    let texto: string, via: string;
-    if (doc) {
-      texto = `📄 Documento PDF (${doc.numPages} pág.):\n${doc.texto}`;
-      via = 'server_decrypt';
+    if (!plain) { await fallar('media no descargable del CDN (expiró o borrado)'); continue; }
+
+    let texto: string, via: string, kind: string;
+    if (m.tipo === 'audio') {
+      const tr = await transcribirAudioWhisper(plain, m.media_mime || 'audio/ogg');
+      if (!tr) { await fallar('audio no transcribible (Whisper sin contenido)'); continue; }
+      texto = `🎤 Nota de voz: ${tr}`; via = 'server_whisper'; kind = 'audio';
+    } else if (m.tipo === 'imagen') {
+      const dsc = await describirImagenVision(plain, m.media_mime || 'image/jpeg');
+      if (!dsc) { await fallar('imagen no describible (Vision sin contenido)'); continue; }
+      texto = `🖼 Imagen: ${dsc}`; via = 'server_vision'; kind = 'image';
     } else {
-      // PDF sin capa de texto (escaneado/imagen) → OCR con OpenAI.
-      const ocr = await ocrPdfOpenAI(plain);
-      if (!ocr) {
-        fallidos++;
-        const intentos = (md.media_dl_intentos || 0) + 1;
-        const patch: any = { ...md, media_dl_tried: new Date().toISOString(), media_dl_intentos: intentos };
-        if (intentos >= MAX_INTENTOS) { patch.media_inexistente = true; patch.media_inexistente_motivo = 'PDF de imagen sin texto y OCR no devolvió contenido tras ' + intentos + ' intentos'; }
-        await sb.from('mensajes').update({ metadata: patch } as any).eq('id', m.id);
-        log(`msg ${m.id}: PDF de imagen, OCR sin contenido (intento ${intentos})`);
-        continue;
+      // documento (PDF): texto nativo, si no, OCR
+      if (plain.subarray(0, 5).toString('latin1') !== '%PDF-') { await fallar('media saliente no es PDF'); continue; }
+      const doc = await textoDePdf(plain, 2);
+      if (doc) { texto = `📄 Documento PDF (${doc.numPages} pág.):\n${doc.texto}`; via = 'server_decrypt'; kind = 'pdf'; }
+      else {
+        const ocr = await ocrPdfOpenAI(plain);
+        if (!ocr) { await fallar('PDF de imagen sin texto y OCR sin contenido'); continue; }
+        texto = `📄 Documento PDF (OCR):\n${ocr}`; via = 'server_ocr'; kind = 'pdf';
       }
-      texto = `📄 Documento PDF (OCR):\n${ocr}`;
-      via = 'server_ocr';
     }
 
-    const meta = { ...md, ai_text: texto, ai_kind: 'pdf', ai_status: 'processed', pdf_via: via };
+    // pdf_via lo conserva para PDFs (compat); media_via marca audio/imagen recuperados.
+    const meta: any = { ...md, ai_text: texto, ai_kind: kind, ai_status: 'processed', media_via: via };
+    if (kind === 'pdf') meta.pdf_via = via;
     delete (meta as any).extractor_done;   // re-extracción de los agentes (montos, etc.)
     const { error } = await sb.from('mensajes').update({ texto, metadata: meta } as any).eq('id', m.id);
     if (error) { fallidos++; log(`msg ${m.id}: error al escribir ${error.message}`); continue; }
@@ -176,7 +231,7 @@ export async function cicloMediaDescarga(sb: SupabaseClient, log: (m: string) =>
     if (cl?.persona_id) await sb.from('personas').update({ sintesis_pendiente: true } as any).eq('id', cl.persona_id);
     await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', m.chat_id);
     recuperados++;
-    log(`msg ${m.id} ✓ PDF del CDN (${via === 'server_ocr' ? 'OCR imagen' : doc!.numPages + ' pág. texto'})`);
+    log(`msg ${m.id} ✓ ${m.tipo} del CDN (${via})`);
   }
   return { pendientes: pend.length, recuperados, fallidos };
 }
