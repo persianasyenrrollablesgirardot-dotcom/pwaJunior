@@ -204,28 +204,59 @@ export async function reconstruirTarjeta(
   // parpadear de id ni desaparecer si la narrativa cambia (la cascada de cierre ya
   // los respeta; este delete tenía que hacerlo igual). Bug de auditoría 2026-06-05.
   await sb.from('agendamientos').delete().eq('persona_id', personaId).eq('origen', 'agente_v2').neq('protegido', true);
-  // Dedup contra TODO lo activo (incluye los agente_v2 protegidos que acaban de
-  // sobrevivir al delete + detector_citas + manual_edit + junior): si la cita ya
-  // existe por CUALQUIER fuente, agente_v2 NO la duplica. Antes solo miraba lo
-  // no-agente_v2 → habría re-creado el protegido sobreviviente como duplicado.
-  // Hora normalizada a HH:MM ('14:00:00' del tipo time vs '14:00' del agente).
+
+  // Estado actual tras el delete: protegidas agente_v2 sobrevivientes + manual_edit
+  // + detector_citas + junior.
   const { data: otrosAg } = await sb.from('agendamientos')
-    .select('fecha, hora_inicio').eq('persona_id', personaId).is('deleted_at', null);
-  const yaExiste = new Set((otrosAg ?? []).map((m: any) => `${m.fecha}|${String(m.hora_inicio ?? '').slice(0, 5)}`));
+    .select('id, tipo, fecha, hora_inicio, origen, protegido').eq('persona_id', personaId).is('deleted_at', null);
+  const activos = otrosAg ?? [];
+  // Hora normalizada a HH:MM ('14:00:00' del tipo time vs '14:00' del agente).
+  const yaExiste = new Set(activos.map((m: any) => `${m.fecha}|${String(m.hora_inicio ?? '').slice(0, 5)}`));
+
+  // UNA protegida por tipo (instalacion/visita_medidas) por persona. Antes, como
+  // las protegidas no se borran (no deben parpadear) y el dedup miraba fecha|hora
+  // EXACTOS, cada reconstrucción que derivaba la misma visita con la fecha/hora
+  // un poco distinta INSERTABA otra protegida → se acumulaban (Angelica 4 visitas,
+  // Margarita 9 instalaciones). Ahora: si ya hay una protegida de ese tipo, NO se
+  // duplica; si es la del agente y la fecha cambió, se ACTUALIZA en su lugar; si
+  // es de Jhon (manual_edit) o del detector, se respeta intacta.
+  const PROT_TIPOS = new Set(['instalacion', 'visita_medidas']);
+  const protPorTipo = new Map<string, any>();
+  for (const m of activos) {
+    if (!PROT_TIPOS.has(m.tipo)) continue;
+    const prev = protPorTipo.get(m.tipo);
+    if (!prev || (m.origen === 'agente_v2' && prev.origen !== 'agente_v2')) protPorTipo.set(m.tipo, m);
+  }
+
   const conFecha = age.agendamientos.filter(x => x.fecha);
   const vistos = new Set<string>();
-  const dedupAge = conFecha.filter(x => {
+  const aInsertar: any[] = [];
+  for (const x of conFecha) {
     const hk = String(x.hora ?? '').slice(0, 5);
-    if (yaExiste.has(`${x.fecha}|${hk}`)) return false;
-    const k = `${x.fecha}|${hk}|${(x.titulo ?? '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 30)}`;
-    if (vistos.has(k)) return false;
-    vistos.add(k); return true;
-  });
-  if (dedupAge.length) {
-    await sb.from('agendamientos').insert(dedupAge.map(x => ({
+    const batchKey = `${x.fecha}|${hk}|${(x.titulo ?? '').toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 30)}`;
+    if (vistos.has(batchKey)) continue;
+    vistos.add(batchKey);
+
+    if (PROT_TIPOS.has(x.tipo) && protPorTipo.has(x.tipo)) {
+      // Ya hay visita/instalación de ese tipo → no duplicar. Mover la del agente si
+      // su fecha/hora cambió; respetar la de Jhon/detector sin tocar.
+      const ex = protPorTipo.get(x.tipo);
+      const exKey = `${ex.fecha}|${String(ex.hora_inicio ?? '').slice(0, 5)}`;
+      if (ex.origen === 'agente_v2' && exKey !== `${x.fecha}|${hk}`) {
+        await sb.from('agendamientos').update({
+          titulo: x.titulo, fecha: x.fecha, hora_inicio: x.hora, direccion: x.lugar || null,
+        } as any).eq('id', ex.id);
+      }
+      continue;
+    }
+    if (yaExiste.has(`${x.fecha}|${hk}`)) continue;   // ya existe exacta por otra fuente
+    aInsertar.push(x);
+  }
+  if (aInsertar.length) {
+    await sb.from('agendamientos').insert(aInsertar.map(x => ({
       persona_id: personaId, titulo: x.titulo, tipo: x.tipo, fecha: x.fecha,
       hora_inicio: x.hora, direccion: x.lugar || null, origen: 'agente_v2',
-      protegido: (x.tipo === 'instalacion' || x.tipo === 'visita_medidas'),
+      protegido: PROT_TIPOS.has(x.tipo),
     })) as any);
   }
 
