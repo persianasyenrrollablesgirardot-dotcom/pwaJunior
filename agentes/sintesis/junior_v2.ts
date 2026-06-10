@@ -65,14 +65,12 @@ async function cargarDetalle(sb: SupabaseClient, chatIds: number[]): Promise<str
       continue;
     }
     const { data: ck } = await sb.from('tarjeta_checklist').select('estado_conversacion, proximo_paso').eq('chat_id', id).maybeSingle();
-    // Tareas: leer tareas V1 (la tabla que muestra el panel) Y las del agente
-    // V2 (tarjeta_tarea). Antes solo leía V2 — no veía las que Junior crea ni
-    // las que el agente M5 deriva como tareas comerciales.
+    // Tareas: tabla ÚNICA `tareas` (V1) por persona — la misma que ve el panel.
+    // (Antes también leía `tarjeta_tarea`, tabla paralela ya eliminada/unificada.)
     const { data: tarV1 } = tt.persona_id
       ? await sb.from('tareas').select('titulo').eq('persona_id', tt.persona_id)
           .is('deleted_at', null).eq('completada', false).eq('shadow', false)
       : { data: [] };
-    const { data: tarV2 } = await sb.from('tarjeta_tarea').select('titulo, prioridad').eq('chat_id', id).order('prioridad');
     // Agenda: la fuente canónica es `agendamientos` por persona_id (lo que ve
     // el panel UI, lo que crea el detector_citas). Antes leía tarjeta_agenda
     // (derivado V2 que solo se llena con derivarAgenda → ignoraba citas
@@ -86,10 +84,10 @@ async function cargarDetalle(sb: SupabaseClient, chatIds: number[]): Promise<str
           .order('fecha').order('hora_inicio').limit(20)
       : { data: [] };
     const ctx = (tt.contexto ?? []).map((c: any) => `  [${c.titulo}] ${c.sintesis}`).join('\n');
-    // Unificar tareas V1 + V2 sin duplicar por título.
+    // Dedup por título.
     const titulosVistos = new Set<string>();
     const tareasUnif: string[] = [];
-    for (const x of [...(tarV2 ?? []), ...(tarV1 ?? [])] as any[]) {
+    for (const x of [...(tarV1 ?? [])] as any[]) {
       const k = String(x.titulo).toLowerCase().trim();
       if (titulosVistos.has(k)) continue;
       titulosVistos.add(k); tareasUnif.push(String(x.titulo));
@@ -306,14 +304,14 @@ export async function responderJuniorTarjeta(
         `- Si Jhon pide BORRAR / ELIMINAR algo concreto ("borrá la nota de X sobre Y", "eliminá la tarea de Z", "borrá la tarea transversal #N", ` +
         `"sacá esa anotación"), identificá QUÉ borrar y devolvé el campo correspondiente:\n` +
         `  • borrar_nota={"chat_id": <chat del contacto>, "texto_match": "<fragmento del texto de la nota para identificarla>"} → busca en notas_libres del contacto.\n` +
-        `  • borrar_tarea={"chat_id": <chat>, "titulo_match": "<fragmento del título>"} → busca en tarjeta_tarea del contacto (solo borra las origen='junior').\n` +
+        `  • borrar_tarea={"chat_id": <chat>, "titulo_match": "<fragmento del título>"} → busca en las tareas del contacto (solo borra las origen='junior').\n` +
         `  • borrar_tarea_transversal={"id": <id si te lo dieron, ej #2>, "titulo_match": "<o fragmento del título>"} → busca en tareas_transversales.\n` +
         `Si Jhon NO especifica qué borrar ("borrá lo de Constanza" sin más), devolvé respuesta_directa pidiendo aclaración ("¿la nota sobre X o la tarea de Y?"). ` +
         `El sistema verifica unicidad y NO borra si hay 0 o ≥2 matches — te avisa para pedir aclaración.\n` +
         `\n` +
         `═══ HONESTIDAD SOBRE LO QUE NO PODÉS HACER ═══\n` +
         `Tus capacidades de escritura son SEIS Y NADA MÁS: (1) crear nota libre en una persona, (2) cambiar el nombre del contacto, ` +
-        `(3) crear tarea en tarjeta_tarea de un contacto (origen='junior'), (4) crear tarea_transversal (sin contacto), ` +
+        `(3) crear tarea para un contacto (origen='junior'), (4) crear tarea_transversal (sin contacto), ` +
         `(5) BORRAR nota libre identificándola por texto (busca por persona_id + match), (6) BORRAR tarea (origen='junior' o transversal) por título/id.\n` +
         `Si Jhon te pide CUALQUIER OTRA COSA de escritura, NO MIENTAS confirmando. Devolvé puede_responder_con_indice=true + ` +
         `respuesta_directa explicando honestamente que no podés Y ofreciendo lo más cercano que sí podés. Lista de pedidos que NO podés ejecutar:\n` +
@@ -917,26 +915,39 @@ export async function responderJuniorTarjeta(
     // Defensa: aunque derivarChecklist filtre no-acciones, hacemos un segundo
     // pase acá para no mostrar a Jhon items de pura observación / indecisión.
     const NO_ACCION = /(mantener(se)?|esperar(\s+contacto|\s+a\s+que|\s+oportunidades)?|observar|monitorear|sin\s+acci[oó]n|ninguna\s+acci[oó]n|quedar\s+atento|atento\s+a|expectativa|reclasificar.*como.*o\s+mantener|decidir\s+si\s+\w+\s+o\s+\w+|bloquear\s+contacto|cerrar\s+(caso|contacto|cliente)|verificar\s+si.*lista\s+de\s+contactos)/i;
-    // TE TOCA reescrito: leemos las TAREAS REALES (tarjeta_tarea, 86 items en BD)
-    // en vez del 'proximo_paso' (un resumen, 1 por tarjeta). Antes solo veíamos 11;
-    // ahora vemos todas las pendientes excepto cerradas / no-cliente / no-acción.
-    const { data: todasTareas } = await sb.from('tarjeta_tarea')
-      .select('chat_id, titulo, prioridad').order('prioridad');
+    // TE TOCA: tareas REALES de la tabla ÚNICA `tareas` (V1) por persona, mapeadas
+    // a su chat. (Antes leía la tabla paralela `tarjeta_tarea`, ya unificada en
+    // `tareas`.) Excluye cerradas / no-cliente / no-acción.
     const { data: estadosCks } = await sb.from('tarjeta_checklist').select('chat_id, estado_conversacion');
     const estadoPorChat = new Map((estadosCks ?? []).map((c: any) => [c.chat_id, c.estado_conversacion]));
     const infoPorChat = new Map(indice.map(f => [f.chat_id, f]));
     type GrupoTareas = { nombre: string; tel: string; estado: string; items: string[] };
     const grupos = new Map<number, GrupoTareas>();
-    for (const t of (todasTareas ?? []) as any[]) {
-      const info = infoPorChat.get(t.chat_id);
-      if (!info) continue;  // tarjeta no-cliente (ya filtrada por cargarIndice)
-      const estado = estadoPorChat.get(t.chat_id);
-      if (estado === 'cerrado') continue;  // ruido: "Cerrar caso de X"
-      if (NO_ACCION.test(t.titulo)) continue;  // "Esperar contacto", "Bloquear", etc.
-      if (!grupos.has(t.chat_id)) {
-        grupos.set(t.chat_id, { nombre: info.nombre, tel: info.tel, estado: estado ?? '?', items: [] });
+    // persona → chat (solo tarjetas cliente, ya filtradas por cargarIndice)
+    const chatDePersona = new Map<number, FilaIndice>();
+    {
+      const { data: tjs } = await sb.from('tarjeta').select('chat_id, persona_id').not('persona_id', 'is', null);
+      for (const t of (tjs ?? []) as any[]) {
+        const info = infoPorChat.get(t.chat_id);
+        if (info) chatDePersona.set(t.persona_id, info);
       }
-      grupos.get(t.chat_id)!.items.push(String(t.titulo).trim());
+    }
+    const personaIdsActivos = [...chatDePersona.keys()];
+    if (personaIdsActivos.length) {
+      const { data: tareasV1 } = await sb.from('tareas')
+        .select('id, titulo, persona_id, prioridad').in('persona_id', personaIdsActivos)
+        .is('deleted_at', null).eq('completada', false).eq('shadow', false).order('prioridad');
+      for (const t of (tareasV1 ?? []) as any[]) {
+        const info = chatDePersona.get(t.persona_id);
+        if (!info) continue;
+        if (estadoPorChat.get(info.chat_id) === 'cerrado') continue;
+        if (NO_ACCION.test(t.titulo)) continue;
+        if (!grupos.has(info.chat_id)) {
+          grupos.set(info.chat_id, { nombre: info.nombre, tel: info.tel, estado: estadoPorChat.get(info.chat_id) ?? info.estado ?? '?', items: [] });
+        }
+        const g = grupos.get(info.chat_id)!;
+        if (!g.items.some(it => it.toLowerCase() === String(t.titulo).toLowerCase().trim())) g.items.push(String(t.titulo).trim());
+      }
     }
     // Para tarjetas con estado activo (espera_jhon/sin_responder) que NO tienen
     // entries en tarjeta_tarea, caemos al 'proximo_paso' como respaldo — así no
@@ -946,37 +957,6 @@ export async function responderJuniorTarjeta(
       if (f.estado !== 'espera_jhon' && f.estado !== 'sin_responder') continue;
       if (!f.proximo || NO_ACCION.test(f.proximo)) continue;
       grupos.set(f.chat_id, { nombre: f.nombre, tel: f.tel, estado: f.estado, items: [f.proximo] });
-    }
-    // Sumar tareas de `tareas` V1 que tienen persona_id (creadas por Junior o
-    // por el panel) y aún no completadas. Las mapeo por persona → chat para
-    // mezclar con `grupos` existente. Sin esto, las tareas que crea Junior
-    // aparecen en panel UI pero no en el listado "TE TOCA" que da por chat.
-    const personasConTarjeta = new Map<number, FilaIndice>();
-    {
-      const personaIds = await sb.from('tarjeta').select('chat_id, persona_id').not('persona_id', 'is', null);
-      for (const t of (personaIds.data ?? []) as any[]) {
-        const info = infoPorChat.get(t.chat_id);
-        if (info) personasConTarjeta.set(t.persona_id, info);
-      }
-    }
-    const personaIdsActivos = [...personasConTarjeta.keys()];
-    if (personaIdsActivos.length) {
-      const { data: tareasV1 } = await sb.from('tareas')
-        .select('id, titulo, persona_id').in('persona_id', personaIdsActivos)
-        .is('deleted_at', null).eq('completada', false).eq('shadow', false);
-      for (const t of (tareasV1 ?? []) as any[]) {
-        const info = personasConTarjeta.get(t.persona_id);
-        if (!info) continue;
-        if (NO_ACCION.test(t.titulo)) continue;
-        if (!grupos.has(info.chat_id)) {
-          grupos.set(info.chat_id, { nombre: info.nombre, tel: info.tel, estado: info.estado, items: [] });
-        }
-        // Evitar duplicar: si ya está el mismo título no lo agrego de nuevo.
-        const g = grupos.get(info.chat_id)!;
-        if (!g.items.some(it => it.toLowerCase() === String(t.titulo).toLowerCase().trim())) {
-          g.items.push(String(t.titulo).trim());
-        }
-      }
     }
     const teToca = [...grupos.values()];
 

@@ -116,13 +116,21 @@ export function TarjetaV2() {
   const cargarDerivados = useCallback(async (chatId: number) => {
     const { data: ck } = await supabase.from('tarjeta_checklist').select('*').eq('chat_id', chatId).maybeSingle();
     setChkSel((ck as any) ?? null);
-    const { data: tr } = await supabase.from('tarjeta_tarea').select('*').eq('chat_id', chatId).order('prioridad');
-    setTareas((tr as any) ?? []);
     const { data: ag } = await supabase.from('tarjeta_agenda').select('*').eq('chat_id', chatId);
     setAgenda((ag as any) ?? []);
-    // Agendamientos canónicos del PERSONA (no del chat) — editables.
+    // Tareas y agendamientos canónicos son por PERSONA (no por chat).
     const { data: tj } = await supabase.from('tarjeta').select('persona_id').eq('chat_id', chatId).maybeSingle();
     const pid = (tj as any)?.persona_id;
+    // Tareas: tabla ÚNICA `tareas` (V1) por persona, pendientes. (Antes había una
+    // tabla paralela `tarjeta_tarea` por chat que divergía del panel/Junior; se
+    // unificó todo en `tareas`.)
+    if (pid) {
+      const { data: tr } = await supabase.from('tareas')
+        .select('id, titulo, prioridad').eq('persona_id', pid)
+        .eq('completada', false).eq('shadow', false).is('deleted_at', null)
+        .order('prioridad');
+      setTareas((tr as any) ?? []);
+    } else { setTareas([]); }
     if (pid) {
       const { data: ags } = await supabase.from('agendamientos')
         .select('id, titulo, tipo, fecha, hora_inicio, direccion, origen')

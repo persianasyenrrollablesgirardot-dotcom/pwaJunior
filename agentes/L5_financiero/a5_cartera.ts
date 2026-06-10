@@ -310,18 +310,23 @@ de mensaje WhatsApp lista para Jhon.`,
     if (!p?.es_candidato_recordatorio || !p.tarea_propuesta) return;
     const t = p.tarea_propuesta as TareaCobroOutput;
 
-    // Materializar la tarea de cobro en la tarjeta (tarjeta_tarea) para que sea
-    // accionable en el Visor. origen='agente_cartera' → sobrevive al re-ciclo del
-    // motor de tarjetas (que borra solo origen 'agente'/null). Idempotente: se
-    // reemplaza la tarea de cobro previa de este chat. La plantilla WhatsApp
-    // completa vive en el evento_pg (visible en el módulo "qué entendieron los agentes").
-    await sb.from('tarjeta_tarea').delete().eq('chat_id', ctx.chat_id).eq('origen', 'agente_cartera');
+    // Materializar la tarea de cobro en la tabla ÚNICA de tareas (`tareas`, V1) para
+    // que sea accionable en el Visor — panel, card y Junior leen la misma tabla.
+    // agente_origen='A5_CARTERA' → idempotente (se reemplaza la previa de la persona)
+    // y M5 (que borra solo lo suyo) no la toca. La plantilla WhatsApp completa vive
+    // en el evento_pg ("qué entendieron los agentes").
+    const { data: cl } = await sb.from('chat_checklist').select('persona_id').eq('chat_id', ctx.chat_id).maybeSingle();
+    const personaId = (cl?.persona_id as number) ?? null;
+    if (!personaId) return;
+    const proy = (await sb.from('proyectos').select('id').eq('persona_id', personaId).limit(1)).data?.[0];
+    await sb.from('tareas').delete().eq('persona_id', personaId).eq('agente_origen', 'A5_CARTERA');
     const tituloMonto = (p.deuda_total ? ` ($${Number(p.deuda_total).toLocaleString('es-CO')})` : '');
-    await sb.from('tarjeta_tarea').insert({
-      chat_id: ctx.chat_id,
+    await sb.from('tareas').insert({
+      persona_id: personaId, proyecto_id: proy?.id ?? null,
       titulo: `💰 ${t.titulo}`.includes('$') ? `💰 ${t.titulo}` : `💰 ${t.titulo}${tituloMonto}`,
       prioridad: typeof t.prioridad === 'number' ? t.prioridad : 6,
-      origen: 'agente_cartera',
+      tipo: 'confirmar_pago', asignado_a: 'jhon', origen: 'agente',
+      agente_origen: 'A5_CARTERA', shadow: false,
     } as any);
   },
 };

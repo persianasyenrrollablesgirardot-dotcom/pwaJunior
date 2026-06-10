@@ -11,7 +11,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'node:crypto';
 import { leerInsumosTarjeta, redactarNarrativa, type Tarjeta } from './agregador.js';
-import { derivarChecklist, derivarTareas, derivarAgenda, type ResChecklist, type ResTareas, type ResAgenda } from './derivados.js';
+import { derivarChecklist, derivarAgenda, type ResChecklist, type ResAgenda } from './derivados.js';
 import { arreglarNombreSiFeo } from './nombres.js';
 import { detectarCitasUniversales } from './detector_citas.js';
 import { cascadaCierreChecklist } from './cascada.js';
@@ -135,15 +135,17 @@ export async function reconstruirTarjeta(
     .select('cerrado_manual, motivo_cierre').eq('chat_id', chatId).maybeSingle();
   const cierreManual = ccPrev?.cerrado_manual === true;
   const motivoCierre = motivoNota ?? (cierreManual ? (ccPrev?.motivo_cierre || 'Cerrado manualmente') : null);
-  let chk: ResChecklist, tar: ResTareas, age: ResAgenda;
+  // Tareas: NO se derivan acá. La fuente única de tareas es la tabla `tareas` (V1),
+  // que la puebla M5 (poblarTareas) por persona + A7/junior/recompra. Antes el motor
+  // derivaba una lista paralela a `tarjeta_tarea` (LLM redundante) que divergía del
+  // panel y de Junior; se eliminó. El card y el "TE TOCA" ahora leen `tareas`.
+  let chk: ResChecklist, age: ResAgenda;
   if (motivoCierre) {
     chk = { estado_conversacion: 'cerrado', proximo_paso: motivoNota ? 'Caso cerrado por nota de Jhon' : 'Caso cerrado', costo_usd: 0 };
-    tar = { tareas: [], costo_usd: 0 };
     age = { agendamientos: [], costo_usd: 0 };
   } else {
-    [chk, tar, age] = await Promise.all([derivarChecklist(t), derivarTareas(t), derivarAgenda(t)]);
+    [chk, age] = await Promise.all([derivarChecklist(t), derivarAgenda(t)]);
     if (chk.estado_conversacion === 'cerrado') {   // el LLM cerró → no arrastrar pendientes
-      tar = { tareas: [], costo_usd: tar.costo_usd };
       age = { agendamientos: [], costo_usd: age.costo_usd };
     }
   }
@@ -159,21 +161,8 @@ export async function reconstruirTarjeta(
     proximo_paso: chk.proximo_paso, derivado_de_hash: inputHash, actualizado_at: ahora,
   } as any);
 
-  // Borramos SOLO las tareas que regeneramos nosotros (origen='agente'). Las
-  // creadas por Junior (origen='junior') desde el chat sobreviven al re-ciclo
-  // del engine — Jhon las pidió a propósito, no deben evaporarse cuando el
-  // agente recalcule. Mismo patrón que agendamientos_origen.
-  if (casoCerrado) {
-    await sb.from('tarjeta_tarea').delete().eq('chat_id', chatId);   // cerrado → limpiar TODAS (incl. junior/cartera)
-  } else {
-    await sb.from('tarjeta_tarea').delete().eq('chat_id', chatId).or('origen.eq.agente,origen.is.null');
-  }
-  if (tar.tareas.length) {
-    await sb.from('tarjeta_tarea').insert(tar.tareas.map(x => ({
-      chat_id: chatId, titulo: x.titulo, prioridad: x.prioridad,
-      derivado_de_hash: inputHash, origen: 'agente',
-    })) as any);
-  }
+  // (Las tareas ya NO se escriben acá — viven solo en `tareas` (V1). El cierre de
+  // caso ya completa las tareas V1 vía cascadaCierreChecklist; M5 respeta el cierre.)
 
   await sb.from('tarjeta_agenda').delete().eq('chat_id', chatId);
   // Dedup por (fecha/'por coordinar', hora, título normalizado) — derivarAgenda
@@ -270,9 +259,9 @@ export async function reconstruirTarjeta(
 
   return {
     chat_id: chatId, persona_id: personaId, cambio: true, hash: inputHash,
-    estado_conversacion: chk.estado_conversacion, n_tareas: tar.tareas.length,
+    estado_conversacion: chk.estado_conversacion, n_tareas: 0,
     n_agenda: age.agendamientos.length + detCitas.citas_insertadas,
-    costo_usd: t.costo_usd + chk.costo_usd + tar.costo_usd + age.costo_usd + detCitas.llm_costo_usd,
+    costo_usd: t.costo_usd + chk.costo_usd + age.costo_usd + detCitas.llm_costo_usd,
   };
 }
 
