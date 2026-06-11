@@ -25,7 +25,7 @@ export interface RespuestaJuniorV2 {
 
 export interface TurnoHistorial { rol: 'jhon' | 'junior'; texto: string }
 
-interface FilaIndice { chat_id: number; nombre: string; tel: string; tipo: string; estado: string; proximo: string }
+interface FilaIndice { chat_id: number; nombre: string; tel: string; tipo: string; estado: string; proximo: string; deuda: number }
 
 async function cargarIndice(sb: SupabaseClient): Promise<FilaIndice[]> {
   const { data: tjs } = await sb.from('tarjeta')
@@ -34,6 +34,13 @@ async function cargarIndice(sb: SupabaseClient): Promise<FilaIndice[]> {
   const { data: cks } = await sb.from('tarjeta_checklist')
     .select('chat_id, estado_conversacion, proximo_paso');
   const ck = new Map((cks ?? []).map((c: any) => [c.chat_id, c]));
+  // Deuda cobrable por persona = suma de saldo de cotizaciones GANADAS (misma
+  // regla que A5_CARTERA). Permite a Junior responder "¿quién me debe?" / "¿cuánto
+  // me deben en total?" desde el índice, sin cargar cada tarjeta.
+  const { data: cots } = await sb.from('cotizaciones')
+    .select('persona_id, saldo').eq('estado', 'ganada').gt('saldo', 0).is('deleted_at', null);
+  const deudaPorPersona = new Map<number, number>();
+  for (const c of (cots ?? []) as any[]) deudaPorPersona.set(c.persona_id, (deudaPorPersona.get(c.persona_id) ?? 0) + Number(c.saldo ?? 0));
   return (tjs ?? []).map((t: any) => ({
     chat_id: t.chat_id,
     nombre: t.personas?.nombre ?? `Chat #${t.chat_id}`,
@@ -41,7 +48,35 @@ async function cargarIndice(sb: SupabaseClient): Promise<FilaIndice[]> {
     tipo: t.tipo_contacto,
     estado: ck.get(t.chat_id)?.estado_conversacion ?? '?',
     proximo: ck.get(t.chat_id)?.proximo_paso ?? '',
+    deuda: deudaPorPersona.get(t.persona_id) ?? 0,
   }));
+}
+
+/** Estado financiero de UNA persona para el detalle de Junior: cotizaciones
+ *  (todas), deuda cobrable (saldo de las ganadas) y total abonado. Devuelve ''
+ *  si la persona no tiene cotizaciones ni abonos. */
+async function cargarFinanzas(sb: SupabaseClient, personaId: number): Promise<string> {
+  const fmt = (n: any) => '$' + Number(n ?? 0).toLocaleString('es-CO');
+  const { data: cots } = await sb.from('cotizaciones')
+    .select('numero_cotizacion, fecha, estado, total, abono_monto, saldo')
+    .eq('persona_id', personaId).is('deleted_at', null)
+    .order('fecha', { ascending: false });
+  const { data: abs } = await sb.from('abonos')
+    .select('monto, fecha, metodo, estado_validacion')
+    .eq('persona_id', personaId).is('deleted_at', null)
+    .order('fecha', { ascending: false }).limit(20);
+  if ((!cots || cots.length === 0) && (!abs || abs.length === 0)) return '';
+  const deuda = (cots ?? []).filter((c: any) => c.estado === 'ganada' && Number(c.saldo) > 0)
+    .reduce((s: number, c: any) => s + Number(c.saldo ?? 0), 0);
+  const totalAbonado = (cots ?? []).reduce((s: number, c: any) => s + Number(c.abono_monto ?? 0), 0);
+  const lineasCot = (cots ?? []).map((c: any) =>
+    `${c.numero_cotizacion ?? 's/n'} ${c.fecha ?? ''} [${c.estado}] total ${fmt(c.total)} · abonado ${fmt(c.abono_monto)} · saldo ${fmt(c.saldo)}`);
+  const lineasAb = (abs ?? []).map((a: any) =>
+    `${a.fecha ?? ''} ${fmt(a.monto)}${a.metodo ? ' (' + a.metodo + ')' : ''}${a.estado_validacion ? ' [' + a.estado_validacion + ']' : ''}`);
+  const enc = deuda > 0 ? `DEUDA cobrable: ${fmt(deuda)}` : 'sin saldo pendiente';
+  return `PLATA — ${enc} · total abonado ${fmt(totalAbonado)}\n`
+    + (lineasCot.length ? `  Cotizaciones: ${lineasCot.join(' | ')}\n` : '')
+    + (lineasAb.length ? `  Abonos: ${lineasAb.join(' | ')}` : '');
 }
 
 async function cargarDetalle(sb: SupabaseClient, chatIds: number[]): Promise<string> {
@@ -97,6 +132,7 @@ async function cargarDetalle(sb: SupabaseClient, chatIds: number[]): Promise<str
       const lugar = x.direccion ? ` @ ${x.direccion}` : '';
       return `${x.titulo} (${cuando}${lugar})`;
     }).join(' · ') || '(nada agendado en próximos 20 eventos)';
+    const plata = tt.persona_id ? await cargarFinanzas(sb, tt.persona_id) : '';
     bloques.push(
       `### ${tt.personas?.nombre ?? `Chat #${id}`} (chat ${id}, ${tt.tipo_contacto})\n` +
       (contacto ? `CONTACTO: ${contacto}\n` : '') +
@@ -105,6 +141,7 @@ async function cargarDetalle(sb: SupabaseClient, chatIds: number[]): Promise<str
       `CHECKLIST: ${ck?.estado_conversacion ?? '?'} → ${ck?.proximo_paso ?? '-'}\n` +
       `TAREAS: ${tareasUnif.join(' · ') || '(ninguna)'}\n` +
       `AGENDA: ${agendaStr}\n` +
+      (plata ? plata + '\n' : '') +
       `CONTEXTO POR MÓDULO:\n${ctx || '  (sin detalle)'}`
     );
   }
@@ -151,8 +188,11 @@ export async function responderJuniorTarjeta(
       f.estado = 'cerrado';
     }
   }
+  const fmtCOP = (n: number) => '$' + Math.round(n).toLocaleString('es-CO');
+  const carteraTotal = indice.reduce((s, f) => s + (f.deuda || 0), 0);
   const indiceTexto = indice.length
-    ? indice.map(f => `chat ${f.chat_id} | ${f.nombre}${f.tel ? ` | ${f.tel}` : ''} | ${f.tipo} | estado:${f.estado} | próximo:${f.proximo}`).join('\n')
+    ? indice.map(f => `chat ${f.chat_id} | ${f.nombre}${f.tel ? ` | ${f.tel}` : ''} | ${f.tipo} | estado:${f.estado}${f.deuda > 0 ? ` | debe:${fmtCOP(f.deuda)}` : ''} | próximo:${f.proximo}`).join('\n')
+      + `\n\nCARTERA TOTAL (suma de saldos cobrables): ${fmtCOP(carteraTotal)} en ${indice.filter(f => f.deuda > 0).length} clientes con deuda.`
     : '(no hay tarjetas todavía)';
 
   // Historial reciente (para resolver follow-ups: "¿y de ese cuánto debe?").
@@ -229,9 +269,10 @@ export async function responderJuniorTarjeta(
         `Sos el RUTEO de Junior, asistente de Jhon (Persianas Girardot, COP).\n` +
         `\n` +
         `═══ EL ÍNDICE ES SUPERFICIAL — NO MIENTAS A PARTIR DE ÉL ═══\n` +
-        `El ÍNDICE que ves abajo es UNA LÍNEA por tarjeta: nombre, teléfono, tipo, estado, próximo paso. NADA más. ` +
-        `NO tenés la narrativa, NO tenés las notas, NO tenés el historial de la conversación, NO tenés la cotización ni los pagos. ` +
-        `Esos datos viven en la TARJETA PROCESADA — para acceder los tenés que cargar chat_ids (puede_responder_con_indice=false). ` +
+        `El ÍNDICE que ves abajo es UNA LÍNEA por tarjeta: nombre, teléfono, tipo, estado, deuda (debe:$X si tiene saldo cobrable) y próximo paso. Al final trae la CARTERA TOTAL. ` +
+        `SÍ PODÉS responder de PLATA a alto nivel SOLO con el índice: quién debe, cuánto debe cada cliente (el campo debe:$X) y el total de cartera. NO digas "no veo la plata" — la tenés acá. ` +
+        `Lo que el índice NO trae: la narrativa, las notas, el historial de la conversación, ni el DESGLOSE de cotizaciones/abonos (cada cotización con total/abonado/saldo y los pagos). ` +
+        `Esos datos viven en la TARJETA PROCESADA — para acceder (incl. el desglose de plata por cotización) cargá chat_ids (puede_responder_con_indice=false). ` +
         `PROHIBIDO responder "no hay registro de X" / "no hay conversación con X" / "no tengo info de X" usando SOLO el índice. ` +
         `Si la persona aparece en el índice, su tarjeta procesada existe — cargala. Caso reportado: "dame resumen de Lorena" → respondiste "sin conversación" basándote en el índice, cuando su tarjeta TIENE narrativa completa. ESO ES MENTIRA.\n` +
         `\n` +
