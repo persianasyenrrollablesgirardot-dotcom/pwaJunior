@@ -340,6 +340,22 @@ export async function actualizarPersona(id: number, cambios: Partial<{
   const { error } = await supabase.from('personas')
     .update({ ...cambios, actualizado_por: 1, sintesis_pendiente: true }).eq('id', id);
   if (error) throw error;
+
+  // Si cambió el ÁMBITO: propagarlo a TODOS los chats + proyectos de la persona y
+  // marcarlo CONFIRMADO. Sin esto, editar el ámbito desde la ficha solo tocaba
+  // personas.ambito_principal → divergía de chats.ambito, y como ambito_confirmado
+  // seguía false el agente A2_AMBITO lo revertía al llegar el próximo mensaje
+  // (volvía a 'comercial'). Ahora el cambio manual queda pegado (misma coherencia
+  // que el "Reclasificar" del módulo Clientes).
+  if (cambios.ambito_principal != null) {
+    const amb = cambios.ambito_principal;
+    const { data: proys } = await supabase.from('proyectos').select('id').eq('persona_id', id);
+    const proyIds = (proys ?? []).map((p: any) => p.id);
+    if (proyIds.length) {
+      await supabase.from('proyectos').update({ ambito: amb }).in('id', proyIds);
+      await supabase.from('chats').update({ ambito: amb, ambito_confirmado: true }).in('proyecto_id', proyIds);
+    }
+  }
 }
 
 export async function crearPersona(data: {
