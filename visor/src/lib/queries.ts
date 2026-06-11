@@ -504,27 +504,31 @@ export async function vincularPersonaInmueble(personaId: number, inmuebleId: num
 // ─── Fusionar personas duplicadas (sección 29) ───────────────────────
 
 export async function fusionarPersonas(sobrevivienteId: number, fusionadaId: number, motivo: string): Promise<void> {
-  // 1. Mover todas las referencias de la persona fusionada → sobreviviente
-  await supabase.from('evento_pg').update({ persona_id: sobrevivienteId }).eq('persona_id', fusionadaId);
-  await supabase.from('proyectos').update({ persona_id: sobrevivienteId }).eq('persona_id', fusionadaId);
-  await supabase.from('rol_persona_inmueble').update({ persona_id: sobrevivienteId }).eq('persona_id', fusionadaId);
-  await supabase.from('memoria_local').update({ persona_id: sobrevivienteId }).eq('persona_id', fusionadaId);
-  await supabase.from('notas_libres').update({ persona_id: sobrevivienteId }).eq('persona_id', fusionadaId);
-  await supabase.from('correcciones').update({ persona_id: sobrevivienteId }).eq('persona_id', fusionadaId);
-  await supabase.from('buzon_validacion').update({ persona_id: sobrevivienteId }).eq('persona_id', fusionadaId);
-
-  // 2. Log de la fusión
-  await supabase.from('personas_merge_log').insert({
-    persona_sobreviviente_id: sobrevivienteId,
-    persona_fusionada_id: fusionadaId,
-    motivo,
-    hecho_por: 1,
-  });
-
-  // 3. Soft-delete de la persona fusionada
-  await supabase.from('personas')
-    .update({ deleted_at: new Date().toISOString() })
-    .eq('id', fusionadaId);
+  // Fusión ATÓMICA vía la RPC `fusionar_persona_atomica` (migración 052) — la misma
+  // que usa el worker. Corre en UNA transacción: mueve TODAS las tablas con
+  // persona_id (auto-descubiertas), descarta la síntesis de la fusionada, hereda su
+  // identidad (jid/tel/email/ciudad), registra el log, soft-deletea la fusionada y
+  // cierra los duplicados pendientes. Antes esta versión del frontend solo movía 7
+  // tablas (dejaba tareas/agendamientos/cotizaciones/tarjeta huérfanas) y no era
+  // atómica. SECURITY DEFINER → funciona con la anon key del Visor.
+  //
+  // RETRY: el rol anon tiene statement_timeout=3s. La fusión normalmente tarda <1s,
+  // pero la primera en frío (warmup de planes) o bajo carga del worker puede pasar
+  // los 3s. Como es ATÓMICA (un timeout hace ROLLBACK total — no deja nada a medias),
+  // reintentar es seguro: en el 2º intento ya está en caché y entra.
+  let lastErr = '';
+  for (let intento = 1; intento <= 3; intento++) {
+    const { error } = await supabase.rpc('fusionar_persona_atomica', {
+      p_sobreviviente: sobrevivienteId,
+      p_fusionada: fusionadaId,
+      p_motivo: motivo,
+    });
+    if (!error) return;
+    lastErr = error.message;
+    if (!/timeout|canceling statement|57014/i.test(error.message)) break;  // error real → no reintentar
+    await new Promise(r => setTimeout(r, 800));
+  }
+  throw new Error(`fusión atómica: ${lastErr}`);
 }
 
 // ─── Transcripciones / media procesada (M1 sub-tab 1.7) ─────────────

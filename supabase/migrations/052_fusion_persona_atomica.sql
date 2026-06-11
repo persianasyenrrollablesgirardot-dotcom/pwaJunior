@@ -20,7 +20,10 @@ create or replace function fusionar_persona_atomica(
   p_motivo        text
 ) returns void
 language plpgsql
-as $$
+security definer            -- corre con privilegios del owner: la llaman tanto el
+set search_path = public   -- worker (service_role) como el Visor (anon), y debe
+set statement_timeout = '60s'  -- el anon del Visor tiene timeout corto; mover ~30
+as $$                          -- tablas (algunas sin índice en persona_id) lo excede.
 declare
   t text;
 begin
@@ -81,3 +84,7 @@ begin
      and (persona_nueva_id = p_fusionada or persona_existente_id = p_fusionada);
 end;
 $$;
+
+-- La llaman el worker (service_role) y el Visor (anon/authenticated).
+grant execute on function fusionar_persona_atomica(bigint, bigint, text)
+  to anon, authenticated, service_role;
