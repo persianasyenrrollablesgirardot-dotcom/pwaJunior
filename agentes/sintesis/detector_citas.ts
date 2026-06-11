@@ -131,10 +131,16 @@ export async function detectarCitasUniversales(
   //    las PENDIENTES por título normalizado (una persona no debe acumular 5
   //    "coordinar visita" idénticos).
   const { data: existentes } = await sb.from('agendamientos')
-    .select('fecha, hora_inicio, titulo, pendiente').eq('persona_id', personaId).is('deleted_at', null);
+    .select('fecha, hora_inicio, titulo, pendiente, tipo, protegido').eq('persona_id', personaId).is('deleted_at', null);
   const norm = (s: string) => (s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const fijasYa = new Set((existentes ?? []).filter((a: any) => a.fecha).map((a: any) => `${a.fecha}|${(a.hora_inicio ?? '').slice(0, 5)}`));
   const pendsYa = new Set((existentes ?? []).filter((a: any) => a.pendiente).map((a: any) => norm(a.titulo)));
+  // UNA visita/instalación protegida por (persona, tipo): si ya hay una activa de
+  // ese tipo (la derivó agente_v2 u otro detector), NO insertar otra aunque la
+  // fecha difiera. Sin esto el dedup por fecha|hora dejaba acumular protegidas de
+  // la misma visita en fechas distintas (mismo bug que se arregló en agente_v2).
+  const PROT_TIPOS = new Set(['instalacion', 'visita_medidas']);
+  const protTiposYa = new Set((existentes ?? []).filter((a: any) => a.protegido).map((a: any) => a.tipo));
 
   const nuevas = citas.filter(c => {
     if (c.pendiente) {
@@ -142,9 +148,11 @@ export async function detectarCitasUniversales(
       pendsYa.add(norm(c.titulo));
       return true;
     }
+    if (PROT_TIPOS.has(c.tipo) && protTiposYa.has(c.tipo)) { result.citas_saltadas_por_dedup++; return false; }
     const k = `${c.fecha}|${c.hora}`;
     if (fijasYa.has(k)) { result.citas_saltadas_por_dedup++; return false; }
     fijasYa.add(k);
+    if (PROT_TIPOS.has(c.tipo)) protTiposYa.add(c.tipo);
     return true;
   });
   if (!nuevas.length) return result;

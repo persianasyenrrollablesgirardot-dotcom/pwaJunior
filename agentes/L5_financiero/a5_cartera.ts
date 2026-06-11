@@ -318,6 +318,17 @@ de mensaje WhatsApp lista para Jhon.`,
     const { data: cl } = await sb.from('chat_checklist').select('persona_id').eq('chat_id', ctx.chat_id).maybeSingle();
     const personaId = (cl?.persona_id as number) ?? null;
     if (!personaId) return;
+    // CIERRE CONSCIENTE: si el caso está cerrado (todos los chats cerrado_manual),
+    // NO crear el cobro como tarea (mantiene la invariante "cerrado ⇒ sin
+    // pendientes"; la deuda sigue visible en cotizaciones/PLATA). Limpia el previo
+    // si quedó. Antes esto se daba solo porque cartera escribía en tarjeta_tarea y
+    // el cierre la borraba; al unificar en `tareas` hay que guardarlo acá.
+    const { data: chks } = await sb.from('chat_checklist').select('cerrado_manual').eq('persona_id', personaId);
+    const casoCerrado = (chks?.length ?? 0) > 0 && chks!.every((c: any) => c.cerrado_manual === true);
+    if (casoCerrado) {
+      await sb.from('tareas').delete().eq('persona_id', personaId).eq('agente_origen', 'A5_CARTERA');
+      return;
+    }
     const proy = (await sb.from('proyectos').select('id').eq('persona_id', personaId).limit(1)).data?.[0];
     await sb.from('tareas').delete().eq('persona_id', personaId).eq('agente_origen', 'A5_CARTERA');
     const tituloMonto = (p.deuda_total ? ` ($${Number(p.deuda_total).toLocaleString('es-CO')})` : '');
