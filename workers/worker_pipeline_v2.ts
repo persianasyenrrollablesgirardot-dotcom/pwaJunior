@@ -557,6 +557,46 @@ async function cicloReconciliarSintesis(): Promise<void> {
   }
 }
 
+// RED DE SEGURIDAD del ÁMBITO. La fuente de verdad es personas.ambito_principal.
+// Editar el ámbito desde la ficha lo propaga a chats/proyectos y lo confirma (fix
+// en queries.ts), PERO si se edita con una pestaña del Visor que aún corre código
+// viejo, solo se actualiza la persona → el chat diverge y A2_AMBITO lo revierte.
+// Este ciclo sincroniza chat.ambito ← persona y CONFIRMA los no-comerciales, así
+// el ámbito queda consistente y pegado pase lo que pase. NO toca los chats que ya
+// coinciden con su persona (no interfiere con la auto-clasificación de A2 sobre
+// los comerciales sin confirmar).
+let reconciliarAmbitoEnCurso = false;
+async function cicloReconciliarAmbito(): Promise<void> {
+  if (reconciliarAmbitoEnCurso) return;
+  reconciliarAmbitoEnCurso = true;
+  try {
+    const { data: pers } = await sb.from('personas').select('id, ambito_principal').is('deleted_at', null);
+    const ambDe = new Map((pers ?? []).map((p: any) => [p.id, p.ambito_principal]));
+    const { data: proys } = await sb.from('proyectos').select('id, persona_id, ambito');
+    const persDeProy = new Map((proys ?? []).map((p: any) => [p.id, p.persona_id]));
+    const { data: chats } = await sb.from('chats').select('id, proyecto_id, ambito, ambito_confirmado').is('deleted_at', null);
+    let fixChats = 0;
+    for (const c of chats ?? []) {
+      const pid = persDeProy.get((c as any).proyecto_id); if (!pid) continue;
+      const amb = ambDe.get(pid); if (amb == null) continue;
+      const patch: any = {};
+      if ((c as any).ambito !== amb) patch.ambito = amb;                                   // divergencia (señal de edición manual)
+      if (amb !== 'comercial' && !(c as any).ambito_confirmado) patch.ambito_confirmado = true;  // proteger no-comerciales
+      if (Object.keys(patch).length) { await sb.from('chats').update(patch).eq('id', (c as any).id); fixChats++; }
+    }
+    let fixProy = 0;
+    for (const pr of proys ?? []) {
+      const amb = ambDe.get((pr as any).persona_id);
+      if (amb != null && (pr as any).ambito !== amb) { await sb.from('proyectos').update({ ambito: amb }).eq('id', (pr as any).id); fixProy++; }
+    }
+    if (fixChats || fixProy) console.log(`[V2/RECONCILIAR-AMBITO] sincronizados ${fixChats} chat(s) + ${fixProy} proyecto(s) al ámbito de su persona`);
+  } catch (e: any) {
+    console.error('[V2/RECONCILIAR-AMBITO]', e?.message);
+  } finally {
+    reconciliarAmbitoEnCurso = false;
+  }
+}
+
 async function cicloPipeline(): Promise<number> {
   if (pipelineEnCurso) return 0;
   pipelineEnCurso = true;
@@ -1352,6 +1392,10 @@ async function main() {
   // los 30s para limpiar huérfanas tras cada arranque, luego cada 3 min.
   setTimeout(() => { cicloReconciliarSintesis().catch(e => console.error('[V2/RECONCILIAR]', e?.message)); }, 30_000);
   setInterval(() => { cicloReconciliarSintesis().catch(e => console.error('[V2/RECONCILIAR]', e?.message)); }, 3 * 60 * 1000);
+  // Red de seguridad del ámbito: sincroniza chat.ambito ← persona + confirma los
+  // no-comerciales (disparo inicial a los 45s, luego cada 5 min).
+  setTimeout(() => { cicloReconciliarAmbito().catch(e => console.error('[V2/RECONCILIAR-AMBITO]', e?.message)); }, 45_000);
+  setInterval(() => { cicloReconciliarAmbito().catch(e => console.error('[V2/RECONCILIAR-AMBITO]', e?.message)); }, 5 * 60 * 1000);
 
   // Disparador batch de A5_CARTERA (cobros pendientes): no es tiempo real → cada
   // 6h + un disparo inicial a los 60s del arranque. Throttle interno por persona.
