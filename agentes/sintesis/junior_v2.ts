@@ -346,7 +346,7 @@ export async function responderJuniorTarjeta(
         `"sacá esa anotación"), identificá QUÉ borrar y devolvé el campo correspondiente:\n` +
         `  • borrar_nota={"chat_id": <chat del contacto>, "texto_match": "<fragmento del texto de la nota para identificarla>"} → busca en notas_libres del contacto.\n` +
         `  • borrar_tarea={"chat_id": <chat>, "titulo_match": "<fragmento del título>"} → busca en las tareas del contacto (solo borra las origen='junior').\n` +
-        `  • borrar_tarea_transversal={"id": <id si te lo dieron, ej #2>, "titulo_match": "<o fragmento del título>"} → busca en tareas_transversales.\n` +
+        `  • borrar_tarea_transversal={"id": <id si te lo dieron, ej #2>, "titulo_match": "<o fragmento del título>"} → busca en las tareas transversales (sin contacto).\n` +
         `Si Jhon NO especifica qué borrar ("borrá lo de Constanza" sin más), devolvé respuesta_directa pidiendo aclaración ("¿la nota sobre X o la tarea de Y?"). ` +
         `El sistema verifica unicidad y NO borra si hay 0 o ≥2 matches — te avisa para pedir aclaración.\n` +
         `\n` +
