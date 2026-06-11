@@ -25,6 +25,26 @@ function motivoNotaCierre(notas: string[]): string | null {
   return null;
 }
 
+/** ¿El cliente reactivó el caso? = escribió un mensaje ENTRANTE después del cierre.
+ *  Un caso cerrado (por nota o por botón/análisis) NO debe quedar cerrado para
+ *  siempre: si el cliente vuelve a escribir, se reabre. Sin esto, el cierre-por-nota
+ *  y el cerrado_manual se re-aplicaban en cada reconstrucción y el cliente que
+ *  volvía quedaba oculto (filtro 'activos' del módulo Tarjeta V2). */
+async function clienteReactivo(sb: SupabaseClient, personaId: number, tsCierre: string | null): Promise<boolean> {
+  if (!tsCierre) return false;
+  const { data: proys } = await sb.from('proyectos').select('id').eq('persona_id', personaId);
+  const proyIds = (proys ?? []).map((p: any) => p.id);
+  if (!proyIds.length) return false;
+  const { data: chats } = await sb.from('chats').select('id').in('proyecto_id', proyIds).is('deleted_at', null);
+  const chatIds = (chats ?? []).map((c: any) => c.id);
+  if (!chatIds.length) return false;
+  const { data: m } = await sb.from('mensajes').select('ts_canal')
+    .in('chat_id', chatIds).eq('direccion', 'entrante').is('deleted_at', null)
+    .order('ts_canal', { ascending: false }).limit(1);
+  const ultMsg = m?.[0]?.ts_canal as string | undefined;
+  return !!(ultMsg && ultMsg > tsCierre);
+}
+
 export interface ResultadoReconstruir {
   chat_id: number;
   persona_id: number | null;
@@ -124,17 +144,31 @@ export async function reconstruirTarjeta(
   // FIX flujo de cierre: si hay nota de cierre (regex determinístico) NO gastamos
   // LLM y cerramos directo; si no, derivamos normal y respetamos lo que diga el
   // checklist. Si el caso quedó CERRADO, no se arrastran tareas/agenda nuevas.
-  const motivoNota = motivoNotaCierre(ins.notas);
-  // Cierre AUTORITATIVO: si el caso ya quedó cerrado manualmente (botón/cascada,
-  // cerrado_manual=true), V2 lo respeta y NO deja que el LLM lo reabra. Antes
-  // solo miraba notas/LLM → un cierre por botón SIN nota se desincronizaba
-  // (chat_checklist='cerrada' vs tarjeta='espera_*'). Bug desincronización
-  // 2026-05-31. OJO: solo el flag cerrado_manual es autoritativo; el legacy
-  // estado='cerrada' del Junior viejo (sin flag) NO — puede haber reabierto.
+  // Cierre AUTORITATIVO: cerrado_manual=true (botón/cascada/análisis) o nota de
+  // cierre. PERO con REACTIVACIÓN: si el cliente escribió DESPUÉS del cierre, se
+  // reabre (no se queda cerrado para siempre ignorando que volvió).
   const { data: ccPrev } = await sb.from('chat_checklist')
-    .select('cerrado_manual, motivo_cierre').eq('chat_id', chatId).maybeSingle();
+    .select('cerrado_manual, motivo_cierre, actualizado_at').eq('chat_id', chatId).maybeSingle();
   const cierreManual = ccPrev?.cerrado_manual === true;
-  const motivoCierre = motivoNota ?? (cierreManual ? (ccPrev?.motivo_cierre || 'Cerrado manualmente') : null);
+  // Nota de cierre con su fecha (notas_libres tiene ts; persona.notas no → cubierto aparte).
+  const { data: notasC } = await sb.from('notas_libres')
+    .select('contenido, ts_creado').eq('persona_id', personaId).is('deleted_at', null);
+  const cierreNota = (notasC ?? []).filter((n: any) => n.contenido && RE_CIERRE.test(n.contenido))
+    .sort((a: any, b: any) => String(b.ts_creado ?? '').localeCompare(String(a.ts_creado ?? '')))[0];
+  const notaPersona = motivoNotaCierre(ins.notas);   // incluye persona.notas (sin ts)
+  // Fecha del cierre = la más reciente entre la nota de cierre y el cierre manual.
+  const tsCierre = [cierreNota?.ts_creado ?? null, cierreManual ? (ccPrev?.actualizado_at ?? null) : null]
+    .filter(Boolean).sort().slice(-1)[0] as string | null ?? null;
+  const reactivado = await clienteReactivo(sb, personaId, tsCierre);
+  if (reactivado && cierreManual) {
+    // Reabrir también en V1 para que no diverja (otros leen chat_checklist.cerrado_manual).
+    try { await sb.from('chat_checklist').update({ cerrado_manual: false } as any).eq('chat_id', chatId); } catch { /* best-effort */ }
+  }
+  const hayCierre = !!(notaPersona || cierreManual);
+  const motivoNota = (!reactivado && (cierreNota || notaPersona)) ? (cierreNota?.contenido?.trim().slice(0, 200) ?? notaPersona) : null;
+  const motivoCierre = (hayCierre && !reactivado)
+    ? (motivoNota ?? (ccPrev?.motivo_cierre || 'Cerrado manualmente'))
+    : null;
   // Tareas: NO se derivan acá. La fuente única de tareas es la tabla `tareas` (V1),
   // que la puebla M5 (poblarTareas) por persona + A7/junior/recompra. Antes el motor
   // derivaba una lista paralela a `tarjeta_tarea` (LLM redundante) que divergía del
