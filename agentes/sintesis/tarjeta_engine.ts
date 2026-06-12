@@ -30,19 +30,28 @@ function motivoNotaCierre(notas: string[]): string | null {
  *  siempre: si el cliente vuelve a escribir, se reabre. Sin esto, el cierre-por-nota
  *  y el cerrado_manual se re-aplicaban en cada reconstrucción y el cliente que
  *  volvía quedaba oculto (filtro 'activos' del módulo Tarjeta V2). */
-async function clienteReactivo(sb: SupabaseClient, personaId: number, tsCierre: string | null): Promise<boolean> {
-  if (!tsCierre) return false;
+async function clienteReactivo(sb: SupabaseClient, personaId: number, notaCierreTs: string | null): Promise<boolean> {
   const { data: proys } = await sb.from('proyectos').select('id').eq('persona_id', personaId);
   const proyIds = (proys ?? []).map((p: any) => p.id);
   if (!proyIds.length) return false;
   const { data: chats } = await sb.from('chats').select('id').in('proyecto_id', proyIds).is('deleted_at', null);
   const chatIds = (chats ?? []).map((c: any) => c.id);
   if (!chatIds.length) return false;
-  const { data: m } = await sb.from('mensajes').select('ts_canal')
-    .in('chat_id', chatIds).eq('direccion', 'entrante').is('deleted_at', null)
-    .order('ts_canal', { ascending: false }).limit(1);
-  const ultMsg = m?.[0]?.ts_canal as string | undefined;
-  return !!(ultMsg && ultMsg > tsCierre);
+  const ultimoTs = async (direccion: string) => {
+    const { data } = await sb.from('mensajes').select('ts_canal')
+      .in('chat_id', chatIds).eq('direccion', direccion).is('deleted_at', null)
+      .order('ts_canal', { ascending: false }).limit(1);
+    return (data?.[0]?.ts_canal as string | undefined) ?? null;
+  };
+  const ultEntrante = await ultimoTs('entrante');
+  if (!ultEntrante) return false;
+  // Referencia de cierre ESTABLE (no usamos chat_checklist.actualizado_at, que se
+  // re-bumpea en cada reconstrucción): la nota de cierre, o nuestra última respuesta
+  // saliente (cerramos alrededor de cuando actuamos por última vez).
+  const ultSaliente = await ultimoTs('saliente');
+  const refs = [notaCierreTs, ultSaliente].filter(Boolean).sort() as string[];
+  const ref = refs.length ? refs[refs.length - 1] : null;
+  return ref ? ultEntrante > ref : true;   // sin referencia pero hay entrante → reactivado
 }
 
 export interface ResultadoReconstruir {
@@ -156,10 +165,11 @@ export async function reconstruirTarjeta(
   const cierreNota = (notasC ?? []).filter((n: any) => n.contenido && RE_CIERRE.test(n.contenido))
     .sort((a: any, b: any) => String(b.ts_creado ?? '').localeCompare(String(a.ts_creado ?? '')))[0];
   const notaPersona = motivoNotaCierre(ins.notas);   // incluye persona.notas (sin ts)
-  // Fecha del cierre = la más reciente entre la nota de cierre y el cierre manual.
-  const tsCierre = [cierreNota?.ts_creado ?? null, cierreManual ? (ccPrev?.actualizado_at ?? null) : null]
-    .filter(Boolean).sort().slice(-1)[0] as string | null ?? null;
-  const reactivado = await clienteReactivo(sb, personaId, tsCierre);
+  // Reactivación contra una referencia ESTABLE (nota de cierre / última saliente),
+  // cubre tanto el cierre por nota como el cerrado_manual / auto-cierre "sin pendientes".
+  const reactivado = (cierreNota || notaPersona || cierreManual)
+    ? await clienteReactivo(sb, personaId, cierreNota?.ts_creado ?? null)
+    : false;
   if (reactivado && cierreManual) {
     // Reabrir también en V1 para que no diverja (otros leen chat_checklist.cerrado_manual).
     try { await sb.from('chat_checklist').update({ cerrado_manual: false } as any).eq('chat_id', chatId); } catch { /* best-effort */ }
