@@ -324,6 +324,7 @@ export async function responderJuniorTarjeta(
         `Si el contacto NO está claro o es ambiguo (ver REGLA ANTI-ASUMIR abajo), o si Jhon dice "transversal / general / sin cliente / sin contacto / no asignada", ` +
         `devolvé nueva_tarea_transversal={"titulo": "<acción>", "descripcion": "<contexto opcional, ej: 'Señora del conjunto Madeira, sin teléfono todavía'>"}. ` +
         `IMPORTANTE: tarea ≠ nota. Tarea es acción pendiente que aparecerá listada cuando Jhon pida "tareas pendientes". Nota es contexto.\n` +
+        `FECHA DE LA TAREA: si Jhon menciona CUÁNDO ("mañana", "el viernes", "hoy 3pm", "el 15", "comprar destornillador mañana"), poné fecha_vence (resolvé fechas relativas contra HOY=${hoyISO}, formato YYYY-MM-DD) y hora_vence (HH:MM) si dijo hora. Las tareas con fecha aparecen en el CALENDARIO ese día. Sin fecha mencionada → fecha_vence=null. Aplica a nueva_tarea Y nueva_tarea_transversal.\n` +
         `- Si Jhon te da una INSTRUCCIÓN para recordar/anotar contexto sobre un contacto ("este es mi instalador William", "anotá que X es socio", ` +
         `"recordá que Y siempre llega tarde", "tené en cuenta que Z prefiere efectivo") → devolvé nota={"chat_id": <chat del contacto del índice>, "texto": "<la instrucción ` +
         `redactada como nota>"}. Es CONTEXTO para guardar, no una tarea.\n` +
@@ -375,8 +376,8 @@ export async function responderJuniorTarjeta(
         `Devolvé SOLO JSON: {"puede_responder_con_indice": bool, "respuesta_directa": string|null, "chat_ids": number[], ` +
         `"nota": {"chat_id": number, "texto": string} | null, ` +
         `"nuevo_nombre": {"chat_id": number, "nombre": string} | null, ` +
-        `"nueva_tarea": {"chat_id": number, "titulo": string} | null, ` +
-        `"nueva_tarea_transversal": {"titulo": string, "descripcion": string} | null, ` +
+        `"nueva_tarea": {"chat_id": number, "titulo": string, "fecha_vence": "YYYY-MM-DD"|null, "hora_vence": "HH:MM"|null} | null, ` +
+        `"nueva_tarea_transversal": {"titulo": string, "descripcion": string, "fecha_vence": "YYYY-MM-DD"|null, "hora_vence": "HH:MM"|null} | null, ` +
         `"borrar_nota": {"chat_id": number, "texto_match": string} | null, ` +
         `"borrar_tarea": {"chat_id": number, "titulo_match": string} | null, ` +
         `"borrar_tarea_transversal": {"id": number|null, "titulo_match": string} | null, ` +
@@ -685,7 +686,9 @@ export async function responderJuniorTarjeta(
       accTareaTransvFinal = {
         titulo: accTarea.titulo,
         descripcion: `Pista del contacto: "${fragmento}" (no identificado todavía — pedir nombre/teléfono a Jhon antes de mover a tarjeta).`,
-      };
+        fecha_vence: (accTarea as any).fecha_vence ?? null,
+        hora_vence: (accTarea as any).hora_vence ?? null,
+      } as any;
     }
   }
 
@@ -694,9 +697,12 @@ export async function responderJuniorTarjeta(
   if (accTareaTransvFinal) {
     const titulo = String(accTareaTransvFinal.titulo).trim().slice(0, 200);
     const descripcion = String(accTareaTransvFinal.descripcion ?? '').trim().slice(0, 500) || null;
+    const fechaV = (accTareaTransvFinal as any).fecha_vence || null;
+    const horaV = (accTareaTransvFinal as any).hora_vence || null;
     const { data: ins, error } = await sb.from('tareas').insert({
       persona_id: null,
       titulo, descripcion, tipo: 'otro',
+      fecha_vence: fechaV, hora_vence: horaV,
       origen: 'chat', agente_origen: 'junior_v2',
       asignado_a: 'jhon', prioridad: 5, shadow: false,
     } as any).select('id').single();
@@ -704,8 +710,9 @@ export async function responderJuniorTarjeta(
       return { respuesta: `Quería guardar la tarea transversal pero hubo un error: ${error.message}`, tarjetas_usadas: [], via_indice: false, costo_usd: costo };
     }
     const aviso = descripcion ? ` Nota: ${descripcion}` : '';
+    const avisoFecha = fechaV ? ` Programada para el ${fechaV}${horaV ? ' ' + horaV : ''} — aparece en el calendario ese día.` : '';
     return {
-      respuesta: `Listo, tarea transversal #${ins.id} guardada: «${titulo}».${aviso} La ves en el panel Tareas (filtro Transversales) o cuando me pidas "tareas pendientes".`,
+      respuesta: `Listo, tarea transversal #${ins.id} guardada: «${titulo}».${aviso}${avisoFecha} La ves en el panel Tareas (filtro Transversales) o cuando me pidas "tareas pendientes".`,
       tarjetas_usadas: [], via_indice: false, costo_usd: costo,
     };
   }
@@ -740,12 +747,15 @@ export async function responderJuniorTarjeta(
       // Tarea con persona_id: va a `tareas` V1 (la tabla que muestra el panel
       // JuniorTareas). agente_origen='junior_v2' la marca como mía.
       const titulo = String(accTareaFinal.titulo).trim().slice(0, 200);
+      const fechaV = (accTareaFinal as any).fecha_vence || null;
+      const horaV = (accTareaFinal as any).hora_vence || null;
       const { error } = await sb.from('tareas').insert({
         persona_id: personaId, titulo, tipo: 'otro',
+        fecha_vence: fechaV, hora_vence: horaV,
         origen: 'chat', agente_origen: 'junior_v2',
         asignado_a: 'jhon', prioridad: 5, shadow: false,
       } as any);
-      if (!error) hechos.push(`creé la tarea: «${titulo}»`);
+      if (!error) hechos.push(`creé la tarea: «${titulo}»${fechaV ? ` (para el ${fechaV}${horaV ? ' ' + horaV : ''}, aparece en el calendario)` : ''}`);
     }
     await sb.from('tarjeta').update({ dirty: true } as any).eq('chat_id', chatId);
     const nombreShow = (accNombre?.nombre as string) ?? indice.find(f => f.chat_id === chatId)?.nombre ?? `chat ${chatId}`;

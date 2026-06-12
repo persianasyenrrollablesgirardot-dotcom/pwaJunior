@@ -79,6 +79,16 @@ export function JuniorTareas() {
     } catch (e: any) { fb('err', e.message); }
   }
 
+  // Asignar un contacto a una tarea transversal (deja de ser transversal). Si tiene
+  // fecha, ya aparece en el calendario; al tener contacto se agrupa bajo él.
+  async function asignarContacto(tareaId: number, personaId: number) {
+    try {
+      await actualizarTarea(tareaId, { persona_id: personaId } as any);
+      await cargar();
+      fb('ok', '👤 Tarea asignada al contacto');
+    } catch (e: any) { fb('err', e.message); }
+  }
+
   // Filtrar por alcance (todas / solo clientes / solo transversales)
   const tareasAlcance = useMemo(() => {
     if (alcance === 'clientes') return tareas.filter(t => t.persona_id != null);
@@ -210,7 +220,7 @@ export function JuniorTareas() {
             </h3>
             <div style={{ display: 'grid', gap: 6 }}>
               {items.map(t => (
-                <TareaRow key={t.id} tarea={t} onToggle={toggleCompletar} onEdit={setEditando} />
+                <TareaRow key={t.id} tarea={t} onToggle={toggleCompletar} onEdit={setEditando} personas={personas} onAsignar={asignarContacto} />
               ))}
             </div>
           </div>
@@ -230,10 +240,12 @@ export function JuniorTareas() {
   );
 }
 
-function TareaRow({ tarea, onToggle, onEdit }: {
+function TareaRow({ tarea, onToggle, onEdit, personas, onAsignar }: {
   tarea: TareaConPersona;
   onToggle: (t: TareaConPersona) => void;
   onEdit: (t: TareaConPersona) => void;
+  personas: { id: number; nombre: string | null }[];
+  onAsignar: (tareaId: number, personaId: number) => void;
 }) {
   const hoyStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
   const vencida = !tarea.completada && tarea.fecha_vence && tarea.fecha_vence < hoyStr;
@@ -267,7 +279,20 @@ function TareaRow({ tarea, onToggle, onEdit }: {
                 👤 {tarea.persona.nombre ?? `persona ${tarea.persona_id}`}
               </span>
             )}
-            {!esCliente && <span style={{ color: '#0891b2' }}>↔ Transversal</span>}
+            {!esCliente && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ color: '#0891b2' }}>↔ Transversal</span>
+                <select
+                  defaultValue=""
+                  onChange={e => { if (e.target.value) onAsignar(tarea.id, Number(e.target.value)); }}
+                  title="Asignar esta tarea a un contacto"
+                  style={{ fontSize: 10, padding: '1px 4px', border: '1px solid #0891b2', borderRadius: 6, color: '#0891b2', background: 'white', cursor: 'pointer', maxWidth: 150 }}
+                >
+                  <option value="">👤 asignar a contacto…</option>
+                  {personas.map(p => <option key={p.id} value={p.id}>{p.nombre ?? `persona ${p.id}`}</option>)}
+                </select>
+              </span>
+            )}
             {tarea.prioridad < 5 && <span style={{ color: 'var(--red)' }}>★ Urgente</span>}
             {tarea.origen && tarea.origen !== 'manual' && (
               <span style={{ color: 'var(--accent)' }}>origen: {tarea.origen}</span>

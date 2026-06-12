@@ -9,7 +9,7 @@
  */
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { fetchTareasGlobalConPersona, TareaConPersona } from '../lib/queries';
+import { fetchTareasGlobalConPersona, TareaConPersona, actualizarTarea } from '../lib/queries';
 
 // Hook responsive: detecta viewport móvil para re-layout. Usado en este panel
 // porque el layout de 2 columnas (calendario + agenda) y los grids del modal
@@ -39,6 +39,8 @@ interface Agendamiento {
   notas: string | null;
   pendiente: boolean; // true = pendiente por agendar (sin fecha real), fuera del calendario
   persona?: { nombre: string } | null;
+  esTarea?: boolean;   // true = es una TAREA con fecha mostrada en el calendario (no una fila de agendamientos)
+  tareaId?: number;    // id real de la tarea (para completar / editar) cuando esTarea
 }
 
 interface Persona {
@@ -58,6 +60,7 @@ export function JuniorAgendamientos() {
   const isMobile = useIsMobile();
   const [agendamientos, setAgendamientos] = useState<Agendamiento[]>([]);
   const [backlogTareas, setBacklogTareas] = useState<TareaConPersona[]>([]);
+  const [tareasConFecha, setTareasConFecha] = useState<TareaConPersona[]>([]);
   const [personas, setPersonas] = useState<Persona[]>([]);
   const [cargando, setCargando] = useState(true);
   const [fechaSeleccionada, setFechaSeleccionada] = useState<Date>(new Date());
@@ -105,11 +108,12 @@ export function JuniorAgendamientos() {
 
     try {
       const tareasActivas = await fetchTareasGlobalConPersona(false);
-      // Filtramos las tareas que NO tienen fecha_vence o NO tienen hora_vence
-      const backlog = tareasActivas.filter(t => !t.fecha_vence || !t.hora_vence);
-      setBacklogTareas(backlog);
+      // Backlog = tareas SIN fecha (pendientes por agendar). Las que TIENEN fecha
+      // se muestran en el calendario su día (ver tareasConFecha), no acá.
+      setBacklogTareas(tareasActivas.filter(t => !t.fecha_vence));
+      setTareasConFecha(tareasActivas.filter(t => !!t.fecha_vence));
     } catch (e) {
-      console.error('Error cargando backlog', e);
+      console.error('Error cargando tareas', e);
     }
 
     const { data: pers } = await supabase
@@ -154,9 +158,27 @@ export function JuniorAgendamientos() {
     }
   };
 
-  // Agendamientos de un día específico
-  const getAgendamientosDelDia = (fechaStr: string) => {
-    return agendamientos.filter(a => a.fecha === fechaStr);
+  // Tarea con fecha → "cita" mostrable en el calendario (sin duplicar filas: es
+  // la misma tarea, solo se VE en el calendario). esTarea=true la distingue.
+  const tareaACita = (t: TareaConPersona): Agendamiento => ({
+    id: -t.id, tareaId: t.id, esTarea: true,
+    persona_id: t.persona_id,
+    titulo: t.titulo,
+    tipo: 'otro',
+    fecha: t.fecha_vence,
+    hora_inicio: t.hora_vence ?? null,
+    hora_fin: null,
+    direccion: null,
+    notas: (t as any).descripcion ?? null,
+    pendiente: false,
+    persona: t.persona ? { nombre: t.persona.nombre ?? '' } : null,
+  });
+
+  // Agendamientos + TAREAS con fecha de un día específico.
+  const getAgendamientosDelDia = (fechaStr: string): Agendamiento[] => {
+    const ags = agendamientos.filter(a => a.fecha === fechaStr && !a.pendiente);
+    const tars = tareasConFecha.filter(t => t.fecha_vence === fechaStr).map(tareaACita);
+    return [...ags, ...tars];
   };
 
   const formatearFechaDate = (dia: number) => {
@@ -407,7 +429,7 @@ export function JuniorAgendamientos() {
                           width: 5,
                           height: 5,
                           borderRadius: '50%',
-                          background: TIPO_META[e.tipo]?.color || '#cbd5e1'
+                          background: e.esTarea ? '#0891b2' : (TIPO_META[e.tipo]?.color || '#cbd5e1')
                         }}
                       />
                     ))}
@@ -503,24 +525,28 @@ export function JuniorAgendamientos() {
                       const meta = TIPO_META[a.tipo] ?? TIPO_META.otro;
                       return (
                         <div key={a.id} style={{
-                          border: '1px solid var(--border-soft)',
+                          border: a.esTarea ? '1px solid #0891b2' : '1px solid var(--border-soft)',
                           borderRadius: 10,
                           padding: 12,
-                          background: 'var(--bg-panel)',
+                          background: a.esTarea ? '#ecfeff' : 'var(--bg-panel)',
                           display: 'flex',
                           flexDirection: 'column',
                           gap: 6,
                           position: 'relative'
                         }}>
-                          <button onClick={() => iniciarEdit(a)} title="Editar fecha/hora" style={{ ...btnCancelEvent, right: isMobile ? 44 : 32, color: 'var(--text-muted)', fontSize: isMobile ? 16 : 12, padding: isMobile ? 4 : 0 }}>✏️</button>
-                          <button onClick={() => handleCancelar(a.id)} style={{ ...btnCancelEvent, fontSize: isMobile ? 22 : 16, padding: isMobile ? 4 : 0 }}>×</button>
+                          {a.esTarea ? (
+                            <button onClick={async () => { try { await actualizarTarea(a.tareaId!, { completada: true }); await cargar(); } catch (e: any) { alert(e.message); } }} title="Marcar tarea como hecha" style={{ ...btnCancelEvent, fontSize: isMobile ? 20 : 14, padding: isMobile ? 4 : 0, color: '#16a34a' }}>✓</button>
+                          ) : (<>
+                            <button onClick={() => iniciarEdit(a)} title="Editar fecha/hora" style={{ ...btnCancelEvent, right: isMobile ? 44 : 32, color: 'var(--text-muted)', fontSize: isMobile ? 16 : 12, padding: isMobile ? 4 : 0 }}>✏️</button>
+                            <button onClick={() => handleCancelar(a.id)} style={{ ...btnCancelEvent, fontSize: isMobile ? 22 : 16, padding: isMobile ? 4 : 0 }}>×</button>
+                          </>)}
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span style={{ fontSize: 12 }}>{meta.emoji}</span>
+                            <span style={{ fontSize: 12 }}>{a.esTarea ? '📋' : meta.emoji}</span>
                             <strong style={{ fontSize: 13, color: 'var(--text)' }}>{a.titulo}</strong>
                             <span style={{
                               padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 600,
-                              color: 'white', background: meta.color
-                            }}>{meta.label}</span>
+                              color: 'white', background: a.esTarea ? '#0891b2' : meta.color
+                            }}>{a.esTarea ? 'Tarea' : meta.label}</span>
                           </div>
 
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
