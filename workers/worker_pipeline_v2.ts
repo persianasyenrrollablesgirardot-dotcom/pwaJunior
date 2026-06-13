@@ -589,7 +589,23 @@ async function cicloReconciliarAmbito(): Promise<void> {
       const amb = ambDe.get((pr as any).persona_id);
       if (amb != null && (pr as any).ambito !== amb) { await sb.from('proyectos').update({ ambito: amb }).eq('id', (pr as any).id); fixProy++; }
     }
-    if (fixChats || fixProy) console.log(`[V2/RECONCILIAR-AMBITO] sincronizados ${fixChats} chat(s) + ${fixProy} proyecto(s) al ámbito de su persona`);
+    // Tarjetas con tipo_contacto STALE: la TarjetaV2 muestra tipo_contacto, que el
+    // agregador deriva del ámbito ((ambito && !=comercial) ? ambito : 'comercial').
+    // Si cambió el ámbito pero la tarjeta no se reconstruyó (cicloTarjetas a veces
+    // no la agarra), el módulo sigue mostrando el ámbito viejo. Forzamos el rebuild
+    // (input_hash=null + dirty) para que tome el tipo_contacto correcto.
+    const { data: tjs } = await sb.from('tarjeta').select('chat_id, persona_id, tipo_contacto');
+    let fixTarjetas = 0;
+    for (const t of tjs ?? []) {
+      const pid = (t as any).persona_id; if (!pid) continue;
+      const amb = ambDe.get(pid); if (amb == null) continue;
+      const esperado = (amb && amb !== 'comercial') ? amb : 'comercial';
+      if (((t as any).tipo_contacto ?? 'comercial') !== esperado) {
+        await sb.from('tarjeta').update({ input_hash: null, dirty: true } as any).eq('chat_id', (t as any).chat_id);
+        fixTarjetas++;
+      }
+    }
+    if (fixChats || fixProy || fixTarjetas) console.log(`[V2/RECONCILIAR-AMBITO] sincronizados ${fixChats} chat(s) + ${fixProy} proyecto(s) + ${fixTarjetas} tarjeta(s) stale al ámbito de su persona`);
   } catch (e: any) {
     console.error('[V2/RECONCILIAR-AMBITO]', e?.message);
   } finally {
